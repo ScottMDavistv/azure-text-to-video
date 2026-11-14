@@ -24,6 +24,8 @@ COPY provider_execution.py .
 COPY provider_credentials.py .
 COPY provider_status.py .
 COPY provider_cli.py .
+COPY fal_provider.py .
+COPY fal_config.py .
 
 EXPOSE 8000
 
