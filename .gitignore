@@ -34,3 +34,7 @@ Thumbs.db
 
 # Generated Bicep build artifacts
 /infra/main.json
+
+# Generated Bicep templates
+/infra/backend-app.json
+/infra/identity.json
