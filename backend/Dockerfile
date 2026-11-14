@@ -13,6 +13,9 @@ COPY worker.py .
 COPY job_queue.py .
 COPY consumer.py .
 COPY queue_lease.py .
+COPY stale_jobs.py .
+COPY worker_service.py .
+COPY worker_cli.py .
 
 EXPOSE 8000
 
