@@ -11,6 +11,7 @@ jobs:
   test-authentication:
     name: Verify Azure Login
     runs-on: ubuntu-latest
+    environment: dev-deployment
 
     steps:
       - name: Login to Azure using OIDC
