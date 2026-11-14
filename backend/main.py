@@ -80,6 +80,8 @@ def get_job(job_id: UUID):
 
 @app.post("/jobs/{job_id}/queue")
 def queue_job(job_id: UUID):
+    from azure.core.exceptions import AzureError
+    from job_queue import enqueue_job
     from jobs import transition_job
 
     try:
@@ -95,7 +97,19 @@ def queue_job(job_id: UUID):
             detail=str(exc),
         )
 
+    try:
+        enqueue_job(str(job_id))
+    except AzureError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Job marked queued, but queue delivery failed. "
+                "Dispatch recovery is required."
+            ),
+        ) from exc
+
     return {
         "job_id": str(job_id),
         "status": result["status"],
+        "dispatched": True,
     }

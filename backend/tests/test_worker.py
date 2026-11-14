@@ -41,13 +41,18 @@ def test_invalid_transition():
 def test_queue_endpoint():
     job_id = str(uuid4())
 
-    with patch("jobs.transition_job") as mock_transition:
+    with (
+        patch("jobs.transition_job") as mock_transition,
+        patch("job_queue.enqueue_job") as mock_enqueue,
+    ):
         mock_transition.return_value = {"status": "queued"}
 
         response = client.post(f"/jobs/{job_id}/queue")
 
         assert response.status_code == 200
         assert response.json()["status"] == "queued"
+        assert response.json()["dispatched"] is True
+        mock_enqueue.assert_called_once_with(job_id)
 
 
 def test_worker_completes_job():

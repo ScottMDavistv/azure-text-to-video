@@ -70,6 +70,10 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
               name: 'AZURE_JOBS_TABLE'
               value: 'VideoJobs'
             }
+            {
+              name: 'AZURE_JOBS_QUEUE'
+              value: 'textvideo-jobs'
+            }
           ]
           resources: {
             cpu: json('0.5')
