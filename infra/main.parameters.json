@@ -16,6 +16,9 @@
     },
     "containerRegistryName": {
       "value": "acrtextvideo1794671698"
+    },
+    "backendIdentityName": {
+      "value": "id-textvideo-api-dev"
     }
   }
 }

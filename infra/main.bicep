@@ -102,3 +102,18 @@ resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-07-01' =
 }
 
 output containerRegistryLoginServer string = containerRegistry.properties.loginServer
+
+@description('Managed identity used by FastAPI to pull container images')
+param backendIdentityName string = 'id-textvideo-api-dev'
+
+resource backendIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: backendIdentityName
+  location: location
+  tags: {
+    project: 'azure-text-to-video'
+    environment: 'development'
+  }
+}
+
+output backendIdentityId string = backendIdentity.id
+output backendIdentityPrincipalId string = backendIdentity.properties.principalId

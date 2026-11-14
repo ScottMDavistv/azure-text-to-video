@@ -36,4 +36,5 @@ jobs:
                 logAnalyticsName=log-textvideo-dev \
                 containerAppsEnvironmentName=cae-textvideo-dev \
                 containerRegistryName=acrtextvideo1794671698 \
+                backendIdentityName=id-textvideo-api-dev \
               --result-format FullResourcePayloads
