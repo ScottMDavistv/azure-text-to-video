@@ -1,0 +1,34 @@
+name: Test Azure OIDC Authentication
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test-authentication:
+    name: Verify Azure Login
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Login to Azure using OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify Azure subscription
+        run: |
+          az account show \
+            --query "{Subscription:name,SubscriptionId:id}" \
+            --output table
+
+      - name: Verify resource group access
+        run: |
+          az group show \
+            --name rg-textvideo-dev \
+            --query "{Name:name,Location:location,State:properties.provisioningState}" \
+            --output table
