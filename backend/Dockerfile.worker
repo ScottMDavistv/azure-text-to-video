@@ -1,0 +1,18 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy only top-level Python modules.
+# Do not copy local virtual environments, tests, or secrets.
+COPY *.py ./
+
+# Safe default: configuration inspection only.
+# Live consumption requires an explicit --run command.
+CMD ["python", "worker_runtime.py", "--check"]
