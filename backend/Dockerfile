@@ -8,6 +8,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py .
 COPY video_routes.py .
+COPY job_admin_auth.py .
+COPY job_management.py .
+COPY job_admin_routes.py .
 COPY storage.py .
 COPY jobs.py .
 COPY worker.py .

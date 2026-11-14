@@ -17,6 +17,9 @@ app = FastAPI(
 from video_routes import router as video_router
 app.include_router(video_router)
 
+from job_admin_routes import router as job_admin_router
+app.include_router(job_admin_router)
+
 
 class VideoJobRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=2000)
