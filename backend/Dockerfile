@@ -39,3 +39,15 @@ COPY render_pipeline.py .
 EXPOSE 8000
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+COPY api_access.py .
+
+COPY worker_retry.py .
+
+COPY render_budget.py .
+
+COPY operational_events.py .
+
+COPY runtime_security.py .
+
+COPY operations_cli.py .

@@ -94,7 +94,16 @@ def cancel_job_endpoint(
     authorize_job_admin(authorization)
 
     try:
-        return job_management.cancel_job(job_id)
+        result = job_management.cancel_job(job_id)
+
+        from operational_events import log_event
+        log_event(
+            "job_cancelled",
+            job_id=result["job_id"],
+            status="cancelled",
+        )
+
+        return result
     except (
         ValueError,
         job_management.JobNotFoundError,

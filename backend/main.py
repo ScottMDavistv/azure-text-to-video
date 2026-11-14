@@ -20,6 +20,9 @@ app.include_router(video_router)
 from job_admin_routes import router as job_admin_router
 app.include_router(job_admin_router)
 
+from api_access import JobApiAuthMiddleware
+app.add_middleware(JobApiAuthMiddleware)
+
 
 class VideoJobRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=2000)
