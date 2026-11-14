@@ -60,7 +60,23 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01'
         sharedKey: logAnalytics.listKeys().primarySharedKey
       }
     }
-    zoneRedundant: false
+  zoneRedundant: false
+      peerAuthentication: {
+        mtls: {
+          enabled: false
+        }
+      }
+      peerTrafficConfiguration: {
+        encryption: {
+          enabled: false
+        }
+      }
+      workloadProfiles: [
+        {
+          name: 'Consumption'
+          workloadProfileType: 'Consumption'
+        }
+      ]
   }
 }
 

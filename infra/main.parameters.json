@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "${AZURE_LOCATION}"
+    },
+    "storageAccountName": {
+      "value": "${AZURE_STORAGE_ACCOUNT}"
+    },
+    "logAnalyticsName": {
+      "value": "log-textvideo-dev"
+    },
+    "containerAppsEnvironmentName": {
+      "value": "${AZURE_CONTAINERAPPS_ENVIRONMENT}"
+    }
+  }
+}
