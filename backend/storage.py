@@ -31,3 +31,23 @@ def get_jobs_table_client():
         credential=get_credential(),
     )
     return service.get_table_client(JOBS_TABLE)
+
+
+def upload_rendered_video(job_id, content):
+    from uuid import UUID
+    from azure.storage.blob import ContentSettings
+
+    validated_id = str(UUID(str(job_id)))
+    blob_name = f"renders/{validated_id}.mp4"
+
+    blob = get_blob_container_client().get_blob_client(blob_name)
+
+    blob.upload_blob(
+        content,
+        overwrite=False,
+        content_settings=ContentSettings(
+            content_type="video/mp4"
+        ),
+    )
+
+    return blob_name

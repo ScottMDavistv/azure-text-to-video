@@ -53,6 +53,24 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
         {
           name: 'textvideo-api'
           image: backendImage
+          env: [
+            {
+              name: 'AZURE_CLIENT_ID'
+              value: backendIdentity.properties.clientId
+            }
+            {
+              name: 'AZURE_STORAGE_ACCOUNT'
+              value: 'sttextvideo1794671698'
+            }
+            {
+              name: 'AZURE_BLOB_CONTAINER'
+              value: 'videos'
+            }
+            {
+              name: 'AZURE_JOBS_TABLE'
+              value: 'VideoJobs'
+            }
+          ]
           resources: {
             cpu: json('0.5')
             memory: '1Gi'
