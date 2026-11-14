@@ -27,6 +27,8 @@ COPY provider_cli.py .
 COPY fal_provider.py .
 COPY fal_config.py .
 COPY fal_polling.py .
+COPY video_download.py .
+COPY video_delivery.py .
 
 EXPOSE 8000
 
