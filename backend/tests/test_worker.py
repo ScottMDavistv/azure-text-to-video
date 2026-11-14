@@ -42,28 +42,28 @@ def test_queue_endpoint():
     job_id = str(uuid4())
 
     with (
-        patch("jobs.transition_job") as mock_transition,
-        patch("job_queue.enqueue_job") as mock_enqueue,
+        patch("jobs.transition_job") as transition,
+        patch("job_queue.enqueue_job") as enqueue,
     ):
-        mock_transition.return_value = {"status": "queued"}
+        transition.return_value = {"status": "queued"}
 
         response = client.post(f"/jobs/{job_id}/queue")
 
         assert response.status_code == 200
         assert response.json()["status"] == "queued"
         assert response.json()["dispatched"] is True
-        mock_enqueue.assert_called_once_with(job_id)
+        enqueue.assert_called_once_with(job_id)
 
 
 def test_worker_completes_job():
     job_id = str(uuid4())
 
     with (
-        patch("worker.get_jobs_table_client") as table,
+        patch("worker.claim_job") as claim,
         patch("worker.transition_job") as transition,
         patch("worker.upload_rendered_video") as upload,
     ):
-        table.return_value.get_entity.return_value = {
+        claim.return_value = {
             "status": "queued",
             "prompt": "Cinematic ocean",
         }
@@ -76,18 +76,41 @@ def test_worker_completes_job():
         )
 
         assert result["status"] == "completed"
-        assert transition.call_count == 2
+        claim.assert_called_once_with(job_id)
+        transition.assert_called_once()
         upload.assert_called_once()
 
 
-def test_worker_rejects_unqueued_job():
+def test_worker_skips_claimed_job():
     job_id = str(uuid4())
 
-    with patch("worker.get_jobs_table_client") as table:
-        table.return_value.get_entity.return_value = {
-            "status": "created",
+    with (
+        patch("worker.claim_job") as claim,
+        patch("worker.upload_rendered_video") as upload,
+    ):
+        claim.return_value = None
+
+        result = process_job(
+            job_id,
+            lambda prompt: b"test",
+        )
+
+        assert result["status"] == "skipped"
+        upload.assert_not_called()
+
+
+def test_worker_records_failure():
+    job_id = str(uuid4())
+
+    with (
+        patch("worker.claim_job") as claim,
+        patch("worker.transition_job") as transition,
+    ):
+        claim.return_value = {
             "prompt": "Cinematic ocean",
         }
 
         with pytest.raises(ValueError):
-            process_job(job_id, lambda prompt: b"test")
+            process_job(job_id, lambda prompt: b"")
+
+        assert transition.call_args.args[1] == "failed"

@@ -38,3 +38,49 @@ def transition_job(job_id, next_status, **fields):
     )
 
     return update
+
+
+def claim_job(job_id):
+    """
+    Atomically claim a queued job using its Azure Table ETag.
+
+    Returns the original job entity when the claim succeeds.
+    Returns None if the job is already claimed or not queued.
+    """
+    from azure.core import MatchConditions
+    from azure.core.exceptions import HttpResponseError
+
+    table = get_jobs_table_client()
+
+    entity = table.get_entity(
+        partition_key="video",
+        row_key=str(job_id),
+    )
+
+    if entity["status"] != "queued":
+        return None
+
+    etag = entity.metadata["etag"]
+
+    from datetime import datetime, timezone
+
+    try:
+        table.update_entity(
+            entity={
+                "PartitionKey": "video",
+                "RowKey": str(job_id),
+                "status": "processing",
+                "startedAt": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+            },
+            mode=UpdateMode.MERGE,
+            etag=etag,
+            match_condition=MatchConditions.IfNotModified,
+        )
+    except HttpResponseError as exc:
+        if exc.status_code in (409, 412):
+            return None
+        raise
+
+    return entity

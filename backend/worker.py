@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
-from jobs import transition_job
-from storage import get_jobs_table_client, upload_rendered_video
+from jobs import claim_job, transition_job
+from storage import upload_rendered_video
 
 
 def utc_now():
@@ -10,30 +10,26 @@ def utc_now():
 
 def process_job(job_id, renderer):
     """
-    Process one queued job.
+    Process one queued video job.
 
     renderer(prompt) must return nonempty MP4 bytes.
 
-    This function is not started automatically.
-    A real video-generation provider must be connected.
+    Returns skipped when another worker has already claimed
+    the job or it is no longer queued.
     """
-    table = get_jobs_table_client()
+    if renderer is None:
+        raise ValueError("A renderer is required")
 
-    entity = table.get_entity(
-        partition_key="video",
-        row_key=str(job_id),
-    )
+    entity = claim_job(job_id)
 
-    if entity["status"] != "queued":
-        raise ValueError("Job must be queued before processing")
+    if entity is None:
+        return {
+            "job_id": str(job_id),
+            "status": "skipped",
+            "reason": "Job is not available for claiming",
+        }
 
     prompt = entity["prompt"]
-
-    transition_job(
-        job_id,
-        "processing",
-        startedAt=utc_now(),
-    )
 
     try:
         video_bytes = renderer(prompt)
