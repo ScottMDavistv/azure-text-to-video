@@ -29,6 +29,8 @@ COPY fal_config.py .
 COPY fal_polling.py .
 COPY video_download.py .
 COPY video_delivery.py .
+COPY fal_renderer.py .
+COPY render_pipeline.py .
 
 EXPOSE 8000
 
