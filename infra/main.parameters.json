@@ -13,6 +13,9 @@
     },
     "containerAppsEnvironmentName": {
       "value": "${AZURE_CONTAINERAPPS_ENVIRONMENT}"
+    },
+    "containerRegistryName": {
+      "value": "acrtextvideo1794671698"
     }
   }
 }

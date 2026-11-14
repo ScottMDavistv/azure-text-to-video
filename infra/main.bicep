@@ -81,3 +81,24 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01'
 }
 
 output containerAppsEnvironmentId string = containerAppsEnvironment.id
+
+@description('Private Azure Container Registry for backend images')
+param containerRegistryName string = 'acrtextvideo1794671698'
+
+resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+  name: containerRegistryName
+  location: location
+  sku: {
+    name: 'Basic'
+  }
+  tags: {
+    project: 'azure-text-to-video'
+    environment: 'development'
+  }
+  properties: {
+    adminUserEnabled: false
+    publicNetworkAccess: 'Enabled'
+  }
+}
+
+output containerRegistryLoginServer string = containerRegistry.properties.loginServer
