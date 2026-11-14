@@ -16,6 +16,8 @@ COPY queue_lease.py .
 COPY stale_jobs.py .
 COPY worker_service.py .
 COPY worker_cli.py .
+COPY provider_config.py .
+COPY video_provider.py .
 
 EXPOSE 8000
 
