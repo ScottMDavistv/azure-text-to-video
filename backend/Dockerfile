@@ -11,6 +11,7 @@ COPY storage.py .
 COPY jobs.py .
 COPY worker.py .
 COPY job_queue.py .
+COPY consumer.py .
 
 EXPOSE 8000
 
