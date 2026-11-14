@@ -63,10 +63,11 @@ def test_concurrent_claim_conflict():
     table = MagicMock()
     table.get_entity.return_value = make_entity("queued")
 
-    table.update_entity.side_effect = HttpResponseError(
+    conflict = HttpResponseError(
         message="ETag mismatch",
-        status_code=412,
     )
+    conflict.status_code = 412
+    table.update_entity.side_effect = conflict
 
     with patch("jobs.get_jobs_table_client", return_value=table):
         result = claim_job(job_id)

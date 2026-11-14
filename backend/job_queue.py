@@ -4,7 +4,7 @@ from uuid import UUID
 
 from azure.storage.queue import QueueClient
 
-from storage import STORAGE_ACCOUNT, get_credential
+from storage import STORAGE_ACCOUNT, get_credential, get_jobs_table_client
 
 
 QUEUE_NAME = os.getenv("AZURE_JOBS_QUEUE", "textvideo-jobs")
@@ -52,7 +52,6 @@ def record_poison_message(message, reason):
     from azure.core.exceptions import ResourceNotFoundError
     from azure.data.tables import UpdateMode
 
-    from storage import get_jobs_table_client
 
     now = datetime.now(timezone.utc).isoformat()
     table = get_jobs_table_client()
