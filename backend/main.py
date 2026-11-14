@@ -113,3 +113,41 @@ def queue_job(job_id: UUID):
         "status": result["status"],
         "dispatched": True,
     }
+
+
+@app.post("/jobs/{job_id}/retry-dispatch")
+def retry_job_dispatch(job_id: UUID):
+    from azure.core.exceptions import AzureError
+    from job_queue import enqueue_job
+
+    try:
+        entity = get_jobs_table_client().get_entity(
+            partition_key="video",
+            row_key=str(job_id),
+        )
+    except ResourceNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Video job not found",
+        )
+
+    if entity["status"] != "queued":
+        raise HTTPException(
+            status_code=409,
+            detail="Only queued jobs can be redispatched",
+        )
+
+    try:
+        enqueue_job(str(job_id))
+    except AzureError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Queue delivery failed",
+        ) from exc
+
+    return {
+        "job_id": str(job_id),
+        "status": "queued",
+        "dispatched": True,
+        "recovery": True,
+    }
