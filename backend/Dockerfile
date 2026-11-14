@@ -21,6 +21,9 @@ COPY video_provider.py .
 COPY render_request.py .
 COPY provider_errors.py .
 COPY provider_execution.py .
+COPY provider_credentials.py .
+COPY provider_status.py .
+COPY provider_cli.py .
 
 EXPOSE 8000
 
