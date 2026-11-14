@@ -35,4 +35,4 @@ jobs:
                 storageAccountName=sttextvideo1794671698 \
                 logAnalyticsName=log-textvideo-dev \
                 containerAppsEnvironmentName=cae-textvideo-dev \
-              --result-format ResourceIdOnly
+              --result-format FullResourcePayloads
