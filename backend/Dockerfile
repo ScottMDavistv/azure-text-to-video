@@ -18,6 +18,9 @@ COPY worker_service.py .
 COPY worker_cli.py .
 COPY provider_config.py .
 COPY video_provider.py .
+COPY render_request.py .
+COPY provider_errors.py .
+COPY provider_execution.py .
 
 EXPOSE 8000
 
