@@ -8,6 +8,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py .
 COPY storage.py .
+COPY jobs.py .
+COPY worker.py .
 
 EXPOSE 8000
 

@@ -76,3 +76,26 @@ def get_job(job_id: UUID):
         "status": entity["status"],
         "created_at": entity["createdAt"],
     }
+
+
+@app.post("/jobs/{job_id}/queue")
+def queue_job(job_id: UUID):
+    from jobs import transition_job
+
+    try:
+        result = transition_job(str(job_id), "queued")
+    except ResourceNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Video job not found",
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        )
+
+    return {
+        "job_id": str(job_id),
+        "status": result["status"],
+    }
