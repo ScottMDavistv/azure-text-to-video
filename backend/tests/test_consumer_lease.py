@@ -20,6 +20,7 @@ def make_message(attempts=1):
 
 def make_lease(receipt="renewed-receipt"):
     lease = MagicMock()
+    lease.assert_healthy = MagicMock()
     lease.pop_receipt = receipt
     lease.__enter__.return_value = lease
     lease.__exit__.return_value = False
