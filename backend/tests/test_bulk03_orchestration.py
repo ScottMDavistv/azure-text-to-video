@@ -138,3 +138,9 @@ def test_dashboard_reports_cost_wait_and_actions():
     assert result[0]["estimated_cents"] == 250
     assert result[0]["waiting_seconds"] >= 14 * 60
     assert result[0]["actions"] == ["cancel"]
+
+
+def test_reconsidered_eligible_job_is_scheduled():
+    item = job(uid())
+    item["status"] = "eligible"
+    assert choose_next([item])["jobId"] == item["jobId"]
