@@ -28,3 +28,48 @@
 
 ### No changes executed in Azure
 Entra app creation/consent and provisioned user mapping require authorized directory privileges and a validated frontend configuration. The GitHub audit identity intentionally has neither.
+
+
+## Verified development application registration (November 15, 2026)
+
+The operator created and confirmed this single-tenant Entra API app:
+
+- Display name: `Video Render Tool API (dev)`
+- Application (client) ID: `a5a09b74-aead-455f-9de7-9b844c8a8465`
+- Directory (tenant) ID: `773e9051-c546-4b75-9432-90f4f8242660`
+- Application ID URI: `api://a5a09b74-aead-455f-9de7-9b844c8a8465`
+- Enabled delegated scope: `access_as_user` (Admins only consent)
+- Redirect URI and frontend client registration: pending
+
+### Proposed values for a future approved API deployment
+
+These are **non-secret proposed deployment settings**, NOT applied to Azure:
+
+```text
+PROJECT_OIDC_ISSUER=https://login.microsoftonline.com/773e9051-c546-4b75-9432-90f4f8242660/v2.0
+PROJECT_OIDC_JWKS_URL=https://login.microsoftonline.com/773e9051-c546-4b75-9432-90f4f8242660/discovery/v2.0/keys
+PROJECT_OIDC_AUDIENCE=api://a5a09b74-aead-455f-9de7-9b844c8a8465
+ENABLE_PROJECT_ROUTES=false
+ENABLE_PAID_FAL_WORKER=false
+```
+
+**Before deployment, inspect a genuine test API access token's `aud` claim**;
+Entra may issue the client GUID rather than the `api://` URI. Configure only
+the exact actual audience after verification, and keep routes disabled until
+delegated scope, tenant, signature and user mapping tests pass. Do not upload
+access tokens to GitHub or copy them into chat.
+
+### Code changes (B1)
+
+- `project_oidc.py`: cryptographic RS256 validation, single-tenant issuer and
+  JWKS binding, `tid` matching, exact delegated `scp=access_as_user`, and
+  active internal user mapping.
+- `project_api_routes.py`: invalid identity = 401, insufficient delegated
+  permission = 403; project membership authorization stays server-side.
+- `tests/test_project_api_security.py`: signed RSA test tokens; wrong tenant,
+  wrong audience, wrong issuer, expired/modified token, app-role-only token,
+  unmapped identity, revoked membership, cross-project access.
+
+**Still blocked:** administrator-provisioned user mappings, actual frontend
+test sign-in, real issued access-token validation and deployment approval.
+No changes were made to live Container Apps configuration or FAL operations.
