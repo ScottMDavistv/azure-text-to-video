@@ -22,6 +22,8 @@ def run_stage_a_once(*, enabled=False, project_ids, held_table,
         raise StageABlocked("Stage A reconciliation disabled")
     if not isinstance(project_ids, (tuple, list)) or len(project_ids) > 50:
         raise StageABlocked("Trusted bounded project list required")
+    if queue_client is not None and idempotent_consumer_verified is not True:
+        raise StageABlocked('Verified idempotent notification consumer required')
     # Validate the entire list BEFORE any writes.
     for project_id in project_ids:
         check_id(project_id)
