@@ -52,7 +52,11 @@ def submit_once(table, job_id, prompt, client, *, verify_reservation):
         raise PaidSubmissionBlocked("Unexpected FAL submission response")
 
     request_id = response.get("request_id")
-    record_provider_request_id(table, job_id, request_id)
+    record_provider_request_id(
+        table, job_id, request_id,
+        status_url=response.get("status_url"),
+        response_url=response.get("response_url"),
+    )
     return response
 
 
