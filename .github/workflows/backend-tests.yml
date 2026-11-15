@@ -70,10 +70,20 @@ jobs:
                       "TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;")
           svc = TableServiceClient.from_connection_string(endpoint)
           name = "Health" + uuid.uuid4().hex[:16]
-          svc.create_table(name)
-          svc.delete_table(name)
+          import time
+          last_error = None
+          for attempt in range(40):
+              try:
+                  svc.create_table(name)
+                  svc.delete_table(name)
+                  print("Azurite Table API ready")
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(1)
+          else:
+              raise RuntimeError("Azurite Table API did not become ready") from last_error
           svc.close()
-          print("Azurite Table API ready")
           PY
 
       - name: Run Azure SDK finance contention and crash-recovery tests
