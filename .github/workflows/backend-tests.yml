@@ -72,8 +72,11 @@ jobs:
         run: |
           docker run --rm -d --name render-table-ci \
             -p 10002:10002 \
-            mcr.microsoft.com/azure-storage/azurite:latest \
-            azurite --tableHost 0.0.0.0 --tablePort 10002
+            mcr.microsoft.com/azure-storage/azurite:latest
+          sleep 2
+          docker ps --filter name=render-table-ci
+          docker logs render-table-ci
+          test "$(docker inspect -f '{{.State.Running}}' render-table-ci)" = "true"
           python - <<'PY'
           import socket, time
           for attempt in range(40):
