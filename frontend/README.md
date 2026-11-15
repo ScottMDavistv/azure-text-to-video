@@ -15,8 +15,7 @@ Use an Entra administrator account in the same tenant as the existing API.
    - Supported accounts: **Single tenant** (Starving Man Design LLC)
    - Redirect URI platform: **Single-page application (SPA)**
    - Redirect URI: **`http://localhost:5173`**
-3. Register. Record the **Application (client) ID** for this *frontend*
-   registration. It must differ from the API application ID.
+3. Register. Verified frontend SPA client ID: `6d5e9e96-8be6-445c-9176-3b67d020612c` (distinct from the API client ID).
 4. Under **Authentication**, verify the SPA platform contains
    `http://localhost:5173`. Do not turn on implicit grant or add a client
    secret. Do not authorize the legacy GitHub automation app as a frontend.
@@ -41,7 +40,7 @@ cp .env.example .env.local
 Edit **frontend/.env.local** and set ONLY the public SPA application ID:
 
 ```text
-VITE_ENTRA_SPA_CLIENT_ID=<frontend-spa-client-id>
+VITE_ENTRA_SPA_CLIENT_ID=6d5e9e96-8be6-445c-9176-3b67d020612c
 ```
 
 Then run:
