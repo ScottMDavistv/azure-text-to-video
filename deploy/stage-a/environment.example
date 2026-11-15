@@ -1,0 +1,9 @@
+# Safe, non-billable placeholder values ONLY; do not populate secrets here.
+VIDEO_PROVIDER=disabled
+ENABLE_PAID_FAL_WORKER=false
+ENABLE_PROJECT_ROUTES=false
+# Configure OIDC through trusted Azure deployment settings once validated.
+# PROJECT_OIDC_ISSUER=
+# PROJECT_OIDC_AUDIENCE=
+# PROJECT_OIDC_JWKS_URL=
+# FAL_KEY and FAL_API_KEY must be absent from this environment.
