@@ -7,11 +7,11 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
+from azure.core.exceptions import HttpResponseError, ServiceResponseError
 from azure.data.tables import TableServiceClient
 
 from finance_controls import (
-    FinanceDenied, reserve, scope_key, settle, PARTITION,
+    FinanceDenied, AmbiguousCommit, reserve, scope_key, settle, PARTITION,
 )
 
 AZURITE_CONNECTION = (
@@ -79,7 +79,7 @@ def test_azurite_concurrent_reservations_and_limit_invariant(table):
     with ThreadPoolExecutor(max_workers=8) as pool:
         outcomes = list(pool.map(submit, jobs))
     successful = sum(outcomes)
-    assert 0 <= successful <= 2
+    assert successful == 2
     for key in ("global:fal", scope_key(project)):
         limit = entity(table, key)
         assert limit["reservedCents"] == successful * 40
@@ -152,13 +152,13 @@ class LostResponse:
         return self.table.get_entity(**kwargs)
     def submit_transaction(self, actions):
         self.table.submit_transaction(actions)
-        raise HttpResponseError(message="commit succeeded but response lost")
+        raise ServiceResponseError(message="commit succeeded but response lost")
 
 
 def test_azurite_lost_reservation_response_requires_reconciliation(table):
     project, job = uid(), uid()
     seed(table, project, 100)
-    with pytest.raises(FinanceDenied, match="reconciliation required"):
+    with pytest.raises(AmbiguousCommit, match="reconcile before retry"):
         reserve(LostResponse(table), project, job, 30)
     assert entity(table, "reservation:" + job)["state"] == "reserved"
     with pytest.raises(FinanceDenied):
@@ -179,3 +179,35 @@ def test_azurite_lost_settlement_response_requires_reconciliation(table):
         settle(table, job, 35, provider_receipt=receipt,
                verify_provider_receipt=verified)
     assert entity(table, "global:fal")["spentCents"] == 35
+
+
+def test_azurite_all_jobs_succeed_under_contention_with_capacity(table):
+    project = uid()
+    n = 24
+    seed(table, project, n * 100)
+    jobs = [uid() for _ in range(n)]
+
+    def submit(job):
+        reserve(table, project, job, 100)
+        return True
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        outcomes = list(pool.map(submit, jobs))
+
+    assert all(outcomes)
+    assert entity(table, "global:fal")["reservedCents"] == n * 100
+    assert entity(table, scope_key(project))["reservedCents"] == n * 100
+    assert len([e for e in table.query_entities(
+        "PartitionKey eq 'render-finance-v1' and RowKey ge 'reservation:' and RowKey lt 'reservation;'"
+    )]) == n
+
+
+def test_azurite_money_ceiling_is_sdk_compatible(table):
+    from finance_controls import check_money, MAX_CENTS
+    assert MAX_CENTS == 2**31 - 1
+    project = uid()
+    seed(table, project, MAX_CENTS)
+    reserve(table, project, uid(), MAX_CENTS)
+    assert entity(table, "global:fal")["reservedCents"] == MAX_CENTS
+    with pytest.raises(FinanceDenied):
+        check_money(MAX_CENTS + 1)
