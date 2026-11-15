@@ -80,6 +80,9 @@ jobs:
       - name: Test first-user onboarding security and replay
         run: python -m pytest -q backend/tests/test_first_user_onboarding.py
 
+      - name: Test restricted independent-administrator enrollment
+        run: python -m pytest -q backend/tests/test_restricted_onboarding.py
+
       - name: Test Stage B Entra configuration preflight
         run: python -m pytest -q backend/tests/test_entra_configuration.py
 
