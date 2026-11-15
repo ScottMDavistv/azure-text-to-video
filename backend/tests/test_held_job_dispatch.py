@@ -159,3 +159,58 @@ def test_reconcile_requires_audit_before_state_change():
                 held, finance, jid, record_audit=lambda *a: False,
             )
     held.update_entity.assert_not_called()
+
+
+def test_atomic_reservation_recovery_audits_in_single_transaction():
+    from held_job_dispatch import reconcile_confirmed_reservation_atomic
+    project, jid = uid(), uid()
+    held, finance = MagicMock(), MagicMock()
+    held.get_entity.return_value = Record(
+        PartitionKey="fal-held-jobs", RowKey=jid,
+        status="reserving", projectId=project, estimatedCents=100,
+    )
+    with patch("finance_controls.load", return_value={
+        "projectId": project, "state": "reserved", "reservedCents": 100,
+    }):
+        result = reconcile_confirmed_reservation_atomic(held, finance, jid)
+    assert result == "reserved"
+    ops = held.submit_transaction.call_args.args[0]
+    assert [op[0] for op in ops] == ["update", "create"]
+    assert ops[0][1]["status"] == "reserved"
+    assert ops[1][1]["RowKey"] == "audit:reserve:" + jid
+    assert ops[0][2]["etag"] == 'W/"test"'
+    finance.submit_transaction.assert_not_called()
+
+
+def test_atomic_reservation_recovery_fails_without_matching_evidence():
+    from held_job_dispatch import reconcile_confirmed_reservation_atomic
+    project, jid = uid(), uid()
+    held, finance = MagicMock(), MagicMock()
+    held.get_entity.return_value = Record(
+        PartitionKey="fal-held-jobs", RowKey=jid,
+        status="reserving", projectId=project, estimatedCents=100,
+    )
+    with patch("finance_controls.load", return_value={
+        "projectId": project, "state": "reserved", "reservedCents": 70,
+    }):
+        with pytest.raises(HeldJobDenied):
+            reconcile_confirmed_reservation_atomic(held, finance, jid)
+    held.submit_transaction.assert_not_called()
+    finance.submit_transaction.assert_not_called()
+
+
+def test_atomic_reservation_recovery_replay_reads_existing_audit():
+    from held_job_dispatch import reconcile_confirmed_reservation_atomic
+    project, jid = uid(), uid()
+    held, finance = MagicMock(), MagicMock()
+    held.get_entity.side_effect = [
+        Record(status="reserved", projectId=project, estimatedCents=100),
+        Record(eventType="reservation_reconciled"),
+    ]
+    with patch("finance_controls.load", return_value={
+        "projectId": project, "state": "reserved", "reservedCents": 100,
+    }):
+        assert reconcile_confirmed_reservation_atomic(
+            held, finance, jid,
+        ) == "already_reserved"
+    held.submit_transaction.assert_not_called()
