@@ -1,0 +1,75 @@
+name: Backend Python Tests
+
+on:
+  push:
+    branches:
+      - 'feature/**'
+      - main
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-tests.yml'
+  pull_request:
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-tests:
+    name: Backend tests (Python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONPATH: backend
+      VIDEO_PROVIDER: disabled
+      FAL_KEY: ''
+      FAL_API_KEY: ''
+      AZURE_CLIENT_ID: ''
+      AZURE_TENANT_ID: ''
+      AZURE_SUBSCRIPTION_ID: ''
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
+
+      - name: Check Python syntax
+        run: python -m compileall -q backend
+
+      - name: Test project foundation
+        run: python -m pytest -q backend/tests/test_project_foundation.py
+
+      - name: Test financial controls
+        run: python -m pytest -q backend/tests/test_finance_controls.py
+
+      - name: Test FAL submission safeguards
+        run: python -m pytest -q backend/tests/test_fal_safe_submission.py
+
+      - name: Run all backend regression tests
+        run: python -m pytest -q backend/tests
+
+      - name: Summarize test outcome
+        if: always()
+        run: |
+          echo '## Backend CI' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Python: 3.12' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Provider: disabled' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Azure credentials: not supplied' >> "$GITHUB_STEP_SUMMARY"
+          echo '- No deployment or paid rendering step exists in this workflow.' >> "$GITHUB_STEP_SUMMARY"
