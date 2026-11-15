@@ -97,6 +97,10 @@ jobs:
         shell: bash
         run: bash deploy/stage-b/01-readonly-inventory.sh
 
+      - name: Audit API and worker identity data roles (read-only)
+        shell: bash
+        run: bash deploy/stage-b/02-identity-rbac-audit.sh
+
       - name: Audit summary
         if: always()
         shell: bash
