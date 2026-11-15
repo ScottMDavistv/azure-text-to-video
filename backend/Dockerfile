@@ -68,3 +68,8 @@ COPY fal_billing_reconciliation.py .
 COPY reconciliation_runner.py .
 
 COPY paid_job_finalization.py .
+
+# Stage A non-billable recovery modules; not registered as entrypoints.
+COPY distributed_fairness.py stage_a_dispatch.py stage_a_coordinator.py .
+COPY stage_a_runtime.py stage_a_runtime_cli.py notification_inbox.py .
+COPY paid_job_finalization.py .
