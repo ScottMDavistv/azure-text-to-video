@@ -106,6 +106,14 @@ resource worker 'Microsoft.App/jobs@2024-03-01' = {
 
           env: [
             {
+              name: 'FAL_KEY'
+              secretRef: 'fal-api-key'
+            }
+            {
+              name: 'FAL_MODEL_ID'
+              value: 'fal-ai/kling-video/v3/pro/text-to-video'
+            }
+            {
               name: 'AZURE_CLIENT_ID'
               value: identity.properties.clientId
             }
