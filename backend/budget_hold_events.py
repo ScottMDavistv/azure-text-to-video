@@ -41,6 +41,12 @@ def on_budget_approval(held_table, finance_table, outbox_table,
     Production event consumer must read the durable approval record
     itself before invoking. Reconciliation handles crash-after-approval.
     """
+    from finance_controls import load, scope_key
+    request = load(finance_table, 'increase:' + request_id)
+    if (request.get('status') != 'approved' or
+            request.get('scope') != scope_key(project_id) or
+            request.get('requesterId') != owner_id):
+        raise OutboxError('Budget approval not verified in durable ledger')
     result = reconsider_after_budget_approval(
         held_table, finance_table, project_id,
     )
