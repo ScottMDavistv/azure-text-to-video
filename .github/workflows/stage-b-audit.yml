@@ -6,6 +6,8 @@ on:
       - feature/bulk-03-integrated
     paths:
       - .github/workflows/stage-b-audit.yml
+      - deploy/stage-b/01-readonly-inventory.sh
+      - deploy/stage-b/02-identity-rbac-audit.sh
   workflow_dispatch:
 
 permissions:
