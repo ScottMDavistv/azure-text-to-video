@@ -28,7 +28,7 @@ def _time(value):
 
 
 def _eligible(job):
-    if job.get("status") != "held":
+    if job.get("status") not in ("held", "eligible"):
         return False
     if job.get("holdReason") not in ("project_budget", "global_fal_limit"):
         return False
