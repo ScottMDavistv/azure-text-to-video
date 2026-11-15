@@ -21,14 +21,19 @@ def test_hold_notice_is_deduplicated_by_job_id():
 
 
 def test_approval_calls_reconsideration_and_notifier():
+    project, owner = uid(), uid()
     with (
+        patch('finance_controls.load', return_value={
+            'status': 'approved', 'scope': 'project:' + project,
+            'requesterId': owner,
+        }),
         patch("budget_hold_events.reconsider_after_budget_approval",
               return_value={"eligible": 2}) as rescan,
         patch("budget_hold_events.emit_approval_notice") as notify,
     ):
         result = on_budget_approval(
             MagicMock(), MagicMock(), MagicMock(),
-            request_id=uid(), project_id=uid(), owner_id=uid(),
+            request_id=uid(), project_id=project, owner_id=owner,
         )
     assert result == {"eligible": 2}
     notify.assert_called_once()
@@ -50,3 +55,22 @@ def test_reconcile_held_job_notifications():
         )
     assert result == {"new_notifications": 1}
     notify.assert_called_once()
+
+
+def test_unapproved_budget_does_not_reconsider():
+    import pytest
+    from financial_outbox import OutboxError
+    project, owner = uid(), uid()
+    with (
+        patch('finance_controls.load', return_value={
+            'status': 'pending', 'scope': 'project:' + project,
+            'requesterId': owner,
+        }),
+        patch('budget_hold_events.reconsider_after_budget_approval') as reconsider,
+    ):
+        with pytest.raises(OutboxError):
+            on_budget_approval(
+                MagicMock(), MagicMock(), MagicMock(),
+                request_id=uid(), project_id=project, owner_id=owner,
+            )
+    reconsider.assert_not_called()
