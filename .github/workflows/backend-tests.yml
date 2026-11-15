@@ -80,6 +80,7 @@ jobs:
       - name: Test Stage A orchestration and fail-closed defaults
         run: |
           python -m pytest -q backend/tests/test_stage_a_integration.py
+          python -m pytest -q backend/tests/test_stage_a_consumers.py
           python -m stage_a_runtime_cli --check
           if ENABLE_PAID_FAL_WORKER=true python -m stage_a_runtime_cli --check; then
             echo "unsafe paid flag was accepted" >&2
@@ -96,7 +97,7 @@ jobs:
             render-stage-a-ci:local python -m stage_a_runtime_cli --check
           docker run --rm --network none \
             -e VIDEO_PROVIDER=disabled \
-            render-stage-a-ci:local python -c "import main, stage_a_coordinator, notification_inbox, paid_job_finalization; assert main.app"
+            render-stage-a-ci:local python -c "import main, stage_a_coordinator, notification_inbox, notification_consumer, paid_job_recovery, paid_job_finalization; assert main.app"
 
       - name: Test concurrency simulation
         run: python -m pytest -q backend/tests/test_finance_concurrency.py
