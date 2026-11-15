@@ -131,3 +131,64 @@ def reconcile_confirmed_reservation(held_table, finance_table, job_id,
     _change(held_table, held, "reserved",
             reconciliation="confirmed_finance_reservation")
     return "reserved"
+
+
+def reconcile_confirmed_reservation_atomic(held_table, finance_table, job_id):
+    """Atomically audit and confirm a *pre-existing* financial reservation.
+
+    Both the held job row and the audit row use PARTITION, so an Azure
+    Table batch can ETag-update the job and create its audit in one
+    transaction. Never reserves funds or contacts the provider.
+    """
+    from finance_controls import load, check_id
+    check_id(job_id)
+    held = held_table.get_entity(partition_key=PARTITION, row_key=job_id)
+    try:
+        reservation = load(finance_table, "reservation:" + job_id)
+    except FinanceDenied as exc:
+        raise HeldJobDenied("Financial reservation not confirmed") from exc
+    if (reservation.get("state") != "reserved" or
+            reservation.get("projectId") != held.get("projectId") or
+            reservation.get("reservedCents") != held.get("estimatedCents")):
+        raise HeldJobDenied("Financial reservation does not match held job")
+    if held.get("status") == "reserved":
+        # A prior committed atomic update is sufficient proof of state
+        # transition, but verify the audit record was persisted as well.
+        audit = held_table.get_entity(
+            partition_key=PARTITION, row_key="audit:reserve:" + job_id,
+        )
+        if audit.get("eventType") != "reservation_reconciled":
+            raise HeldJobDenied("Reserved state missing reconciliation audit")
+        return "already_reserved"
+    if held.get("status") != "reserving":
+        raise HeldJobDenied("Hold not in reconcilable state")
+    etag = getattr(held, "metadata", {}).get("etag")
+    if not etag:
+        raise HeldJobDenied("Held job concurrency ETag required")
+    timestamp = datetime.now(timezone.utc).isoformat()
+    updated = {
+        **dict(held), "status": "reserved",
+        "reconciliation": "confirmed_finance_reservation",
+        "updatedAt": timestamp,
+    }
+    audit = {
+        "PartitionKey": PARTITION,
+        "RowKey": "audit:reserve:" + job_id,
+        "eventType": "reservation_reconciled",
+        "jobId": job_id,
+        "projectId": held["projectId"],
+        "amountCents": held["estimatedCents"],
+        "createdAt": timestamp,
+    }
+    try:
+        held_table.submit_transaction([
+            ("update", updated, {
+                "mode": UpdateMode.REPLACE,
+                "etag": etag,
+                "match_condition": MatchConditions.IfNotModified,
+            }),
+            ("create", audit),
+        ])
+    except HttpResponseError as exc:
+        raise HeldJobDenied("Conditional reconciliation failed; reread evidence") from exc
+    return "reserved"
