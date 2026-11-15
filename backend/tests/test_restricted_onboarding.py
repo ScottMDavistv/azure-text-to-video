@@ -237,3 +237,26 @@ def test_cli_rejects_group_writable_admin_policy(setup, tmp_path):
     policy.chmod(0o666)
     with pytest.raises(ValueError):
         load_admin_allowlist(policy)
+
+
+def test_propose_and_approval_retries_are_idempotent(setup):
+    table, _, kw, token = flow(setup)
+    initial = datetime.now(timezone.utc)
+    propose(table, kw, token, now=initial)
+    approve(table, kw, token, now=initial + timedelta(minutes=1))
+    propose(table, kw, token, now=initial + timedelta(minutes=2))
+    approve(table, kw, token, now=initial + timedelta(minutes=3))
+    assert len(table.records) == 2
+
+
+def test_policy_revocation_blocks_enrollment(setup):
+    table, _, kw, token = flow(setup)
+    propose(table, kw, token)
+    approve(table, kw, token)
+    _, factory, allowed, digest = setup
+    with pytest.raises(OnboardingBlocked, match="no longer authorized"):
+        execute_enrollment(
+            table, **{**kw, "allowed_admin_digests": frozenset([digest("admin-a")])},
+            target_token=token("target"), operator_token=token("admin-a"),
+        )
+    assert len(table.records) == 2
