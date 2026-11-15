@@ -38,6 +38,12 @@ def build_parser():
     )
 
     operation.add_argument(
+        "--verify-fal",
+        action="store_true",
+        help="Perform one read-only Fal queue status request",
+    )
+
+    operation.add_argument(
         "--run",
         action="store_true",
         help="Start explicitly authorized queue consumption",
@@ -173,6 +179,10 @@ def run_with_signals(
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.verify_fal:
+        from fal_auth_diagnostic import main as verify_fal
+        return verify_fal()
 
     if args.check:
         print(
