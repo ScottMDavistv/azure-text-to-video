@@ -2,8 +2,9 @@
 
 Status: **Not deployed. Not enabled. Not integrated into the live worker.**
 
-This branch is based on Bulk 01 because the Bulk 02 financial branch
-was only available as uncommitted Codespaces files when the work began.
+This integration branch is based on Bulk 02 commit 59c747c.
+The financial-control modules are now present but not connected to the
+FAL worker or the guarded submission verifier.
 
 ## Included
 
@@ -18,21 +19,20 @@ was only available as uncommitted Codespaces files when the work began.
 
 ## Critical remaining work
 
-1. Base/integrate the changes on the pushed Bulk 02 branch.
-2. Implement trusted project/job authorization and durable reservation
+1. Implement trusted project/job authorization and durable reservation
    verification (the callback is a seam, not financial enforcement).
-3. Wire guarded submission into actual worker path; currently the
+2. Wire guarded submission into actual worker path; currently the
    original FalVideoRenderer still calls submit_and_wait directly.
-4. Design recovery of submitted work after worker crash without
+3. Design recovery of submitted work after worker crash without
    duplicate provider submission; persist validated status/response
    URLs or derive them safely from trusted identifiers.
-5. Verify FAL cost reconciliation and actual charges, including
+4. Verify FAL cost reconciliation and actual charges, including
    the possible actual-cost-over-reservation case.
-6. Implement held-job persistence, cancellation, priority fairness,
+5. Implement held-job persistence, cancellation, priority fairness,
    anti-starvation, and automatic reconsideration.
-7. Azure Table concurrency and FAL simulated integration tests.
-8. Update backend Dockerfiles when activating any new module.
-9. Keep live rendering flags disabled until end-to-end approval.
+6. Azure Table concurrency and FAL simulated integration tests.
+7. Update backend Dockerfiles when activating any new module.
+8. Keep live rendering flags disabled until end-to-end approval.
 
 No main branch changes, Azure deployments, paid requests, or
 automatic activation are performed by this code.
