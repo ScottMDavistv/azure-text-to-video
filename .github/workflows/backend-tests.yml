@@ -38,13 +38,11 @@ jobs:
           python -m pip install -r backend/requirements.txt
       - name: Check Python syntax
         run: python -m compileall -q backend
-      - name: Test project foundation
+      - name: Run project foundation tests
         run: python -m pytest -q backend/tests/test_project_foundation.py
-      - name: Test financial controls
-        run: python -m pytest -q backend/tests/test_finance_controls.py
-      - name: Run all backend regression tests
+      - name: Run all backend tests
         run: python -m pytest -q backend/tests
-      - name: Confirm no paid rendering
+      - name: Verify disabled paid-rendering defaults
         run: |
           test "$VIDEO_PROVIDER" = disabled
           test "$ENABLE_PAID_FAL_WORKER" = false
