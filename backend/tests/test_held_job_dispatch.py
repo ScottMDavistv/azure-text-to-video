@@ -103,3 +103,59 @@ def test_reconciliation_only_reads():
     assert result == "manual_review_reservation_exists"
     finance.submit_transaction.assert_not_called()
     held.update_entity.assert_not_called()
+
+
+def test_reconcile_only_confirmed_financial_reservation():
+    from held_job_dispatch import reconcile_confirmed_reservation
+    project, jid = uid(), uid()
+    held, finance = MagicMock(), MagicMock()
+    held.get_entity.return_value = Record(
+        PartitionKey="fal-held-jobs", RowKey=jid,
+        status="reserving", projectId=project, estimatedCents=100,
+    )
+    audit = MagicMock(return_value=True)
+    with patch("finance_controls.load", return_value={
+        "projectId": project, "state": "reserved", "reservedCents": 100,
+    }):
+        result = reconcile_confirmed_reservation(
+            held, finance, jid, record_audit=audit,
+        )
+    assert result == "reserved"
+    assert audit.call_args.args[0] == "reservation_reconciled:" + jid
+    assert held.update_entity.call_args.kwargs["entity"]["status"] == "reserved"
+    finance.submit_transaction.assert_not_called()
+
+
+def test_reconcile_inconsistent_finance_stays_blocked():
+    from held_job_dispatch import reconcile_confirmed_reservation
+    project, jid = uid(), uid()
+    held, finance = MagicMock(), MagicMock()
+    held.get_entity.return_value = Record(
+        status="reserving", projectId=project, estimatedCents=100,
+    )
+    with patch("finance_controls.load", return_value={
+        "projectId": uid(), "state": "reserved", "reservedCents": 100,
+    }):
+        with pytest.raises(HeldJobDenied):
+            reconcile_confirmed_reservation(
+                held, finance, jid, record_audit=lambda *a: True,
+            )
+    held.update_entity.assert_not_called()
+    finance.submit_transaction.assert_not_called()
+
+
+def test_reconcile_requires_audit_before_state_change():
+    from held_job_dispatch import reconcile_confirmed_reservation
+    project, jid = uid(), uid()
+    held, finance = MagicMock(), MagicMock()
+    held.get_entity.return_value = Record(
+        status="reserving", projectId=project, estimatedCents=100,
+    )
+    with patch("finance_controls.load", return_value={
+        "projectId": project, "state": "reserved", "reservedCents": 100,
+    }):
+        with pytest.raises(HeldJobDenied, match="audit"):
+            reconcile_confirmed_reservation(
+                held, finance, jid, record_audit=lambda *a: False,
+            )
+    held.update_entity.assert_not_called()
