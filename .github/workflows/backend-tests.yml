@@ -65,6 +65,33 @@ jobs:
           python -m pytest -q backend/tests/test_fal_safe_recovery.py
           python -m pytest -q backend/tests/test_bulk03_integration.py
 
+      - name: Test concurrency simulation
+        run: python -m pytest -q backend/tests/test_finance_concurrency.py
+
+      - name: Start isolated Azurite Table emulator
+        run: |
+          docker run --rm -d --name render-table-ci \
+            -p 10002:10002 \
+            mcr.microsoft.com/azure-storage/azurite:latest \
+            azurite --tableHost 0.0.0.0 --tablePort 10002
+          python - <<'PY'
+          import socket, time
+          for attempt in range(40):
+              try:
+                  with socket.create_connection(("127.0.0.1", 10002), timeout=1):
+                      print("Azurite Table endpoint available")
+                      break
+              except OSError:
+                  time.sleep(0.5)
+          else:
+              raise RuntimeError("Azurite Table emulator did not start")
+          PY
+
+      - name: Test Azure SDK atomic transactions against Azurite
+        env:
+          AZURITE_TABLE_TEST: '1'
+        run: python -m pytest -q backend/tests/test_azurite_finance_integration.py
+
       - name: Run all backend regression tests
         run: python -m pytest -q backend/tests
 
