@@ -72,6 +72,11 @@ jobs:
           python -m pytest -q backend/tests/test_budget_hold_events.py
           python -m pytest -q backend/tests/test_reconciliation_runner.py
 
+      - name: Test P0 security regressions
+        run: |
+          python -m pytest -q backend/tests/test_p0_security_regressions.py
+          python -m pytest -q backend/tests/test_paid_job_finalization.py
+
       - name: Test concurrency simulation
         run: python -m pytest -q backend/tests/test_finance_concurrency.py
 
