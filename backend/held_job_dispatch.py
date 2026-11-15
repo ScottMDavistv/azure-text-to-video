@@ -93,3 +93,41 @@ def reconcile_reserving(held_table, finance_table, job_id):
     ):
         return "manual_review_reservation_exists"
     return "manual_review_inconsistent_finance"
+
+
+def reconcile_confirmed_reservation(held_table, finance_table, job_id,
+                                    *, record_audit):
+    """Repair ONLY a confirmed reservation with a conditional state write.
+
+    Never calls reserve() or FAL. Missing or inconsistent evidence
+    remains unresolved. Operator/scan supplies durable audit callback.
+    """
+    from finance_controls import load, check_id
+    check_id(job_id)
+    if not callable(record_audit):
+        raise HeldJobDenied("Durable reconciliation audit required")
+    held = held_table.get_entity(partition_key=PARTITION, row_key=job_id)
+    if held.get("status") == "reserved":
+        record = load(finance_table, "reservation:" + job_id)
+        if (record.get("state") == "reserved" and
+                record.get("projectId") == held.get("projectId") and
+                record.get("reservedCents") == held.get("estimatedCents")):
+            return "already_reserved"
+        raise HeldJobDenied("Reserved hold contradicts financial ledger")
+    if held.get("status") != "reserving":
+        raise HeldJobDenied("Job not awaiting reservation reconciliation")
+    try:
+        reservation = load(finance_table, "reservation:" + job_id)
+    except FinanceDenied as exc:
+        raise HeldJobDenied("No confirmed reservation; manual review required") from exc
+    if (reservation.get("state") != "reserved" or
+            reservation.get("projectId") != held.get("projectId") or
+            reservation.get("reservedCents") != held.get("estimatedCents")):
+        raise HeldJobDenied("Inconsistent reservation; manual review required")
+    # Write an idempotent audit event BEFORE flipping to reserved.
+    # The audit sink must reject duplicates by a stable event key.
+    if record_audit("reservation_reconciled:" + job_id, job_id) is not True:
+        raise HeldJobDenied("Durable audit acknowledgement required")
+    _change(held_table, held, "reserved",
+            reconciliation="confirmed_finance_reservation")
+    return "reserved"
