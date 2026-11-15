@@ -26,6 +26,16 @@ for principal in "$API_PRINCIPAL" "$WORKER_PRINCIPAL"; do
   echo "--- Principal $principal ---"
   az role assignment list --assignee-object-id "$principal" --scope "$STORAGE_ID" --include-inherited --query '[].{role:roleDefinitionName,scope:scope,principalId:principalId}' -o json
 done
+echo "=== Nested resource assignments: exact data scopes ==="
+for resource in \
+  "$STORAGE_ID/tableServices/default/tables/VideoJobs" \
+  "$STORAGE_ID/queueServices/default/queues/textvideo-jobs" \
+  "$STORAGE_ID/blobServices/default/containers/videos"; do
+  echo "--- $resource ---"
+  for principal in "$API_PRINCIPAL" "$WORKER_PRINCIPAL"; do
+    az role assignment list --assignee-object-id "$principal" --scope "$resource" --include-inherited --query '[].{role:roleDefinitionName,scope:scope,principalId:principalId}' -o json
+  done
+done
 echo "=== Storage services — configured tables, queues and containers (ARM only) ==="
 for service in tableServices/default/tables queueServices/default/queues blobServices/default/containers; do
   echo "--- $service ---"
