@@ -65,6 +65,13 @@ jobs:
           python -m pytest -q backend/tests/test_fal_safe_recovery.py
           python -m pytest -q backend/tests/test_bulk03_integration.py
 
+      - name: Test OIDC, billing, outbox, and reconciliation integration
+        run: |
+          python -m pytest -q backend/tests/test_project_api_security.py
+          python -m pytest -q backend/tests/test_fal_billing_reconciliation.py
+          python -m pytest -q backend/tests/test_budget_hold_events.py
+          python -m pytest -q backend/tests/test_reconciliation_runner.py
+
       - name: Test concurrency simulation
         run: python -m pytest -q backend/tests/test_finance_concurrency.py
 
