@@ -27,6 +27,9 @@ def run_once(renderer, queue_client=None):
         raise ValueError(
             "A callable video renderer is required"
         )
+    from fal_renderer import FalVideoRenderer
+    if isinstance(renderer, FalVideoRenderer):
+        raise ValueError('Legacy FAL renderer cannot be used by generic worker')
 
     def processor(job_id):
         return process_job(job_id, renderer)
