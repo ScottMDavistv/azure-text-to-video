@@ -73,3 +73,5 @@ COPY paid_job_finalization.py .
 COPY distributed_fairness.py stage_a_dispatch.py stage_a_coordinator.py .
 COPY stage_a_runtime.py stage_a_runtime_cli.py notification_inbox.py .
 COPY paid_job_finalization.py .
+
+COPY notification_consumer.py paid_job_recovery.py .
