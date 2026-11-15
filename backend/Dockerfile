@@ -64,3 +64,5 @@ COPY provider_submission_ledger.py fal_safe_submission.py fal_safe_recovery.py .
 COPY budgeted_fal_execution.py budgeted_worker_service.py .
 
 COPY fal_billing_reconciliation.py .
+
+COPY reconciliation_runner.py .
