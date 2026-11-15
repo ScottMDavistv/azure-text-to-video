@@ -120,3 +120,54 @@ def list_project_holds(table, project_id):
         parameters={"partition": PARTITION, "project": project_id},
     )
     return [dict(r) for r in rows if r.get("projectId") == project_id]
+
+
+def reconsider_project_holds(table, project_id, *, verify_budget, limit=100):
+    """Batch reconsider one project's held jobs after budget approval.
+
+    Called by an explicit budget-approved handler or scheduled scan.
+    This does not itself reserve funds or submit to FAL.
+    """
+    _id(project_id)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise HeldJobDenied("Invalid batch size")
+    if not callable(verify_budget):
+        raise HeldJobDenied("Trusted financial capacity verifier required")
+    rows = list_project_holds(table, project_id)
+    results = {"eligible": 0, "held": 0, "conflicts": 0}
+    for row in rows[:limit]:
+        if row.get("status") != "held":
+            continue
+        try:
+            status = reconsider_held_job(
+                table, row["jobId"], verify_budget=verify_budget,
+            )
+            results[status] += 1
+        except HeldJobDenied:
+            results["conflicts"] += 1
+    return results
+
+
+def held_job_dashboard(table, project_id, *, now_time=None):
+    """Trusted-caller dashboard projection (authentication is external)."""
+    from datetime import datetime
+    _id(project_id)
+    current = now_time or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        raise HeldJobDenied("Timezone-aware clock required")
+    output = []
+    for row in list_project_holds(table, project_id):
+        if row.get("status") not in ("held", "eligible", "reserving", "reserved"):
+            continue
+        held_at = datetime.fromisoformat(row["heldAt"].replace("Z", "+00:00"))
+        elapsed = max(0, int((current - held_at).total_seconds()))
+        output.append({
+            "job_id": row["jobId"],
+            "status": row["status"],
+            "hold_reason": row["holdReason"],
+            "estimated_cents": row["estimatedCents"],
+            "priority": row["priority"],
+            "waiting_seconds": elapsed,
+            "actions": ["cancel"] if row["status"] == "held" else [],
+        })
+    return sorted(output, key=lambda row: (-row["waiting_seconds"], row["job_id"]))
