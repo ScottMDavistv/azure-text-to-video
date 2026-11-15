@@ -28,6 +28,10 @@ param jobsTableName string = 'VideoJobs'
 @description('Private Blob container for rendered video.')
 param blobContainerName string = 'videos'
 
+@description('Existing Azure Key Vault secret URI for the Fal API key. Must use HTTPS and contain no secret value.')
+@minLength(1)
+param falKeyVaultSecretUri string
+
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
   name: environmentName
 }
@@ -72,6 +76,16 @@ resource worker 'Microsoft.App/jobs@2024-03-01' = {
     environmentId: environment.id
 
     configuration: {
+      // The API key is managed in Azure Key Vault.
+      // Its value is never stored in this template.
+      secrets: [
+        {
+          name: 'fal-api-key'
+          keyVaultUrl: falKeyVaultSecretUri
+          identity: identity.id
+        }
+      ]
+
       triggerType: 'Manual'
       replicaTimeout: 120
       replicaRetryLimit: 0
