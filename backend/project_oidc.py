@@ -70,13 +70,8 @@ def validate_delegated_scope(claims):
         raise ProjectScopeDenied("Required delegated API scope missing")
 
 
-def verify_project_token(token, table, *, jwks_client_factory=None):
-    """Verify Entra-issued v2 access token and resolve a registered user.
-
-    Signing key and claim validation come from PyJWT; no unverified
-    token fields are used for authorization. Directory mapping is
-    provisioned only through a separate trusted administrative path.
-    """
+def verify_entra_access_claims(token, *, jwks_client_factory=None):
+    """Verify a signed Entra API access token without requiring user mapping."""
     issuer, audience, jwks_url = oidc_config()
     if not isinstance(token, str) or not 1 <= len(token) <= 8192:
         raise ProjectIdentityError("Invalid bearer token")
@@ -101,6 +96,13 @@ def verify_project_token(token, table, *, jwks_client_factory=None):
     subject = claims.get("sub")
     if not isinstance(subject, str) or not 1 <= len(subject) <= 256:
         raise ProjectIdentityError("Invalid identity subject")
+    return {"issuer": issuer, "subject": subject, "tenant": expected_tenant}
+
+
+def verify_project_token(token, table, *, jwks_client_factory=None):
+    """Verify delegated access and resolve an active registered internal user."""
+    identity = verify_entra_access_claims(token, jwks_client_factory=jwks_client_factory)
+    issuer, subject = identity["issuer"], identity["subject"]
     digest = hashlib.sha256((issuer + "|" + subject).encode()).hexdigest()
     try:
         mapping = table.get_entity(
