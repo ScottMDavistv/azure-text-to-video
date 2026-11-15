@@ -224,7 +224,8 @@ def reserve(
     return reservation
 
 
-def settle(table, job_id, actual_cents):
+def settle(table, job_id, actual_cents, *, provider_receipt=None,
+           verify_provider_receipt=None):
     """Settle confirmed provider charges.
 
     Zero is permitted only when the caller has verified
@@ -232,9 +233,15 @@ def settle(table, job_id, actual_cents):
     for uncertain or in-flight FAL requests.
     """
     check_id(job_id)
-    actual = check_money(
-        actual_cents, allow_zero=True
-    )
+    actual = check_money(actual_cents, allow_zero=True)
+    if not callable(verify_provider_receipt) or provider_receipt is None:
+        raise FinanceDenied("Verified provider billing evidence required")
+    try:
+        valid = verify_provider_receipt(job_id, actual, provider_receipt)
+    except Exception as exc:
+        raise FinanceDenied("Provider billing verification failed") from exc
+    if valid is not True:
+        raise FinanceDenied("Unverified provider billing evidence")
 
     record = load(table, "reservation:" + job_id)
 
@@ -303,31 +310,34 @@ def request_increase(
     proposed_cents,
     request_id,
     *,
-    role=None,
+    project_table=None,
     global_fal=False,
     admin_lookup=None,
 ):
     """Request a new absolute spending ceiling."""
-    from project_access import (
-        Action, AccessDenied, authorize
-    )
+    from project_access import Action, AccessDenied, authorize, Actor
+    from project_store import get_membership_role, get_project
 
     check_id(request_id)
     check_money(proposed_cents)
+    if not isinstance(actor, Actor) or not actor.authenticated:
+        raise FinanceDenied("Verified actor required")
 
     if global_fal:
         require_admin(actor, admin_lookup)
         scope = "global:fal"
     else:
         scope = scope_key(project_id)
+        if project_table is None:
+            raise FinanceDenied("Trusted project membership table required")
         try:
-            authorize(
-                actor, Action.REQUEST_BUDGET, role
-            )
-        except AccessDenied as exc:
-            raise FinanceDenied(
-                "Project budget permission required"
-            ) from exc
+            project = get_project(project_table, project_id)
+            if project is None or project.status.value != "active":
+                raise FinanceDenied("Active project required")
+            membership = get_membership_role(project_table, project_id, actor.user_id)
+            authorize(actor, Action.REQUEST_BUDGET, membership)
+        except (AccessDenied, ValueError) as exc:
+            raise FinanceDenied("Verified project budget permission required") from exc
 
     current = load(table, scope)
 
