@@ -47,18 +47,33 @@ jobs:
 
       - name: Start isolated local Azurite Table emulator
         run: |
-          docker run --rm -d --name finance-azurite-ci -p 10002:10002 mcr.microsoft.com/azure-storage/azurite:latest
+          docker run --rm -d --name finance-azurite-ci -p 10002:10002 mcr.microsoft.com/azure-storage/azurite:latest azurite --tableHost 0.0.0.0 --blobHost 0.0.0.0 --queueHost 0.0.0.0
           python - <<'PY'
           import socket, time
           for attempt in range(40):
               try:
                   with socket.create_connection(("127.0.0.1", 10002), timeout=1):
-                      print("Azurite Table port ready")
+                      print("Azurite Table port reachable")
                       break
               except OSError:
                   time.sleep(0.5)
           else:
               raise RuntimeError("Azurite did not become ready")
+          PY
+          docker ps --filter name=finance-azurite-ci
+          docker logs finance-azurite-ci
+          python - <<'PY'
+          import uuid
+          from azure.data.tables import TableServiceClient
+          endpoint = ("DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;"
+                      "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;"
+                      "TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;")
+          svc = TableServiceClient.from_connection_string(endpoint)
+          name = "Health" + uuid.uuid4().hex[:16]
+          svc.create_table(name)
+          svc.delete_table(name)
+          svc.close()
+          print("Azurite Table API ready")
           PY
 
       - name: Run Azure SDK finance contention and crash-recovery tests
