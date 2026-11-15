@@ -171,7 +171,7 @@ def test_azurite_lost_settlement_response_requires_reconciliation(table):
     seed(table, project, 100)
     reserve(table, project, job, 45)
     receipt = {"job_id": job, "amount_cents": 35, "verified": True}
-    with pytest.raises(FinanceDenied, match="reconciliation required"):
+    with pytest.raises(FinanceDenied, match="reconcile before retry"):
         settle(LostResponse(table), job, 35, provider_receipt=receipt,
                verify_provider_receipt=verified)
     assert entity(table, "reservation:" + job)["state"] == "settled"
