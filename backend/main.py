@@ -20,6 +20,9 @@ app.include_router(video_router)
 from job_admin_routes import router as job_admin_router
 app.include_router(job_admin_router)
 
+from project_api_routes import router as project_router
+app.include_router(project_router)
+
 from api_access import JobApiAuthMiddleware
 app.add_middleware(JobApiAuthMiddleware)
 
