@@ -12,7 +12,7 @@ from azure.core.exceptions import AzureError
 
 from project_access import Action, AccessDenied
 from project_security import require_project_role
-from project_oidc import ProjectIdentityError, verify_project_token
+from project_oidc import ProjectIdentityError, ProjectScopeDenied, verify_project_token
 from held_jobs import held_job_dashboard, cancel_held_job, HeldJobDenied
 from storage import get_jobs_table_client
 
@@ -33,6 +33,8 @@ def verified_request_actor(table, authorization):
         raise HTTPException(401, "Bearer token required")
     try:
         return verify_project_token(token.strip(), table)
+    except ProjectScopeDenied as exc:
+        raise HTTPException(403, "Required API permission missing") from exc
     except ProjectIdentityError as exc:
         raise HTTPException(401, "Invalid project identity") from exc
 
