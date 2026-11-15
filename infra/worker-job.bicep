@@ -75,6 +75,10 @@ resource worker 'Microsoft.App/jobs@2024-03-01' = {
   properties: {
     environmentId: environment.id
 
+    // Match the currently deployed Azure worker.
+    // Prevent removal of the Consumption workload profile.
+    workloadProfileName: 'Consumption'
+
     configuration: {
       // The API key is managed in Azure Key Vault.
       // Its value is never stored in this template.
