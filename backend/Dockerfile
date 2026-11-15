@@ -62,3 +62,5 @@ COPY financial_outbox.py safe_reconciliation.py budget_hold_events.py .
 COPY job_scheduler.py held_jobs.py held_job_dispatch.py held_job_coordinator.py .
 COPY provider_submission_ledger.py fal_safe_submission.py fal_safe_recovery.py .
 COPY budgeted_fal_execution.py budgeted_worker_service.py .
+
+COPY fal_billing_reconciliation.py .
