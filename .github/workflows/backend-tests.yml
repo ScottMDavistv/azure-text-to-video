@@ -62,6 +62,7 @@ jobs:
           python -m pytest -q backend/tests/test_held_job_dispatch.py
           python -m pytest -q backend/tests/test_budgeted_fal_execution.py
           python -m pytest -q backend/tests/test_held_job_coordinator.py
+          python -m pytest -q backend/tests/test_fal_safe_recovery.py
 
       - name: Run all backend regression tests
         run: python -m pytest -q backend/tests
