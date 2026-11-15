@@ -66,3 +66,5 @@ COPY budgeted_fal_execution.py budgeted_worker_service.py .
 COPY fal_billing_reconciliation.py .
 
 COPY reconciliation_runner.py .
+
+COPY paid_job_finalization.py .
