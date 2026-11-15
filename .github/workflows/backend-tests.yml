@@ -91,8 +91,5 @@ jobs:
           AZURITE_TABLE_TEST: '1'
         run: python -m pytest -q backend/tests/test_azurite_finance_integration.py
 
-      - name: Verify disabled paid-rendering defaults
-        run: |
-          test "$VIDEO_PROVIDER" = disabled
-          test "$ENABLE_PAID_FAL_WORKER" = false
-          test "$ENABLE_PROJECT_ROUTES" = false
+      - name: Verify actual disabled provider and worker readiness defaults
+        run: python -m pytest -q backend/tests/test_paid_safety_defaults.py
