@@ -40,7 +40,9 @@ class FalVideoRenderer:
         self.poll_interval_seconds = poll_interval_seconds
 
     def __call__(self, prompt):
-        prompt = validate_prompt(prompt)
+        # This prompt-only adapter has no job identity, project membership,
+        # reservation or durable submission intent. It must never POST to FAL.
+        raise RuntimeError('Legacy FAL renderer disabled: use budgeted job execution')
 
         result = submit_and_wait(
             self.client,
