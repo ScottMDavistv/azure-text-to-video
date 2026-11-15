@@ -103,3 +103,63 @@ def read_intent(table, job_id):
         partition_key=PARTITION,
         row_key=job_id,
     )
+
+
+def record_provider_request_id(table, job_id, request_id):
+    """Record the Fal ID after a successful provider response.
+
+    Must never submit a request or reset an uncertain claim.
+    """
+    import re
+
+    job_id = _job_id(job_id)
+
+    if (
+        not isinstance(request_id, str)
+        or not re.fullmatch(
+            r"[A-Za-z0-9_-]{1,128}", request_id
+        )
+    ):
+        raise SubmissionBlocked("Invalid provider request ID")
+
+    try:
+        entity = read_intent(table, job_id)
+    except ResourceNotFoundError as exc:
+        raise SubmissionBlocked("Intent not found") from exc
+
+    if entity["state"] != "submitting":
+        raise SubmissionBlocked(
+            "Intent not awaiting provider response"
+        )
+
+    if entity.get("providerRequestId"):
+        raise SubmissionBlocked(
+            "Provider request ID already recorded"
+        )
+
+    updated = dict(entity)
+    updated["state"] = "submitted"
+    updated["providerRequestId"] = request_id
+    updated["submittedAt"] = datetime.now(
+        timezone.utc
+    ).isoformat()
+
+    try:
+        table.update_entity(
+            entity=updated,
+            mode=UpdateMode.REPLACE,
+            etag=entity.metadata["etag"],
+            match_condition=MatchConditions.IfNotModified,
+        )
+    except HttpResponseError as exc:
+        raise SubmissionBlocked(
+            "Provider ID persistence uncertain; "
+            "manual reconciliation required"
+        ) from exc
+
+    return {
+        "job_id": job_id,
+        "state": "submitted",
+        "provider_request_id": request_id,
+        "automatic_retry_allowed": False,
+    }
