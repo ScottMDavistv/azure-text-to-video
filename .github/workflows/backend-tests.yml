@@ -77,6 +77,27 @@ jobs:
           python -m pytest -q backend/tests/test_p0_security_regressions.py
           python -m pytest -q backend/tests/test_paid_job_finalization.py
 
+      - name: Test Stage A orchestration and fail-closed defaults
+        run: |
+          python -m pytest -q backend/tests/test_stage_a_integration.py
+          python -m stage_a_runtime_cli --check
+          if ENABLE_PAID_FAL_WORKER=true python -m stage_a_runtime_cli --check; then
+            echo "unsafe paid flag was accepted" >&2
+            exit 1
+          fi
+
+      - name: Build and smoke-test non-billable API container
+        run: |
+          docker build -t render-stage-a-ci:local backend
+          docker run --rm --network none \\
+            -e VIDEO_PROVIDER=disabled \\
+            -e ENABLE_PAID_FAL_WORKER=false \\
+            -e ENABLE_PROJECT_ROUTES=false \\
+            render-stage-a-ci:local python -m stage_a_runtime_cli --check
+          docker run --rm --network none \\
+            -e VIDEO_PROVIDER=disabled \\
+            render-stage-a-ci:local python -c "import main, stage_a_coordinator, notification_inbox, paid_job_finalization; assert main.app"
+
       - name: Test concurrency simulation
         run: python -m pytest -q backend/tests/test_finance_concurrency.py
 
