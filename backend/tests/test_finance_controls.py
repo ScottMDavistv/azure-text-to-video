@@ -155,7 +155,7 @@ def test_unauthorized_budget_request():
             uid(),
             5000,
             uid(),
-            role=ProjectRole.MEMBER,
+            project_table=MagicMock(),
         )
 
     table.submit_transaction.assert_not_called()
@@ -245,3 +245,43 @@ def test_requester_cannot_approve():
             uid(),
             lambda user: True,
         )
+
+
+def test_settlement_fails_without_authenticated_receipt():
+    table = MagicMock()
+    with pytest.raises(FinanceDenied, match="Verified provider"):
+        settle(table, uid(), 0)
+    table.get_entity.assert_not_called()
+
+
+def test_settlement_rejects_unverified_receipt():
+    table = MagicMock()
+    with pytest.raises(FinanceDenied, match="Unverified"):
+        settle(table, uid(), 0, provider_receipt={"claimed": True},
+               verify_provider_receipt=lambda *args: False)
+    table.get_entity.assert_not_called()
+
+
+def test_settlement_rejects_receipt_verifier_exception():
+    table = MagicMock()
+    def unavailable(*args):
+        raise RuntimeError("Provider receipt source unavailable")
+    with pytest.raises(FinanceDenied, match="verification failed"):
+        settle(table, uid(), 1, provider_receipt={"id": "x"},
+               verify_provider_receipt=unavailable)
+    table.get_entity.assert_not_called()
+
+
+def test_caller_supplied_role_is_never_accepted():
+    table = MagicMock()
+    with pytest.raises(TypeError):
+        request_increase(table, Actor(uid(), True), uid(), 1000, uid(),
+                         role=ProjectRole.OWNER)
+    table.submit_transaction.assert_not_called()
+
+
+def test_project_request_denies_missing_membership_storage():
+    table = MagicMock()
+    with pytest.raises(FinanceDenied, match="membership table"):
+        request_increase(table, Actor(uid(), True), uid(), 1000, uid())
+    table.submit_transaction.assert_not_called()
