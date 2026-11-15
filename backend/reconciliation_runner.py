@@ -7,7 +7,8 @@ An Azure scheduled job can invoke this after operator configuration.
 from finance_controls import check_id
 from budget_hold_events import reconcile_hold_notifications
 from held_job_coordinator import reconsider_after_budget_approval
-from financial_outbox import pending_notifications, deliver_notification
+from financial_outbox import (pending_notifications, deliver_notification,
+                              recover_stalled_notifications)
 
 
 class ReconciliationDisabled(RuntimeError):
@@ -73,3 +74,17 @@ def flush_notifications(*, enabled=False, outbox_table, queue_client,
         deliver_notification(outbox_table, event["RowKey"], deliver=sink)
         count += 1
     return {"queued": count}
+
+
+def recover_notification_leases(*, enabled=False, outbox_table,
+                                downstream_deduplicates_by_event_id=False,
+                                max_events=50, now_time=None):
+    """Run before flush, only with verified consumer event-ID deduplication."""
+    if enabled is not True:
+        raise ReconciliationDisabled("Notification lease recovery disabled")
+    return recover_stalled_notifications(
+        outbox_table,
+        confirm_idempotent_sink=downstream_deduplicates_by_event_id,
+        limit=max_events,
+        now_time=now_time,
+    )
