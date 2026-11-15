@@ -51,3 +51,14 @@ COPY operational_events.py .
 COPY runtime_security.py .
 
 COPY operations_cli.py .
+
+# Bulk 01-03 project and budget orchestration modules.
+# Project API remains disabled until ENABLE_PROJECT_ROUTES=true
+# and a trusted OIDC issuer, audience, mapping table are configured.
+COPY project_models.py project_access.py project_store.py project_security.py .
+COPY project_oidc.py project_api_routes.py .
+COPY finance_controls.py fal_budget_guard.py .
+COPY financial_outbox.py safe_reconciliation.py budget_hold_events.py .
+COPY job_scheduler.py held_jobs.py held_job_dispatch.py held_job_coordinator.py .
+COPY provider_submission_ledger.py fal_safe_submission.py fal_safe_recovery.py .
+COPY budgeted_fal_execution.py budgeted_worker_service.py .
