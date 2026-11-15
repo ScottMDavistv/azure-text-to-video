@@ -5,7 +5,7 @@ so every external sink MUST deduplicate by event_id.
 This is infrastructure glue, not a configured email provider.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 
 from azure.core import MatchConditions
@@ -76,6 +76,8 @@ def deliver_notification(table, event_key, *, deliver):
     if not etag:
         raise OutboxError("ETag unavailable")
     claimed = {**dict(event), "status": "delivering",
+               "leaseExpiresAt": (datetime.now(timezone.utc) +
+                                  timedelta(minutes=5)).isoformat(),
                "attempts": event.get("attempts", 0) + 1}
     try:
         table.update_entity(entity=claimed, mode=UpdateMode.REPLACE,
@@ -113,3 +115,67 @@ def pending_notifications(table, limit=50):
 def diagnose_delivery(table, event_key):
     """Read-only manual recovery of stuck 'delivering' events."""
     return dict(table.get_entity(partition_key=PARTITION, row_key=event_key))
+
+
+def recover_expired_delivery(table, event_key, *, now_time=None,
+                             confirm_idempotent_sink):
+    """Requeue a crashed delivery only for a proven idempotent sink.
+
+    A crash after send and before marking delivered may send again.
+    Caller must confirm the downstream consumer deduplicates event_key.
+    """
+    if confirm_idempotent_sink is not True:
+        raise OutboxError("Idempotent downstream delivery required")
+    event = table.get_entity(partition_key=PARTITION, row_key=event_key)
+    if event.get("status") != "delivering":
+        raise OutboxError("Event is not awaiting delivery reconciliation")
+    expires = event.get("leaseExpiresAt")
+    if not isinstance(expires, str):
+        raise OutboxError("Missing delivery lease; manual reconciliation")
+    try:
+        expires_at = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise OutboxError("Invalid delivery lease") from exc
+    if expires_at.tzinfo is None:
+        raise OutboxError("Lease timezone required")
+    now_time = now_time or datetime.now(timezone.utc)
+    if now_time.tzinfo is None or now_time < expires_at:
+        raise OutboxError("Delivery lease not expired")
+    etag = getattr(event, "metadata", {}).get("etag")
+    if not etag:
+        raise OutboxError("Missing delivery ETag")
+    try:
+        table.update_entity(
+            entity={**dict(event), "status": "pending",
+                    "recoveredAt": now_time.isoformat()},
+            mode=UpdateMode.REPLACE, etag=etag,
+            match_condition=MatchConditions.IfNotModified,
+        )
+    except HttpResponseError as exc:
+        raise OutboxError("Concurrent recovery; no duplicate claim") from exc
+    return "pending"
+
+
+def recover_stalled_notifications(table, *, confirm_idempotent_sink,
+                                  limit=50, now_time=None):
+    """Bounded scan; only expired leases are reset, not live workers."""
+    from itertools import islice
+    if confirm_idempotent_sink is not True:
+        raise OutboxError("Idempotent sink required for recovery")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise OutboxError("Invalid scan limit")
+    rows = table.query_entities(
+        query_filter="PartitionKey eq @p and status eq @s",
+        parameters={"p": PARTITION, "s": "delivering"},
+    )
+    summary = {"recovered": 0, "needs_review": 0}
+    for item in islice(rows, limit):
+        try:
+            recover_expired_delivery(
+                table, item["RowKey"], now_time=now_time,
+                confirm_idempotent_sink=True,
+            )
+            summary["recovered"] += 1
+        except OutboxError:
+            summary["needs_review"] += 1
+    return summary
