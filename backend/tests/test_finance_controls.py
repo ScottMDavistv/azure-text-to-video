@@ -1,4 +1,5 @@
 from unittest.mock import MagicMock
+from azure.core.exceptions import HttpResponseError, ServiceResponseError
 from uuid import uuid4
 
 import pytest
@@ -8,6 +9,10 @@ from project_models import ProjectRole
 
 from finance_controls import (
     FinanceDenied,
+    FinanceConflict,
+    AmbiguousCommit,
+    MAX_CENTS,
+    commit,
     approve_increase,
     check_money,
     provision_limit,
@@ -285,3 +290,76 @@ def test_project_request_denies_missing_membership_storage():
     with pytest.raises(FinanceDenied, match="membership table"):
         request_increase(table, Actor(uid(), True), uid(), 1000, uid())
     table.submit_transaction.assert_not_called()
+
+
+def test_maximum_money_matches_azure_table_int32():
+    assert MAX_CENTS == 2**31 - 1
+    assert check_money(MAX_CENTS) == MAX_CENTS
+    with pytest.raises(FinanceDenied):
+        check_money(MAX_CENTS + 1)
+
+
+def test_definite_etag_conflict_classified_separately():
+    table = MagicMock()
+    exc = HttpResponseError(message="ETag mismatch")
+    exc.status_code = 412
+    table.submit_transaction.side_effect = exc
+    with pytest.raises(FinanceConflict, match="retryable"):
+        commit(table, [("create", {"RowKey": "example"})])
+
+
+def test_duplicate_entity_is_not_retryable():
+    table = MagicMock()
+    exc = HttpResponseError(message="duplicate")
+    exc.status_code = 409
+    table.submit_transaction.side_effect = exc
+    with pytest.raises(FinanceDenied) as raised:
+        commit(table, [("create", {"RowKey": "example"})])
+    assert not isinstance(raised.value, FinanceConflict)
+    assert not isinstance(raised.value, AmbiguousCommit)
+
+
+def test_transport_failure_after_possible_commit_is_ambiguous():
+    table = MagicMock()
+    table.submit_transaction.side_effect = ServiceResponseError(
+        message="connection lost after request"
+    )
+    with pytest.raises(AmbiguousCommit, match="reconcile"):
+        commit(table, [("create", {"RowKey": "example"})])
+    table.submit_transaction.assert_called_once()
+
+
+def test_http_server_failure_is_ambiguous():
+    table = MagicMock()
+    exc = HttpResponseError(message="server failed")
+    exc.status_code = 503
+    table.submit_transaction.side_effect = exc
+    with pytest.raises(AmbiguousCommit):
+        commit(table, [("create", {"RowKey": "example"})])
+
+
+def test_reserve_retries_only_etag_conflict(monkeypatch):
+    from finance_controls import reserve
+    table = MagicMock()
+    project_id, job_id = uid(), uid()
+    def fetch(partition_key, row_key):
+        return record(row_key, ceilingCents=1000, spentCents=0, reservedCents=0)
+    table.get_entity.side_effect = fetch
+    etag = HttpResponseError(message="ETag")
+    etag.status_code = 412
+    table.submit_transaction.side_effect = [etag, None]
+    monkeypatch.setattr("finance_controls.time.sleep", lambda _: None)
+    reservation = reserve(table, project_id, job_id, 50)
+    assert reservation["reservedCents"] == 50
+    assert table.submit_transaction.call_count == 2
+
+
+def test_reserve_ambiguous_failure_not_retried():
+    table = MagicMock()
+    table.get_entity.side_effect = lambda partition_key, row_key: record(
+        row_key, ceilingCents=1000, spentCents=0, reservedCents=0)
+    table.submit_transaction.side_effect = ServiceResponseError(
+        message="response dropped")
+    with pytest.raises(AmbiguousCommit):
+        reserve(table, uid(), uid(), 50)
+    table.submit_transaction.assert_called_once()
