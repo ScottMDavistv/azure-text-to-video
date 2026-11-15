@@ -61,7 +61,7 @@ function App() {
       <section className="auth-card">
         <p className="eyebrow">VIDEO RENDER TOOL / DEVELOPMENT</p>
         <h1>Microsoft Entra sign-in</h1>
-        <p>Local authentication test on <code>http://localhost:5173</code>. Paid rendering is disabled.</p>
+        <p>Development authentication test at <code>{window.location.origin}</code>. Paid rendering is disabled.</p>
         {accountName ? <p className="signed-in">Signed in as {accountName}</p> : null}
         <p role="status" className="auth-status">{message}</p>
         <div className="auth-actions">
