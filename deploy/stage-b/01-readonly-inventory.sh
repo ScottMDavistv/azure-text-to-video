@@ -22,15 +22,15 @@ done
 echo "=== API managed identity ==="
 API_ID="$(az resource list --name "$API" --resource-type Microsoft.App/containerApps --query '[0].id' -o tsv)"
 if [[ -n "$API_ID" ]]; then
-  az containerapp identity show --ids "$API_ID" -o json
+  az resource show --ids "$API_ID" --query identity -o json
   echo "=== API runtime settings (NAMES ONLY; never print values) ==="
-  az containerapp show --ids "$API_ID" --query 'properties.template.containers[].env[].name' -o json
+  az resource show --ids "$API_ID" --query 'properties.template.containers[].env[].name' -o json
 fi
 
 echo "=== Worker managed identity ==="
 WORKER_ID="$(az resource list --name "$WORKER" --resource-type Microsoft.App/jobs --query '[0].id' -o tsv)"
 if [[ -n "$WORKER_ID" ]]; then
-  az containerapp job show --ids "$WORKER_ID" --query '{name:name,identity:identity,trigger:properties.configuration.triggerType}' -o json
+  az resource show --ids "$WORKER_ID" --query '{name:name,identity:identity,trigger:properties.configuration.triggerType}' -o json
 fi
 
 echo "=== User-assigned identity ==="
@@ -53,6 +53,6 @@ for scope in "$STORAGE_ID" "$MI_ID"; do
 done
 
 echo "=== Entra app registration discovery ==="
-az ad app list --display-name "Video Render Tool" --query '[].{id:id,appId:appId,displayName:displayName,signInAudience:signInAudience}' -o json
-az ad app list --display-name "Azure Text-to-Video" --query '[].{id:id,appId:appId,displayName:displayName,signInAudience:signInAudience}' -o json
+az ad app list --display-name "Video Render Tool" --query '[].{id:id,appId:appId,displayName:displayName,signInAudience:signInAudience}' -o json || echo "Entra application list unavailable to Reader identity"
+az ad app list --display-name "Azure Text-to-Video" --query '[].{id:id,appId:appId,displayName:displayName,signInAudience:signInAudience}' -o json || echo "Entra application list unavailable to Reader identity"
 echo "INVENTORY COMPLETE — no Azure changes made."
