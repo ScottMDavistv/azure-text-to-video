@@ -42,6 +42,30 @@ jobs:
         run: python -m pytest -q backend/tests/test_project_foundation.py
       - name: Run all backend tests
         run: python -m pytest -q backend/tests
+      - name: Test signed Entra finance authorization
+        run: python -m pytest -q backend/tests/test_finance_authorization.py
+
+      - name: Start isolated local Azurite Table emulator
+        run: |
+          docker run --rm -d --name finance-azurite-ci -p 10002:10002 mcr.microsoft.com/azure-storage/azurite:latest
+          python - <<'PY'
+          import socket, time
+          for attempt in range(40):
+              try:
+                  with socket.create_connection(("127.0.0.1", 10002), timeout=1):
+                      print("Azurite Table port ready")
+                      break
+              except OSError:
+                  time.sleep(0.5)
+          else:
+              raise RuntimeError("Azurite did not become ready")
+          PY
+
+      - name: Run Azure SDK finance contention and crash-recovery tests
+        env:
+          AZURITE_TABLE_TEST: '1'
+        run: python -m pytest -q backend/tests/test_azurite_finance_integration.py
+
       - name: Verify disabled paid-rendering defaults
         run: |
           test "$VIDEO_PROVIDER" = disabled
