@@ -152,7 +152,7 @@ def test_authorization_blocks_before_claim(monkeypatch):
     jobs.get_entity.return_value = {
         "projectId": project, "status": "queued",
     }
-    with patch("budgeted_worker_service.claim_job") as claim:
+    with patch("budgeted_worker_service._claim_on_table") as claim:
         with pytest.raises(PaidWorkerDisabled):
             process_reserved_job(
                 uid(), enabled=True, jobs_table=jobs,
@@ -172,7 +172,7 @@ def test_financial_denial_blocks_claim(monkeypatch):
     with (
         patch("budgeted_worker_service.verify_job_reservation",
               return_value=False),
-        patch("budgeted_worker_service.claim_job") as claim,
+        patch("budgeted_worker_service._claim_on_table") as claim,
     ):
         with pytest.raises(PaidWorkerDisabled):
             process_reserved_job(
