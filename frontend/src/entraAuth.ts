@@ -17,14 +17,14 @@ export function isAuthConfigured(): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(frontendClientId)
 }
 
-let client: PublicClientApplication | null = null
+let initialization: Promise<PublicClientApplication> | null = null
 
 export async function initializeAuth(): Promise<PublicClientApplication> {
   if (!isAuthConfigured()) {
     throw new Error('The local Entra SPA client ID is not configured')
   }
-  if (!client) {
-    client = new PublicClientApplication({
+  if (!initialization) {
+    const client = new PublicClientApplication({
       auth: {
         clientId: frontendClientId,
         authority: `https://login.microsoftonline.com/${tenantId}`,
@@ -34,10 +34,13 @@ export async function initializeAuth(): Promise<PublicClientApplication> {
       },
       cache: { cacheLocation: 'sessionStorage', storeAuthStateInCookie: false },
     })
-    await client.initialize()
-    await client.handleRedirectPromise()
+    initialization = (async () => {
+      await client.initialize()
+      await client.handleRedirectPromise()
+      return client
+    })()
   }
-  return client
+  return initialization
 }
 
 export async function getSignedInAccount(): Promise<AccountInfo | null> {
