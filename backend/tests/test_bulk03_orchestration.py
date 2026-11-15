@@ -107,3 +107,34 @@ def test_advisory_capacity_rejects_insufficient_balance():
         "ceilingCents": 100, "spentCents": 50, "reservedCents": 50,
     }):
         assert has_capacity(MagicMock(), uid(), 1) is False
+
+
+def test_batch_reconsideration_keeps_insufficient_jobs_held():
+    from held_jobs import reconsider_project_holds
+    table = MagicMock()
+    project = uid()
+    item = {
+        "jobId": uid(), "projectId": project, "status": "held",
+        "estimatedCents": 100,
+    }
+    table.query_entities.return_value = [item]
+    table.get_entity.return_value = item
+    result = reconsider_project_holds(
+        table, project, verify_budget=lambda *args: False,
+    )
+    assert result["held"] == 1
+    table.update_entity.assert_not_called()
+
+
+def test_dashboard_reports_cost_wait_and_actions():
+    from held_jobs import held_job_dashboard
+    project = uid()
+    table = MagicMock()
+    item = job(project, minutes=15)
+    item["estimatedCents"] = 250
+    table.query_entities.return_value = [item]
+    result = held_job_dashboard(table, project)
+    assert len(result) == 1
+    assert result[0]["estimated_cents"] == 250
+    assert result[0]["waiting_seconds"] >= 14 * 60
+    assert result[0]["actions"] == ["cancel"]
