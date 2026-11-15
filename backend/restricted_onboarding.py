@@ -117,6 +117,11 @@ def propose_enrollment(table, *, enrollment_id, target_token, project_name,
         "createdAt": timestamp.isoformat(),
         "expiresAt": (timestamp + APPROVAL_TTL).isoformat(),
     }
+    original = _get(table, proposal["RowKey"])
+    if original is not None:
+        _parse_expiry(original, timestamp)
+        proposal["createdAt"] = original.get("createdAt")
+        proposal["expiresAt"] = original.get("expiresAt")
     _create_bound(table, proposal, (
         "enrollmentId", "projectId", "projectName", "subjectDigest",
         "role", "proposerDigest", "createdAt", "expiresAt"))
@@ -147,6 +152,10 @@ def approve_enrollment(table, *, enrollment_id, approver_token,
         "approvedAt": _time(now).isoformat(),
         "expiresAt": request["expiresAt"],
     }
+    original = _get(table, approval["RowKey"])
+    if original is not None:
+        _parse_expiry(original, _time(now))
+        approval["approvedAt"] = original.get("approvedAt")
     _create_bound(table, approval, (
         "enrollmentId", "projectId", "projectName", "subjectDigest",
         "role", "proposerDigest", "approverDigest", "approvedAt", "expiresAt"))
@@ -171,6 +180,10 @@ def execute_enrollment(table, *, enrollment_id, target_token, operator_token,
         raise OnboardingBlocked("Proposal and approval do not match")
     if approval.get("role") != "owner" or proposal.get("projectId") != project_id_for_enrollment(enrollment_id):
         raise OnboardingBlocked("Unapproved project or role")
+    if not all(d in allowed_admin_digests for d in (
+        proposal.get("proposerDigest"), approval.get("approverDigest")
+    )):
+        raise OnboardingBlocked("Stored administrators no longer authorized")
     if len({proposal.get("proposerDigest"), approval.get("approverDigest"),
             proposal.get("subjectDigest")}) != 3:
         raise OnboardingBlocked("Independent admin approval required")
