@@ -77,6 +77,9 @@ jobs:
           python -m pytest -q backend/tests/test_p0_security_regressions.py
           python -m pytest -q backend/tests/test_paid_job_finalization.py
 
+      - name: Test Stage B Entra configuration preflight
+        run: python -m pytest -q backend/tests/test_entra_configuration.py
+
       - name: Test Stage A orchestration and fail-closed defaults
         run: |
           python -m pytest -q backend/tests/test_stage_a_integration.py
