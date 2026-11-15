@@ -89,13 +89,13 @@ jobs:
       - name: Build and smoke-test non-billable API container
         run: |
           docker build -t render-stage-a-ci:local backend
-          docker run --rm --network none \\
-            -e VIDEO_PROVIDER=disabled \\
-            -e ENABLE_PAID_FAL_WORKER=false \\
-            -e ENABLE_PROJECT_ROUTES=false \\
+          docker run --rm --network none \
+            -e VIDEO_PROVIDER=disabled \
+            -e ENABLE_PAID_FAL_WORKER=false \
+            -e ENABLE_PROJECT_ROUTES=false \
             render-stage-a-ci:local python -m stage_a_runtime_cli --check
-          docker run --rm --network none \\
-            -e VIDEO_PROVIDER=disabled \\
+          docker run --rm --network none \
+            -e VIDEO_PROVIDER=disabled \
             render-stage-a-ci:local python -c "import main, stage_a_coordinator, notification_inbox, paid_job_finalization; assert main.app"
 
       - name: Test concurrency simulation
