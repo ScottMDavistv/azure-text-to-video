@@ -73,3 +73,30 @@ def classify_paid_job_recovery(job, submission_intent=None, reservation=None):
         if submission_intent.get("statusUrl") and submission_intent.get("responseUrl"):
             return "resume_existing_poll_only"
     return "manual_review_missing_evidence"
+
+
+def reconcile_billing_and_finalize(*, job_id, jobs_table, finance_table,
+                                   submission_table, actual_cents,
+                                   provider_receipt, verify_provider_receipt):
+    """Crash-tolerant bridge: settle once, then finalize without FAL POST.
+
+    If settlement succeeds but the job ETag update fails, callers may
+    retry this method: the already-settled reservation is not charged
+    again and finalization performs a conditional job update.
+    """
+    from fal_billing_reconciliation import reconcile_verified_fal_charge
+    reservation = load(finance_table, "reservation:" + check_id(job_id))
+    if reservation.get("state") == "reserved":
+        reconcile_verified_fal_charge(
+            finance_table, submission_table, job_id,
+            actual_cents=actual_cents, provider_receipt=provider_receipt,
+            verify_provider_receipt=verify_provider_receipt,
+        )
+    elif reservation.get("state") != "settled":
+        raise FinalizationBlocked("No reconciled financial settlement")
+    elif reservation.get("actualCents") != actual_cents:
+        raise FinalizationBlocked("Conflicting provider charge after settlement")
+    return finalize_paid_job(
+        job_id=job_id, jobs_table=jobs_table, finance_table=finance_table,
+        submission_table=submission_table,
+    )
