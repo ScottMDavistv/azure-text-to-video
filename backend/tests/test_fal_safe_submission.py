@@ -58,7 +58,7 @@ def test_order_intent_claim_provider_persist():
         patch("fal_safe_submission.claim_intent",
               side_effect=lambda *a: steps.append("claim")),
         patch("fal_safe_submission.record_provider_request_id",
-              side_effect=lambda *a: steps.append("record")),
+              side_effect=lambda *a, **kw: steps.append("record")),
     ):
         result = submit_once(
             table, uid(), "Ocean", client,
