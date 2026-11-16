@@ -2,6 +2,7 @@
 import importlib.util
 import pathlib
 import unittest
+from unittest.mock import patch
 
 PATH = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "design_management_audit.py"
 spec = importlib.util.spec_from_file_location("design_management_audit", PATH)
@@ -42,6 +43,25 @@ class DesignManagementTests(unittest.TestCase):
         self.assertIn("NOT VERIFIED", report)
         self.assertIn("success", report)
         self.assertIn("(draft)", report)
+
+    def test_blocker_candidates_are_deterministic(self):
+        keys = [key for key, _ in audit.blocker_candidates([])]
+        self.assertIn("front-end-creation-journey", keys)
+        self.assertIn("300-second-acceptance", keys)
+
+    def test_closed_issue_marker_prevents_duplicate(self):
+        existing = [{"body": "<!-- design-management-blocker:300-second-acceptance -->",
+                     "number": 21}]
+        with patch.object(audit, "github_get", return_value=existing):
+            keys = audit.list_existing_blocker_keys("owner/repo", "token")
+        self.assertIn("300-second-acceptance", keys)
+
+    def test_report_includes_inventory_without_conflating_health(self):
+        sample = {"paths": [], "sha": "abc", "runs": [], "prs": [],
+                  "azure": {"status": "inventory only", "resource_group": "rg-dev", "resources": []}}
+        report = audit.render_report(sample, "2026-11-16 12:00 UTC")
+        self.assertIn("inventory only", report)
+        self.assertIn("NOT VERIFIED", report)
 
 if __name__ == "__main__":
     unittest.main()
