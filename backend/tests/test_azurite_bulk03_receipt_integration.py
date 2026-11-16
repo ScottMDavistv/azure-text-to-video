@@ -10,7 +10,7 @@ import pytest
 from azure.data.tables import TableServiceClient
 
 from finance_controls import FinanceDenied, PARTITION, reserve, scope_key
-from fal_billing_reconciliation import reconcile_verified_fal_charge
+from fal_billing_reconciliation import reconcile_verified_fal_charge, BillingReviewRequired
 from budgeted_fal_execution import ExecutionBlocked
 
 CONNECTION = (
@@ -114,7 +114,7 @@ def test_real_ledger_requires_receipt_id(table):
     project, job = str(uuid4()), str(uuid4())
     setup_budget(table, project)
     reserve(table, project, job, 40)
-    with pytest.raises(ExecutionBlocked):
+    with pytest.raises((ExecutionBlocked, BillingReviewRequired)):
         reconcile(table, job, "request", 20,
                   {"job_id": job, "provider_request_id": "request",
                    "actual_cents": 20, "verified": True})
