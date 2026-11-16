@@ -48,6 +48,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DESIGN_MANAGEMENT_PUBLISH: 'true'
         run: python scripts/design_management_audit.py
+      - name: Route approved development work and update agent queues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DESIGN_MANAGEMENT_PUBLISH: 'true'
+        run: python scripts/design_agent_coordination.py
       - name: Upload audit snapshot
         if: always()
         uses: actions/upload-artifact@v4
@@ -56,4 +61,5 @@ jobs:
           path: |
             design-management-report.md
             azure-inventory.json
+            design-management-queues.json
           if-no-files-found: ignore
