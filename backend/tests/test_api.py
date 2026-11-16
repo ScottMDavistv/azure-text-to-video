@@ -1,3 +1,4 @@
+import pytest
 from unittest.mock import patch, MagicMock
 from uuid import uuid4
 
@@ -6,6 +7,13 @@ from fastapi.testclient import TestClient
 
 from main import app
 from storage import upload_rendered_video
+
+
+@pytest.fixture(autouse=True)
+def local_legacy_api_behavior(monkeypatch):
+    # Existing route-behavior tests run ONLY in an explicit local-dev
+    # exemption. Deployment and security tests verify default-deny separately.
+    monkeypatch.setenv("ALLOW_UNAUTHENTICATED_DEV", "true")
 
 
 client = TestClient(app)
