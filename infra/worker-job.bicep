@@ -7,8 +7,8 @@ param workerJobName string = 'job-textvideo-worker-dev'
 @description('Existing Container Apps managed environment.')
 param environmentName string = 'cae-textvideo-dev'
 
-@description('Existing user-assigned managed identity.')
-param identityName string = 'id-textvideo-api-dev'
+@description('Existing dedicated worker identity. Must be provisioned and least-privilege audited separately; never use the API identity.')
+param identityName string = 'id-textvideo-worker-dev'
 
 @description('Existing Azure Container Registry.')
 param registryName string = 'acrtextvideo1794671698'
@@ -27,10 +27,6 @@ param jobsTableName string = 'VideoJobs'
 
 @description('Private Blob container for rendered video.')
 param blobContainerName string = 'videos'
-
-@description('Existing Azure Key Vault secret URI for the Fal API key. Must use HTTPS and contain no secret value.')
-@minLength(1)
-param falKeyVaultSecretUri string
 
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
   name: environmentName
@@ -80,15 +76,8 @@ resource worker 'Microsoft.App/jobs@2024-03-01' = {
     workloadProfileName: 'Consumption'
 
     configuration: {
-      // The API key is managed in Azure Key Vault.
-      // Its value is never stored in this template.
-      secrets: [
-        {
-          name: 'fal-api-key'
-          keyVaultUrl: falKeyVaultSecretUri
-          identity: identity.id
-        }
-      ]
+      // Non-billable inspection job has no provider secret or Key Vault reference.
+      secrets: []
 
       triggerType: 'Manual'
       replicaTimeout: 120
@@ -123,10 +112,6 @@ resource worker 'Microsoft.App/jobs@2024-03-01' = {
           ]
 
           env: [
-            {
-              name: 'FAL_KEY'
-              secretRef: 'fal-api-key'
-            }
             {
               name: 'FAL_MODEL_ID'
               value: 'fal-ai/kling-video/v3/pro/text-to-video'
