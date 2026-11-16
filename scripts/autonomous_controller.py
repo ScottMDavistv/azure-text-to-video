@@ -115,7 +115,9 @@ def dispatch_plan(tasks, indexed, *, slots):
             if task["sensitive"] is not False or task["approval"] != "approved-development":
                 continue
             candidates.append((task["priority"], issue["number"], task))
-    candidates.sort(key=lambda x: ({"P0": 0, "P1": 1, "P2": 2}[x[0]], x[1]))
+    # The centrally approved manifest decides workstream ordering, not issue creation time.
+    candidates.sort(key=lambda x: ({"P0": 0, "P1": 1, "P2": 2}[x[0]],
+                                   x[2].get("dispatch_order", 1000), x[1]))
     return candidates[:max(0, MAX_CONCURRENT - slots)]
 
 def dispatch(repo, read_token, copilot_token, *, live=False):
