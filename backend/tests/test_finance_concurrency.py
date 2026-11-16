@@ -39,7 +39,9 @@ class SimulatedTable:
                 raise ResourceNotFoundError("Not found")
             return Row(self.records[row_key], self.versions[row_key])
 
-    def submit_transaction(self, operations):
+    def submit_transaction(self, operations, *, retry_total=0):
+        # Match the production Table SDK's per-request no-retry option.
+        assert retry_total == 0
         with self.mutex:
             # All constraints must be verified before any mutation.
             keys = []
@@ -50,12 +52,16 @@ class SimulatedTable:
                     raise HttpResponseError("duplicate row in transaction")
                 keys.append(key)
                 if kind == "create" and key in self.records:
-                    raise HttpResponseError("already exists")
+                    error = HttpResponseError(message="already exists")
+                    error.status_code = 409
+                    raise error
                 if kind == "update":
                     if key not in self.records or (
                         op[2]["etag"] != str(self.versions[key])
                     ):
-                        raise HttpResponseError("ETag mismatch")
+                        error = HttpResponseError(message="ETag mismatch")
+                        error.status_code = 412
+                        raise error
             for op in operations:
                 kind, entity = op[:2]
                 key = entity["RowKey"]
