@@ -9,7 +9,7 @@ import os
 
 from fal_provider import FalQueueClient
 from fal_renderer import FalVideoRenderer
-from provider_config import get_provider_name
+from provider_config import get_provider_name, validate_provider_config, ProviderConfigurationError
 
 
 class RenderingDisabledError(RuntimeError):
@@ -35,9 +35,18 @@ def create_render_pipeline(
             "Live rendering is disabled"
         )
 
-    if get_provider_name() != "fal":
+    # This must be checked in the actual construction path, not only
+    # by a standalone configuration test. Paid FAL is intentionally
+    # unsupported until durable spending enforcement is activated.
+    try:
+        config = validate_provider_config()
+    except ProviderConfigurationError as exc:
         raise RenderingDisabledError(
-            "Fal is not the selected rendering provider"
+            "Provider not enabled by application allowlist"
+        ) from exc
+    if config["provider"] != "fal" or config["enabled"] is not True:
+        raise RenderingDisabledError(
+            "Fal is not enabled for rendering"
         )
 
     if client is None:
