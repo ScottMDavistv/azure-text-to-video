@@ -64,7 +64,7 @@ def check_no_obvious_inline_credentials():
     # Deliberately scan tracked Python and IaC sources, not test fixtures.
     patterns = [
         re.compile(r'(?i)(?:fal[_-]?(?:key|api[_-]?key)|client[_-]?secret)'
-                   r'\\s*[:=]\\s*["\\\'][A-Za-z0-9_\\-]{20,}["\\\']'),
+                   r'\s*[:=]\s*["\\\'][A-Za-z0-9_\\-]{20,}["\\\']'),
         re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'),
     ]
     paths = [*BACKEND.glob("*.py"), *(ROOT / "infra").rglob("*.bicep")]
