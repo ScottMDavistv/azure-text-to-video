@@ -6,8 +6,10 @@ test('five ordered synthetic scenes total exactly 300 seconds', () => {
   assert.equal(TOTAL_SECONDS, 300)
   assert.ok(SCENES.every(s => s.duration > 0))
 })
-test('prompt validation rejects empty, short and oversized text', () => {
-  assert.match(validatePrompt('  short  '), /10/)
+test('prompt validation matches API contract: 1 to 2000 characters', () => {
+  assert.match(validatePrompt('  '), /at least 1/)
+  assert.equal(validatePrompt('x'), null)
+  assert.equal(validatePrompt('x'.repeat(2000)), null)
   assert.match(validatePrompt('x'.repeat(2001)), /2,000/)
   assert.equal(validatePrompt('  A film about alpine forests  '), null)
 })
@@ -22,5 +24,6 @@ test('mock job has a deterministic ID and never leaves bounded stages', () => {
   assert.deepEqual(advanceMockJob(job), job)
 })
 test('mock submission fails closed on invalid input', () => {
-  assert.throws(() => createMockJob('bad', 1), /at least 10/)
+  assert.throws(() => createMockJob('  ', 1), /at least 1/)
+  assert.equal(createMockJob('x', 2).prompt, 'x')
 })
