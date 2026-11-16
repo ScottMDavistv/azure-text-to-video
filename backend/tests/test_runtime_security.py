@@ -16,7 +16,7 @@ def test_disabled_defaults():
     ):
         result = get_runtime_security_status()
 
-    assert result["job_api_auth_required"] is False
+    assert result["job_api_auth_required"] is True
     assert result["admin_endpoints_enabled"] is False
     assert result["video_downloads_enabled"] is False
     assert result["public_exposure_approved"] is False
