@@ -49,16 +49,17 @@ def test_queue_endpoint():
 
     with (
         patch("jobs.transition_job") as transition,
-        patch("job_queue.enqueue_job") as enqueue,
+        patch("dispatch_recovery.dispatch_queued_job") as dispatch,
     ):
         transition.return_value = {"status": "queued"}
+        dispatch.return_value = {"status": "sent", "dispatched": True}
 
         response = client.post(f"/jobs/{job_id}/queue")
 
         assert response.status_code == 200
         assert response.json()["status"] == "queued"
         assert response.json()["dispatched"] is True
-        enqueue.assert_called_once_with(job_id)
+        dispatch.assert_called_once_with(job_id)
 
 
 def test_worker_completes_job():
