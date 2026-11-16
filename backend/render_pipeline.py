@@ -9,7 +9,7 @@ import os
 
 from fal_provider import FalQueueClient
 from fal_renderer import FalVideoRenderer
-from provider_config import get_provider_name
+from provider_config import get_provider_name, validate_provider_config, ProviderConfigurationError
 
 
 class RenderingDisabledError(RuntimeError):
@@ -35,10 +35,30 @@ def create_render_pipeline(
             "Live rendering is disabled"
         )
 
-    if get_provider_name() != "fal":
+    # This must be checked in the actual construction path, not only
+    # by a standalone configuration test. Paid FAL is intentionally
+    # unsupported until durable spending enforcement is activated.
+    try:
+        config = validate_provider_config()
+    except ProviderConfigurationError as exc:
         raise RenderingDisabledError(
-            "Fal is not the selected rendering provider"
+            "Provider not enabled by application allowlist"
+        ) from exc
+    if config["provider"] != "fal" or config["enabled"] is not True:
+        raise RenderingDisabledError(
+            "Fal is not enabled for rendering"
         )
+
+    # An allowed provider name is not authority to spend. The worker's
+    # durable ledger-backed reservation gate is deliberately unavailable
+    # in this development PR; fail closed even if the allowlist is widened.
+    from worker_readiness import require_worker_readiness, WorkerNotReadyError
+    try:
+        require_worker_readiness()
+    except WorkerNotReadyError as exc:
+        raise RenderingDisabledError(
+            "Durable finance and worker readiness required before paid rendering"
+        ) from exc
 
     if client is None:
         client = FalQueueClient()

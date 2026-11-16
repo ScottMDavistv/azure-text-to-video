@@ -42,8 +42,64 @@ jobs:
         run: python -m pytest -q backend/tests/test_project_foundation.py
       - name: Run all backend tests
         run: python -m pytest -q backend/tests
-      - name: Verify disabled paid-rendering defaults
+      - name: Test signed Entra finance authorization
+        run: python -m pytest -q backend/tests/test_finance_authorization.py
+
+      - name: Start isolated local Azurite Table emulator
         run: |
-          test "$VIDEO_PROVIDER" = disabled
-          test "$ENABLE_PAID_FAL_WORKER" = false
-          test "$ENABLE_PROJECT_ROUTES" = false
+          docker run --rm -d --name finance-azurite-ci -p 10002:10002 mcr.microsoft.com/azure-storage/azurite:latest azurite --tableHost 0.0.0.0 --blobHost 0.0.0.0 --queueHost 0.0.0.0
+          python - <<'PY'
+          import socket, time
+          for attempt in range(40):
+              try:
+                  with socket.create_connection(("127.0.0.1", 10002), timeout=1):
+                      print("Azurite Table port reachable")
+                      break
+              except OSError:
+                  time.sleep(0.5)
+          else:
+              raise RuntimeError("Azurite did not become ready")
+          PY
+          docker ps --filter name=finance-azurite-ci
+          docker logs finance-azurite-ci
+          python - <<'PY'
+          import uuid
+          from azure.data.tables import TableServiceClient
+          endpoint = ("DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;"
+                      "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;"
+                      "TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;")
+          svc = TableServiceClient.from_connection_string(endpoint)
+          name = "Health" + uuid.uuid4().hex[:16]
+          import time
+          last_error = None
+          for attempt in range(40):
+              try:
+                  svc.create_table(name)
+                  svc.delete_table(name)
+                  print("Azurite Table API ready")
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(1)
+          else:
+              raise RuntimeError("Azurite Table API did not become ready") from last_error
+          svc.close()
+          PY
+
+      - name: Run Azure SDK finance contention and crash-recovery tests
+        env:
+          AZURITE_TABLE_TEST: '1'
+        run: python -m pytest -q backend/tests/test_azurite_finance_integration.py
+
+      - name: Test Azure SDK retry-after-commit fault injection
+        env:
+          AZURITE_TABLE_TEST: '1'
+        run: python -m pytest -q backend/tests/test_azurite_finance_sdk_retry.py
+
+      - name: Test SDK retry-after-commit with transport fault injection
+        env:
+          AZURITE_TABLE_TEST: '1'
+        run: python -m pytest -q backend/tests/test_sdk_retry_fault_injection.py
+
+      - name: Verify actual disabled provider and worker readiness defaults
+        run: python -m pytest -q backend/tests/test_paid_safety_defaults.py

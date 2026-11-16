@@ -36,7 +36,7 @@ def test_wrong_provider_rejected():
             create_render_pipeline(client=MagicMock())
 
 
-def test_explicit_fal_configuration():
+def test_explicit_fal_configuration_cannot_bypass_application_allowlist():
     with patch.dict(
         "os.environ",
         {
@@ -44,12 +44,11 @@ def test_explicit_fal_configuration():
             "VIDEO_RENDER_PROVIDER": "fal",
         },
     ):
-        renderer = create_render_pipeline(
-            client=MagicMock(),
-            downloader=MagicMock(),
-        )
-
-    assert isinstance(renderer, FalVideoRenderer)
+        with pytest.raises(RenderingDisabledError, match="allowlist"):
+            create_render_pipeline(
+                client=MagicMock(),
+                downloader=MagicMock(),
+            )
 
 
 def test_no_api_calls_during_construction():
@@ -62,10 +61,11 @@ def test_no_api_calls_during_construction():
             "VIDEO_RENDER_PROVIDER": "fal",
         },
     ):
-        create_render_pipeline(
-            client=client,
-            downloader=MagicMock(),
-        )
+        with pytest.raises(RenderingDisabledError):
+            create_render_pipeline(
+                client=client,
+                downloader=MagicMock(),
+            )
 
     client.submit.assert_not_called()
     client.status.assert_not_called()
