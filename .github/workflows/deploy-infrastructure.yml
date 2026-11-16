@@ -1,48 +1,16 @@
-name: Deploy Azure Infrastructure
-
+name: Legacy Foundation Deployment — Disabled
+# Legacy foundation deployment intentionally disabled.
+# infra/main.bicep currently previews changes to existing non-worker resources.
+# Use guarded-azure-worker-deploy.yml for an allowlisted dev worker operation.
 on:
   workflow_dispatch:
-    inputs:
-      confirmation:
-        description: 'Type DEPLOY-DEV to authorize deployment'
-        required: true
-        type: string
-
 permissions:
   contents: read
-  id-token: write
-
 jobs:
-  deploy:
-    name: Deploy Bicep Infrastructure
-    if: ${{ github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY-DEV' }}
+  disabled:
     runs-on: ubuntu-latest
-    environment: dev-deployment
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Login to Azure using OIDC
-        uses: azure/login@v3
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Deploy infrastructure
-        uses: azure/cli@v2
-        with:
-          inlineScript: |
-            az deployment group create \
-              --name textvideo-github-deployment \
-              --resource-group rg-textvideo-dev \
-              --template-file infra/main.bicep \
-              --parameters \
-                location=eastus \
-                storageAccountName=sttextvideo1794671698 \
-                logAnalyticsName=log-textvideo-dev \
-                containerAppsEnvironmentName=cae-textvideo-dev \
-                containerRegistryName=acrtextvideo1794671698 \
-                backendIdentityName=id-textvideo-api-dev \
-              --output table
+      - name: Deny broad foundation deployment
+        run: |
+          echo "::error::Broad foundation deployment disabled. Use a targeted reviewed workflow."
+          exit 1
