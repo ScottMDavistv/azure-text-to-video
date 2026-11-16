@@ -1,0 +1,64 @@
+name: Frontend Quality Gates
+
+on:
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-quality-gates.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-quality-gates.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  frontend-quality:
+    name: Frontend tests, lint and build (Node 22)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout source without write credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install Node.js 22 with npm cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install exactly locked frontend dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+      - name: Run frontend unit tests when the test suite is present
+        working-directory: frontend
+        run: |
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)"; then
+            npm test
+          elif [ "${{ github.event_name }}" = "pull_request" ] && git diff --quiet "${{ github.event.pull_request.base.sha }}" HEAD -- .; then
+            echo 'Workflow-only PR: no frontend test script exists on base yet.'
+          else
+            echo 'No frontend test script found; add npm test before merging frontend feature work.'
+            exit 1
+          fi
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+      - name: Typecheck and build frontend
+        working-directory: frontend
+        run: npm run build
+      - name: Confirm non-deploying security boundary
+        run: |
+          echo 'Local frontend quality checks only.'
+          echo 'No Azure deployment, FAL/provider calls, or automatic merge.'
