@@ -12,7 +12,8 @@ that paid FAL remains disabled.
 
 ## Controlled scheduling
 
-`infra/dispatch-reconcile-job.bicep` defines a 15-minute Container Apps
+A separately reviewed Azure infrastructure PR provides the
+`infra/dispatch-reconcile-job.bicep` blueprint for a 15-minute Container Apps
 scheduled job, defaulting to **preflight-only**. Deploy only after a separate
 approved Azure change and RBAC review. To make it actually reconcile requires
 `activateReconciliation=true`, an immutable tested image, a dedicated
@@ -52,7 +53,8 @@ A sweep with uncertain queue responses or incomplete pagination emits the
 fixed marker `dispatch_reconciliation_requires_attention`, sets
 `alert=true`, and exits with code 2 when invoked through the CLI.
 
-`infra/dispatch-recovery-alerts.bicep` defines a disabled-by-default
+A separately reviewed infrastructure PR provides
+`infra/dispatch-recovery-alerts.bicep`, a disabled-by-default
 log-alert rule pointing at the existing workspace and an operator-supplied
 Action Group. Before enabling, confirm console logs reach
 `ContainerAppConsoleLogs_CL.Log_s`, validate the query with real harmless
