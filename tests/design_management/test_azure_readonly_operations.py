@@ -7,8 +7,8 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-os.environ.setdefault('AZURE_AUDIT_CLIENT_ID', '82b41ada-d973-4ed4-8b13-7de4458185dd')
-os.environ.setdefault('AZURE_SUBSCRIPTION_ID', '41fbffdc-1793-44f9-b70f-220ea8a9bc6c')
+os.environ['AZURE_AUDIT_CLIENT_ID'] = '82b41ada-d973-4ed4-8b13-7de4458185dd'
+os.environ['AZURE_SUBSCRIPTION_ID'] = '41fbffdc-1793-44f9-b70f-220ea8a9bc6c'
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
     "azure_readonly_operations", ROOT / "scripts" / "azure_readonly_operations.py")
