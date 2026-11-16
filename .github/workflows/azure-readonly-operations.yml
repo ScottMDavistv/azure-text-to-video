@@ -1,0 +1,88 @@
+name: Azure Read-Only Operations
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/azure-readonly-operations.yml'
+      - 'scripts/azure_readonly_operations.py'
+      - 'tests/design_management/test_azure_readonly_operations.py'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/azure-readonly-operations.yml'
+      - 'scripts/azure_readonly_operations.py'
+      - 'tests/design_management/test_azure_readonly_operations.py'
+  schedule:
+    - cron: '41 13 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: azure-readonly-operations-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  offline-tests:
+    name: Offline Azure audit safety tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Exercise mocked read-only Azure evidence and failure gates
+        run: python -m unittest discover -s tests/design_management -p 'test_azure_readonly_operations.py' -v
+
+  audit:
+    name: Reader-only Azure preflight
+    needs: offline-tests
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: dev-deployment
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_PREVIEW_CLIENT_ID: ${{ vars.AZURE_PREVIEW_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fail closed unless the dedicated Reader identity is configured
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$AZURE_PREVIEW_CLIENT_ID" = "82b41ada-d973-4ed4-8b13-7de4458185dd"
+          test -n "$AZURE_TENANT_ID"
+          test "$AZURE_SUBSCRIPTION_ID" = "41fbffdc-1793-44f9-b70f-220ea8a9bc6c"
+        env:
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Login with Reader identity (OIDC, no client secrets)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_PREVIEW_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Read-only Azure worker, registry, identity and RBAC preflight
+        run: python scripts/azure_readonly_operations.py
+      - name: Publish sanitized evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-readonly-operations
+          path: |
+            azure-readonly-operations.json
+            azure-readonly-operations.md
+          if-no-files-found: warn
+          retention-days: 14
