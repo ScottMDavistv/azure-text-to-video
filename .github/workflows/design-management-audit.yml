@@ -12,6 +12,7 @@ permissions:
   actions: read
   pull-requests: read
   issues: write
+  id-token: write
 
 concurrency:
   group: design-management-audit
@@ -29,6 +30,19 @@ jobs:
           python-version: '3.12'
       - name: Offline agent regression tests
         run: python -m unittest discover -s tests/design_management -p 'test_*.py' -v
+      - name: Authenticate to Azure only when read-only monitoring is enabled
+        if: vars.AZURE_AUDIT_ENABLED == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_AUDIT_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_AUDIT_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_AUDIT_SUBSCRIPTION_ID }}
+      - name: Inventory Azure resources with a Reader identity
+        if: vars.AZURE_AUDIT_ENABLED == 'true'
+        env:
+          AZURE_AUDIT_RESOURCE_GROUP: ${{ vars.AZURE_AUDIT_RESOURCE_GROUP }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_AUDIT_SUBSCRIPTION_ID }}
+        run: python scripts/azure_readonly_inventory.py
       - name: Collect evidence and update issue 16
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -39,5 +53,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: design-management-snapshot
-          path: design-management-report.md
+          path: |\n            design-management-report.md\n            azure-inventory.json
           if-no-files-found: ignore
