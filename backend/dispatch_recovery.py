@@ -30,7 +30,7 @@ class DispatchUncertain(RuntimeError):
     """The queue send or its acknowledgement may have committed."""
 
 
-def _utc(value):
+def _utc(value=None):
     if value is None:
         value = datetime.now(timezone.utc)
     if not isinstance(value, datetime) or value.tzinfo is None:
