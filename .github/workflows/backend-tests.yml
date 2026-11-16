@@ -155,6 +155,13 @@ jobs:
           python -m pytest -q backend/tests/test_azurite_finance_sdk_retry.py
           python -m pytest -q backend/tests/test_sdk_retry_fault_injection.py
 
+      - name: Test consolidated finance receipt and recovery on Azurite
+        env:
+          AZURITE_TABLE_TEST: '1'
+        run: |
+          python -m pytest -q backend/tests/test_azurite_finance_recovery.py
+          python -m pytest -q backend/tests/test_azurite_bulk03_receipt_integration.py
+
       - name: Run all backend regression tests
         run: python -m pytest -q backend/tests
 
