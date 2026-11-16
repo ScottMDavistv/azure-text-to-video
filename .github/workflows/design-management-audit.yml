@@ -48,6 +48,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DESIGN_MANAGEMENT_PUBLISH: 'true'
         run: python scripts/design_management_audit.py
+      - name: Verify issue 16 contains this run's exact snapshot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/verify_design_management_publication.py
       - name: Route approved development work and update agent queues
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
