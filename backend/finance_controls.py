@@ -283,82 +283,8 @@ def reserve(
 
 def settle(table, job_id, actual_cents, *, provider_receipt=None,
            verify_provider_receipt=None):
-    """Settle confirmed provider charges.
-
-    Zero is permitted only when the caller has verified
-    that no provider charge occurred. Do not call this
-    for uncertain or in-flight FAL requests.
-    """
-    check_id(job_id)
-    actual = check_money(actual_cents, allow_zero=True)
-    if not callable(verify_provider_receipt) or provider_receipt is None:
-        raise FinanceDenied("Verified provider billing evidence required")
-    try:
-        valid = verify_provider_receipt(job_id, actual, provider_receipt)
-    except Exception as exc:
-        raise FinanceDenied("Provider billing verification failed") from exc
-    if valid is not True:
-        raise FinanceDenied("Unverified provider billing evidence")
-
-    record = load(table, "reservation:" + job_id)
-
-    if record["state"] != "reserved":
-        raise FinanceDenied(
-            "Reservation already closed"
-        )
-
-    amount = record["reservedCents"]
-
-    if actual > amount:
-        raise FinanceDenied(
-            "Actual charge exceeds reservation; "
-            "manual reconciliation required"
-        )
-
-    project = load(
-        table, scope_key(record["projectId"])
-    )
-    global_limit = load(table, "global:fal")
-
-    op_id = str(uuid4())
-    updates = []
-
-    for limit in (project, global_limit):
-        if limit["reservedCents"] < amount:
-            raise FinanceDenied(
-                "Inconsistent reserved balance"
-            )
-
-        updates.append(replace(
-            limit,
-            reservedCents=(
-                limit["reservedCents"] - amount
-            ),
-            spentCents=(
-                limit["spentCents"] + actual
-            ),
-        ))
-
-    commit(table, updates + [
-        replace(
-            record,
-            state="settled",
-            actualCents=actual,
-            settledAt=now(),
-        ),
-        create(audit(
-            "spend_settled", op_id=op_id,
-            jobId=job_id,
-            projectId=record["projectId"],
-            actualCents=actual,
-        )),
-    ], op_id=op_id)
-
-    return {
-        "job_id": job_id,
-        "state": "settled",
-        "actual_cents": actual,
-    }
+    """Fail-closed legacy settlement; unique provider receipt required."""
+    raise FinanceDenied("Legacy settlement disabled; use unique receipt ledger")
 
 
 def request_increase(
