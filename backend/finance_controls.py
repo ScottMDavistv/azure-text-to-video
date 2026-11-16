@@ -7,21 +7,36 @@ to permit atomic conditional batch transactions.
 """
 
 from datetime import datetime, timezone
+import random
+import time
 from uuid import UUID, uuid4
 
 from azure.core import MatchConditions
 from azure.core.exceptions import (
+    AzureError,
     HttpResponseError,
     ResourceNotFoundError,
 )
 from azure.data.tables import UpdateMode
 
 PARTITION = "render-finance-v1"
-MAX_CENTS = 10**12
+MAX_CENTS = 2**31 - 1  # Azure Tables default Python int encoding: Edm.Int32
+MAX_RESERVATION_ATTEMPTS = 32
 
 
 class FinanceDenied(RuntimeError):
     pass
+
+
+class FinanceConflict(FinanceDenied):
+    """Definite ETag precondition failure: transaction not committed."""
+
+
+class AmbiguousCommit(FinanceDenied):
+    """Write may have committed: reconcile using the same operation ID.
+
+    Never blindly retry provider submission or financial settlement.
+    """
 
 
 def check_id(value):
@@ -106,10 +121,24 @@ def audit(event, **fields):
 def commit(table, actions):
     try:
         table.submit_transaction(actions)
-    except (HttpResponseError, ResourceNotFoundError) as exc:
-        raise FinanceDenied(
-            "Atomic transaction failed; "
-            "reconciliation required before retry"
+    except HttpResponseError as exc:
+        # 412 is a definite conditional ETag failure. Azure Tables atomic
+        # batches do not apply any updates when a condition fails.
+        # A 409 create collision is also a definite refusal, but must NOT
+        # be treated as a safe retry (duplicate job/request ID).
+        if exc.status_code == 412:
+            raise FinanceConflict("Concurrent financial update; retryable") from exc
+        if exc.status_code in (400, 403, 404, 409, 413):
+            raise FinanceDenied("Atomic financial write rejected") from exc
+        # 408, 429 and 5xx can follow an applied commit. Fail closed.
+        raise AmbiguousCommit(
+            "Financial write outcome uncertain; reconcile before retry"
+        ) from exc
+    except AzureError as exc:
+        # Connection drops and read timeouts are AzureError but NOT
+        # necessarily HttpResponseError; the server may have committed.
+        raise AmbiguousCommit(
+            "Financial write outcome uncertain; reconcile before retry"
         ) from exc
 
 
@@ -166,65 +195,72 @@ def provision_limit(
 def reserve(
     table, project_id, job_id, estimated_cents
 ):
-    """Reserve project and global spending atomically.
+    """Reserve project and global budgets atomically.
 
+    Only definite 412 ETag conflicts may be retried. Network errors,
+    timeouts and unknown write outcomes must be reconciled by job ID.
     Caller must first verify job ownership and authorization.
     """
-
     check_id(project_id)
     check_id(job_id)
     amount = check_money(estimated_cents)
 
-    project = load(table, scope_key(project_id))
-    global_limit = load(table, "global:fal")
+    for attempt in range(MAX_RESERVATION_ATTEMPTS):
+        project = load(table, scope_key(project_id))
+        global_limit = load(table, "global:fal")
 
-    for limit in (project, global_limit):
-        available = (
-            limit["ceilingCents"]
-            - limit["spentCents"]
-            - limit["reservedCents"]
-        )
-        if available < amount:
-            raise FinanceDenied(
-                "Insufficient spending capacity"
+        for limit in (project, global_limit):
+            available = (
+                limit["ceilingCents"]
+                - limit["spentCents"]
+                - limit["reservedCents"]
             )
+            if available < amount:
+                raise FinanceDenied("Insufficient spending capacity")
 
-    reservation = {
-        "PartitionKey": PARTITION,
-        "RowKey": "reservation:" + job_id,
-        "projectId": project_id,
-        "reservedCents": amount,
-        "actualCents": 0,
-        "state": "reserved",
-        "createdAt": now(),
-    }
+        reservation = {
+            "PartitionKey": PARTITION,
+            "RowKey": "reservation:" + job_id,
+            "projectId": project_id,
+            "reservedCents": amount,
+            "actualCents": 0,
+            "state": "reserved",
+            "createdAt": now(),
+        }
+        try:
+            commit(table, [
+                replace(
+                    project,
+                    reservedCents=project["reservedCents"] + amount,
+                ),
+                replace(
+                    global_limit,
+                    reservedCents=global_limit["reservedCents"] + amount,
+                ),
+                create(reservation),
+                create(audit(
+                    "spend_reserved",
+                    projectId=project_id,
+                    jobId=job_id,
+                    amountCents=amount,
+                )),
+            ])
+            return reservation
+        except FinanceConflict:
+            if attempt + 1 == MAX_RESERVATION_ATTEMPTS:
+                raise FinanceDenied(
+                    "Reservation contention exhausted; no commit"
+                )
+            # Capped jitter reduces synchronized retries on global:fal.
+            # Never retry ambiguous errors or duplicate create conflicts.
+            time.sleep(min(0.003 * (2 ** min(attempt, 5)), 0.08)
+                       * random.uniform(0.5, 1.5))
 
-    commit(table, [
-        replace(
-            project,
-            reservedCents=(
-                project["reservedCents"] + amount
-            ),
-        ),
-        replace(
-            global_limit,
-            reservedCents=(
-                global_limit["reservedCents"] + amount
-            ),
-        ),
-        create(reservation),
-        create(audit(
-            "spend_reserved",
-            projectId=project_id,
-            jobId=job_id,
-            amountCents=amount,
-        )),
-    ])
-
-    return reservation
+    raise FinanceDenied("Reservation contention exhausted")
 
 
-def settle(table, job_id, actual_cents):
+def settle(table, job_id, actual_cents, *, provider_receipt=None,
+           verify_provider_receipt=None):
     """Settle confirmed provider charges.
 
     Zero is permitted only when the caller has verified
@@ -232,9 +268,15 @@ def settle(table, job_id, actual_cents):
     for uncertain or in-flight FAL requests.
     """
     check_id(job_id)
-    actual = check_money(
-        actual_cents, allow_zero=True
-    )
+    actual = check_money(actual_cents, allow_zero=True)
+    if not callable(verify_provider_receipt) or provider_receipt is None:
+        raise FinanceDenied("Verified provider billing evidence required")
+    try:
+        valid = verify_provider_receipt(job_id, actual, provider_receipt)
+    except Exception as exc:
+        raise FinanceDenied("Provider billing verification failed") from exc
+    if valid is not True:
+        raise FinanceDenied("Unverified provider billing evidence")
 
     record = load(table, "reservation:" + job_id)
 
@@ -303,31 +345,34 @@ def request_increase(
     proposed_cents,
     request_id,
     *,
-    role=None,
+    project_table=None,
     global_fal=False,
     admin_lookup=None,
 ):
     """Request a new absolute spending ceiling."""
-    from project_access import (
-        Action, AccessDenied, authorize
-    )
+    from project_access import Action, AccessDenied, authorize, Actor
+    from project_store import get_membership_role, get_project
 
     check_id(request_id)
     check_money(proposed_cents)
+    if not isinstance(actor, Actor) or not actor.authenticated:
+        raise FinanceDenied("Verified actor required")
 
     if global_fal:
         require_admin(actor, admin_lookup)
         scope = "global:fal"
     else:
         scope = scope_key(project_id)
+        if project_table is None:
+            raise FinanceDenied("Trusted project membership table required")
         try:
-            authorize(
-                actor, Action.REQUEST_BUDGET, role
-            )
-        except AccessDenied as exc:
-            raise FinanceDenied(
-                "Project budget permission required"
-            ) from exc
+            project = get_project(project_table, project_id)
+            if project is None or project.status.value != "active":
+                raise FinanceDenied("Active project required")
+            membership = get_membership_role(project_table, project_id, actor.user_id)
+            authorize(actor, Action.REQUEST_BUDGET, membership)
+        except (AccessDenied, ValueError) as exc:
+            raise FinanceDenied("Verified project budget permission required") from exc
 
     current = load(table, scope)
 
