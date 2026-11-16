@@ -15,8 +15,9 @@ from azure.data.tables import TableClient, TableServiceClient
 
 from finance_controls import (
     AmbiguousCommit, FinanceConflict, FinanceDenied, PARTITION,
-    reserve, scope_key, settle,
+    reserve, scope_key,
 )
+from finance_recovery import settle_unique_receipt
 
 pytestmark = pytest.mark.skipif(
     os.getenv("AZURITE_TABLE_TEST") != "1", reason="Requires local Azurite opt-in")
@@ -101,15 +102,22 @@ def test_settle_applied_batch_sdk_resend_not_reported_as_retryable(tables):
     project, job = str(uuid.uuid4()), str(uuid.uuid4())
     seed(plain, project)
     reserve(plain, project, job, 50)
-    receipt = {"job_id": job, "amount_cents": 35}
-    ok = lambda j, a, r: r["job_id"] == j and r["amount_cents"] == a
+    receipt = {"job_id": job, "amount_cents": 35, "receipt_id": "settle-" + job}
+    ok = lambda j, req, rid, a, r: (
+        r["job_id"] == j and r["amount_cents"] == a
+        and req == "request-" + job and rid == r["receipt_id"]
+    )
     faulty = TableClient.from_connection_string(
         CONN, table_name=name, transport=FaultTransport(status=503),
         retry_backoff_factor=0.01)
     try:
         try:
-            settle(faulty, job, 35, provider_receipt=receipt,
-                   verify_provider_receipt=ok)
+            settle_unique_receipt(
+                faulty, job_id=job, actual_cents=35,
+                provider_request_id="request-" + job,
+                receipt_id=receipt["receipt_id"],
+                provider_receipt=receipt, verify_provider_receipt=ok,
+            )
         except AmbiguousCommit:
             pass
         except FinanceConflict:

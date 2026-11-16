@@ -86,11 +86,11 @@ def test_settlement_needs_verified_billing():
 
 def test_settlement_delegates_verified_charge():
     finance = MagicMock()
-    with patch("finance_controls.settle", return_value={"state": "settled"}) as settle:
+    with patch("finance_recovery.settle_unique_receipt", return_value={"state": "settled"}) as settle:
         result = settle_verified_charge(
             finance_table=finance, job_id=uid(), charge_cents=100,
             provider_request_id="req_1",
-            provider_receipt={"charge": "confirmed"},
+            provider_receipt={"charge": "confirmed", "receipt_id": "receipt-example"},
             verify_provider_receipt=lambda *args: True,
         )
     assert result["state"] == "settled"
@@ -100,8 +100,8 @@ def test_settlement_delegates_verified_charge():
 def test_settlement_passes_real_verifier_into_ledger():
     finance = MagicMock()
     calls = []
-    receipt = {"provider_record": "test"}
-    with patch("finance_controls.settle", return_value={"state": "settled"}) as ledger:
+    receipt = {"provider_record": "test", "receipt_id": "receipt-example-2"}
+    with patch("finance_recovery.settle_unique_receipt", return_value={"state": "settled"}) as ledger:
         settle_verified_charge(
             finance_table=finance, job_id=uid(), charge_cents=55,
             provider_request_id="req_2", provider_receipt=receipt,
@@ -110,7 +110,7 @@ def test_settlement_passes_real_verifier_into_ledger():
     kwargs = ledger.call_args.kwargs
     assert kwargs["provider_receipt"] is receipt
     assert kwargs["verify_provider_receipt"](
-        ledger.call_args.args[1], 55, receipt
+        kwargs["job_id"], "req_2", "receipt-example-2", 55, receipt
     ) is True
     assert calls[0][1:] == ("req_2", 55, receipt)
 
@@ -121,6 +121,17 @@ def test_settlement_must_fail_closed_without_provider_request():
         settle_verified_charge(
             finance_table=finance, job_id=uid(), charge_cents=10,
             provider_request_id="", provider_receipt={"provider": "fal"},
+            verify_provider_receipt=lambda *args: True,
+        )
+    finance.submit_transaction.assert_not_called()
+
+
+def test_settlement_requires_unique_provider_receipt_id():
+    finance = MagicMock()
+    with pytest.raises(ExecutionBlocked, match="receipt identity"):
+        settle_verified_charge(
+            finance_table=finance, job_id=uid(), charge_cents=20,
+            provider_request_id="req_1", provider_receipt={"amount": 20},
             verify_provider_receipt=lambda *args: True,
         )
     finance.submit_transaction.assert_not_called()

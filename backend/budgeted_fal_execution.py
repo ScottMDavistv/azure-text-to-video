@@ -63,26 +63,36 @@ def settle_verified_charge(*, finance_table, job_id, charge_cents,
     records bound to the server-side provider submission intent, not UI
     claims. Callback is backend-injected only; there is no live route.
     """
-    from finance_controls import settle, check_money
+    from finance_controls import check_money
+    from finance_recovery import settle_unique_receipt
 
     check_id(job_id)
     charge_cents = check_money(charge_cents, allow_zero=True)
     if (not isinstance(provider_request_id, str)
             or not provider_request_id.strip()
-            or provider_receipt is None
+            or not isinstance(provider_receipt, dict)
             or not callable(verify_provider_receipt)):
         raise ExecutionBlocked("Authenticated provider billing evidence required")
+    # This receipt identifier must ultimately come from authenticated,
+    # immutable provider charge records, not user-supplied UI payloads.
+    receipt_id = provider_receipt.get("receipt_id")
+    if not isinstance(receipt_id, str) or not receipt_id.strip():
+        raise ExecutionBlocked("Durable provider receipt identity required")
 
-    def verify_for_ledger(claimed_job_id, claimed_cents, claimed_receipt):
-        if (claimed_job_id != job_id or claimed_cents != charge_cents
+    def verify_for_ledger(claimed_job_id, claimed_request_id,
+                          claimed_receipt_id, claimed_cents, claimed_receipt):
+        if (claimed_job_id != job_id or claimed_request_id != provider_request_id
+                or claimed_receipt_id != receipt_id
+                or claimed_cents != charge_cents
                 or claimed_receipt is not provider_receipt):
             return False
         return verify_provider_receipt(
             job_id, provider_request_id, charge_cents, claimed_receipt
         ) is True
 
-    return settle(
-        finance_table, job_id, charge_cents,
+    return settle_unique_receipt(
+        finance_table, job_id=job_id, actual_cents=charge_cents,
+        provider_request_id=provider_request_id, receipt_id=receipt_id,
         provider_receipt=provider_receipt,
         verify_provider_receipt=verify_for_ledger,
     )
