@@ -4,6 +4,7 @@
 No Azure credentials, provider keys, paid inference, or write APIs other than issue PATCH.
 """
 import datetime as dt
+import pathlib
 import json
 import os
 import re
@@ -27,6 +28,70 @@ CAPABILITIES = {
     "automated security checks": [".github/workflows/security-checks.yml"],
 }
 DASHBOARD_ISSUE = 16
+BLOCKERS = {
+    "front-end-creation-journey": {
+        "title": "Critical integration blocker: complete prompt-to-video frontend",
+        "paths": ["frontend/src/components/VideoEditor.tsx"],
+        "details": "Verify an authenticated prompt submission, job status/progress, preview and download journey. A missing conventional file name alone is a candidate and must be manually confirmed before considering this a verified product gap.",
+    },
+    "300-second-acceptance": {
+        "title": "Critical release blocker: validated 300-second non-billable render",
+        "paths": ["evidence/300-second-e2e.json"],
+        "details": "Generate simulated video and audio for exactly 300 seconds, assemble MP4, probe duration/audio/video, and publish CI artifacts. This must precede any paid provider activation.",
+    },
+}
+
+def blocker_candidates(paths):
+    present = set(paths)
+    return [(key, item) for key, item in BLOCKERS.items()
+            if not all(path in present for path in item["paths"])]
+
+def list_existing_blocker_keys(repo, token):
+    # Read all issues, including closed ones, so reruns cannot spam duplicates.
+    # Fail closed on pagination/API errors.
+    keys = set()
+    for page in range(1, 21):
+        items = github_get("/repos/" + repo + "/issues?state=all&per_page=100&page=" + str(page), token)
+        if not isinstance(items, list):
+            raise RuntimeError("Issue list response invalid")
+        for item in items:
+            if "pull_request" in item:
+                continue
+            body = item.get("body") or ""
+            for key in BLOCKERS:
+                if "design-management-blocker:" + key in body:
+                    keys.add(key)
+        if len(items) < 100:
+            return keys
+    raise RuntimeError("Issue pagination exceeded configured safety limit")
+
+def github_post(path, payload, token, api=API):
+    request = urllib.request.Request(
+        api + path, data=json.dumps(payload).encode("utf-8"), method="POST",
+        headers={"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json",
+                 "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28",
+                 "User-Agent": "video-render-design-auditor"},
+    )
+    with urllib.request.urlopen(request, timeout=25) as response:
+        return json.load(response)
+
+def publish_new_blockers(repo, token, paths):
+    existing = list_existing_blocker_keys(repo, token)
+    created = []
+    for key, item in blocker_candidates(paths):
+        if key in existing:
+            continue
+        # Explicitly mark as a candidate, not a source-verified defect.
+        body = ("<!-- design-management-blocker:" + key + " -->\\n"
+                "## Automated critical release-gate candidate\\n"
+                + item["details"] + "\\n\\n"
+                "Source: default-branch file inventory. **File absence is not proof "
+                "of missing functionality**; verify before acting.\\n"
+                "No permission to merge, deploy, enable FAL, or spend money.")
+        issue = github_post("/repos/" + repo + "/issues", {"title": item["title"], "body": body}, token)
+        created.append((key, issue.get("html_url", "")))
+    return created
+
 
 def github_get(path, token, api=API):
     request = urllib.request.Request(
@@ -86,6 +151,8 @@ def render_report(data, now):
         p.append("- [#" + str(number) + " " + title + "](" + url + ")" + (" (draft)" if draft else ""))
     if not data["prs"]:
         p.append("- None returned.")
+    p += ["", "#### Critical release-gate candidates (requires confirmation)"]
+    p += ["- " + key + ": " + item["title"] for key, item in blocker_candidates(data["paths"])]
     p += ["", "#### Priority integration gates",
           "1. Build the actual prompt-to-video frontend and authenticated API integration.",
           "2. Prove clip planning, generation, download, stitching, and audio sync with non-billable fixtures.",
@@ -94,6 +161,13 @@ def render_report(data, now):
           "5. Keep paid FAL disabled pending explicit activation and financial security gates.",
           "",
           "_Hybrid analysis: this deterministic evidence can be reviewed with ChatGPT on demand. No LLM API is called._"]
+    azure = data.get("azure")
+    if azure is not None:
+        p += ["", "#### Azure read-only inventory", "Read-only evidence: " + str(azure.get("status", "unknown"))]
+        p += ["Resource group: " + str(azure.get("resource_group", "unspecified")),
+              "Resources inventoried: " + str(len(azure.get("resources", [])))]
+    else:
+        p += ["", "#### Azure read-only inventory", "NOT VERIFIED — optional Reader/OIDC audit not configured or not run"]
     return "\n".join(p)
 
 def collect(repo, token):
@@ -119,6 +193,9 @@ def main():
         raise SystemExit("Missing or invalid GitHub repository/token")
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     data = collect(repo, token)
+    azure_file = pathlib.Path("azure-inventory.json")
+    if azure_file.exists():
+        data["azure"] = json.loads(azure_file.read_text(encoding="utf-8"))
     report = render_report(data, now)
     print(report)
     with open("design-management-report.md", "w", encoding="utf-8") as fh:
@@ -131,6 +208,8 @@ def main():
     new_body = replace_report(issue.get("body") or "", report)
     github_patch(path, {"body": new_body}, token)
     print("Updated dashboard issue #" + str(DASHBOARD_ISSUE))
+    created = publish_new_blockers(repo, token, data["paths"])
+    print("Created " + str(len(created)) + " new critical release-gate issues")
 
 if __name__ == "__main__":
     main()
