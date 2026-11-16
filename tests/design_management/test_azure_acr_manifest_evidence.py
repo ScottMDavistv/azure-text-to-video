@@ -77,6 +77,8 @@ class AcrManifestEvidenceTests(unittest.TestCase):
         self.assertIn("AZURE_AUDIT_OPERATIONS_ENABLED", workflow)
         self.assertIn("python scripts/azure_acr_manifest_evidence.py", workflow)
         self.assertIn("azure-acr-manifest-evidence.json", workflow)
+        self.assertIn("AZURE_EXTENSION_USE_DYNAMIC_INSTALL: 'no'", workflow)
+        self.assertIn("AZURE_CORE_COLLECT_TELEMETRY: 'no'", workflow)
         self.assertNotIn("az acr login", workflow)
         self.assertNotIn("az acr import", workflow)
         self.assertNotIn("az role assignment create", workflow)
