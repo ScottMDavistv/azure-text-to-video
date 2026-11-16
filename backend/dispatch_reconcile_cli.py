@@ -109,6 +109,13 @@ def run_cli(argv=None):
 
     # Fail closed before establishing any Azure client.
     validate_safe_defaults()
+    if (os.getenv("VIDEO_RENDER_PROVIDER", "disabled").strip().lower()
+            != "disabled"
+            or os.getenv("ENABLE_LIVE_VIDEO_RENDERING", "").strip().lower()
+            in {"1", "true", "yes"}
+            or os.getenv("ENABLE_WORKER_CONSUMPTION", "").strip().lower()
+            in {"1", "true", "yes"}):
+        raise RuntimeError("Dispatch reconciliation requires disabled rendering")
     if args.check:
         print(json.dumps({"mode": "dispatch_reconciliation_dry_run",
                           "paid_fal": False, "azure_calls": False}))
