@@ -267,6 +267,11 @@ def settle(table, job_id, actual_cents, *, provider_receipt=None,
     that no provider charge occurred. Do not call this
     for uncertain or in-flight FAL requests.
     """
+    # F-03: this legacy function has no durable provider-scoped receipt
+    # uniqueness. It must not be used once the guarded recovery module is
+    # introduced. Use finance_recovery.settle_unique_receipt instead.
+    raise FinanceDenied("Legacy settlement disabled; use unique receipt ledger")
+
     check_id(job_id)
     actual = check_money(actual_cents, allow_zero=True)
     if not callable(verify_provider_receipt) or provider_receipt is None:
