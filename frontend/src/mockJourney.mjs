@@ -10,7 +10,7 @@ export const TOTAL_SECONDS = SCENES.reduce((sum, scene) => sum + scene.duration,
 export const MOCK_STAGES = Object.freeze(['queued', 'planning', 'rendering', 'assembling', 'completed'])
 export function validatePrompt(input) {
   const prompt = input.trim()
-  if (prompt.length < 10) return 'Enter at least 10 characters.'
+  if (prompt.length < 1) return 'Enter at least 1 character.'
   if (prompt.length > 2000) return 'Limit your prompt to 2,000 characters.'
   return null
 }
