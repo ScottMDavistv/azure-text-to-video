@@ -150,8 +150,8 @@ class LostResponse:
         self.table = table
     def get_entity(self, **kwargs):
         return self.table.get_entity(**kwargs)
-    def submit_transaction(self, actions):
-        self.table.submit_transaction(actions)
+    def submit_transaction(self, actions, **kwargs):
+        self.table.submit_transaction(actions, **kwargs)
         raise ServiceResponseError(message="commit succeeded but response lost")
 
 
