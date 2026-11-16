@@ -7,7 +7,7 @@ param reconciliationIdentityName string
 @description('Existing Azure Container Registry.')
 param registryName string = 'acrtextvideo1794671698'
 
-@description('Immutable non-paid backend image containing dispatch_reconcile_cli.')
+@description('Only immutable ACR image@sha256:<64 hex> references may be approved; validate through the deployment readiness gate.')
 param workerImage string
 
 @description('Storage account and queue names, not credentials.')
@@ -15,7 +15,8 @@ param storageAccountName string = 'sttextvideo1794671698'
 param queueName string = 'textvideo-jobs'
 param jobsTableName string = 'VideoJobs'
 
-@description('Five-field UTC cron, defaults every 15 minutes.')
+@description('Approved UTC schedules: every 15 minutes or hourly. Slower schedules reduce cost.')
+@allowed([ '*/15 * * * *', '0 * * * *' ])
 param cronExpression string = '*/15 * * * *'
 
 @description('Explicit opt-in: false schedules only the offline --check preflight.')
