@@ -104,7 +104,12 @@ def request_unsubmitted_release(table, *, job_id, first_admin,
     record = {"PartitionKey": PARTITION, "RowKey": "release:" + release_id,
               "jobId": job_id, "firstApproverId": first_admin.user_id,
               "status": "pending", "createdAt": now()}
+    # Only one release request may exist for each job; the guard row
+    # and the approval intent are created in the same atomic batch.
     commit(table, [create(record),
+                   create({"PartitionKey": PARTITION,
+                           "RowKey": "release-job:" + job_id,
+                           "releaseId": release_id, "createdAt": now()}),
                    create(audit("release_requested", jobId=job_id,
                                 actorId=first_admin.user_id,
                                 releaseId=release_id))])
@@ -127,6 +132,10 @@ def approve_unsubmitted_release(table, *, release_id, second_admin,
         raise FinanceDenied("Release approval already closed")
     if approval["firstApproverId"] == second_admin.user_id:
         raise FinanceDenied("Distinct second administrator required")
+    # The initial approver must still be authorized at the point funds
+    # move; a revoked or removed administrator cannot contribute approval.
+    if admin_lookup(approval["firstApproverId"]) is not True:
+        raise FinanceDenied("Original administrator approval was revoked")
     job_id = check_id(approval["jobId"])
     if no_submission_evidence is None or not callable(verify_never_submitted):
         raise FinanceDenied("Trusted no-submission proof required")
