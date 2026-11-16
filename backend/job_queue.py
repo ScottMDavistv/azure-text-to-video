@@ -34,8 +34,19 @@ def enqueue_job(job_id):
 
 
 def parse_job_message(message):
+    """Require a bounded JSON object with a canonical UUID job identifier."""
+    if not isinstance(message, str) or len(message) > 4096:
+        raise ValueError("Invalid queue message")
     payload = json.loads(message)
-    return str(UUID(payload["job_id"]))
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid queue message object")
+    job_id = payload["job_id"]
+    if not isinstance(job_id, str):
+        raise ValueError("Invalid queue job identifier")
+    canonical = str(UUID(job_id))
+    if canonical != job_id:
+        raise ValueError("Non-canonical queue job identifier")
+    return canonical
 
 
 
