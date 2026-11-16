@@ -143,6 +143,13 @@ jobs:
           AZURITE_TABLE_TEST: '1'
         run: python -m pytest -q backend/tests/test_azurite_finance_integration.py
 
+      - name: Test integrated receipt deduplication and recovery against Azurite
+        env:
+          AZURITE_TABLE_TEST: '1'
+        run: |
+          python -m pytest -q backend/tests/test_azurite_finance_recovery.py
+          python -m pytest -q backend/tests/test_azurite_bulk03_receipt_integration.py
+
       - name: Run all backend regression tests
         run: python -m pytest -q backend/tests
 
