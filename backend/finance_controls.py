@@ -120,7 +120,13 @@ def audit(event, **fields):
 
 def commit(table, actions):
     try:
-        table.submit_transaction(actions)
+        # Finance batches include non-idempotent creates and conditional
+        # updates. Azure's default retry policy can POST the same batch
+        # again after a server commit and misclassify the resulting 409/412
+        # as a definite failure. Disable automatic SDK retries *per write*
+        # irrespective of which TableClient the trusted caller supplied.
+        # A 5xx / timeout now remains AmbiguousCommit for reconciliation.
+        table.submit_transaction(actions, retry_total=0)
     except HttpResponseError as exc:
         # 412 is a definite conditional ETag failure. Azure Tables atomic
         # batches do not apply any updates when a condition fails.
