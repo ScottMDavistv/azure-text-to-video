@@ -166,6 +166,23 @@ def candidate_completion(issue, prs):
             matches.append(pr)
     return matches
 
+def verify_completion(pr, runs, task):
+    """Return review status from exact merged SHA only; never assert acceptance met."""
+    sha = pr.get("merge_commit_sha")
+    if not sha:
+        return {"status": "missing-merge-sha", "evidence": []}
+    relevant = [r for r in runs if r.get("head_sha") == sha and r.get("event") in ("push", "workflow_dispatch")]
+    expected = {"Backend Python Tests", "Security Checks"}
+    if task["agent"] == "integration":
+        expected.add("Synthetic 300-second MP4 Acceptance")
+    passed = {r.get("name") for r in relevant if r.get("status") == "completed" and r.get("conclusion") == "success"}
+    missing = sorted(expected - passed)
+    return {"status": "ci-review-ready" if not missing else "ci-unverified",
+            "missing_checks": missing,
+            "evidence": [r.get("html_url", "") for r in relevant if r.get("name") in expected
+                         and r.get("status") == "completed" and r.get("conclusion") == "success"],
+            "manual_acceptance_required": True}
+
 def publish(repo, token, tasks, indexed, dry_run):
     changes = []
     for task in tasks:
@@ -200,12 +217,19 @@ def main():
     queues = work_queues(tasks, indexed)
     prs = list_pages(repo, "pulls?state=closed", token)
     candidates = []
+    tasks_by_id = validate(tasks)
     for key, issue in indexed.items():
         if issue.get("state") != "open" or key not in {t["id"] for t in tasks}:
             continue
         for pr in candidate_completion(issue, prs):
-            candidates.append({"task": key, "pr": pr["number"],
-                               "status": "review-required: merged PR alone is insufficient"})
+            merged_sha = pr.get("merge_commit_sha", "")
+            checks = []
+            if re.fullmatch(r"[a-f0-9]{40}", merged_sha):
+                response = http_json("GET", "https://api.github.com/repos/" + repo +
+                                     "/actions/runs?head_sha=" + merged_sha + "&per_page=100", token)
+                checks = response.get("workflow_runs", [])
+            assessment = verify_completion(pr, checks, tasks_by_id[key])
+            candidates.append({"task": key, "pr": pr["number"], **assessment})
     result = {
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "publish_enabled": publish_enabled,
