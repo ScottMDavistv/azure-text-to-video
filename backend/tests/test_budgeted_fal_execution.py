@@ -77,7 +77,9 @@ def test_settlement_needs_verified_billing():
     with pytest.raises(ExecutionBlocked):
         settle_verified_charge(
             finance_table=finance, job_id=uid(),
-            charge_cents=100, verified_billing=lambda *args: False,
+            charge_cents=100, provider_request_id="req_1",
+            provider_receipt={"charge": "fake"},
+            verify_provider_receipt=None,
         )
     finance.submit_transaction.assert_not_called()
 
@@ -87,7 +89,38 @@ def test_settlement_delegates_verified_charge():
     with patch("finance_controls.settle", return_value={"state": "settled"}) as settle:
         result = settle_verified_charge(
             finance_table=finance, job_id=uid(), charge_cents=100,
-            verified_billing=lambda *args: True,
+            provider_request_id="req_1",
+            provider_receipt={"charge": "confirmed"},
+            verify_provider_receipt=lambda *args: True,
         )
     assert result["state"] == "settled"
     settle.assert_called_once()
+
+
+def test_settlement_passes_real_verifier_into_ledger():
+    finance = MagicMock()
+    calls = []
+    receipt = {"provider_record": "test"}
+    with patch("finance_controls.settle", return_value={"state": "settled"}) as ledger:
+        settle_verified_charge(
+            finance_table=finance, job_id=uid(), charge_cents=55,
+            provider_request_id="req_2", provider_receipt=receipt,
+            verify_provider_receipt=lambda *args: calls.append(args) or True,
+        )
+    kwargs = ledger.call_args.kwargs
+    assert kwargs["provider_receipt"] is receipt
+    assert kwargs["verify_provider_receipt"](
+        ledger.call_args.args[1], 55, receipt
+    ) is True
+    assert calls[0][1:] == ("req_2", 55, receipt)
+
+
+def test_settlement_must_fail_closed_without_provider_request():
+    finance = MagicMock()
+    with pytest.raises(ExecutionBlocked):
+        settle_verified_charge(
+            finance_table=finance, job_id=uid(), charge_cents=10,
+            provider_request_id="", provider_receipt={"provider": "fal"},
+            verify_provider_receipt=lambda *args: True,
+        )
+    finance.submit_transaction.assert_not_called()
