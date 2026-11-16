@@ -72,9 +72,9 @@ def test_valid_receipt_bound_to_provider_request_and_job():
             verify_provider_receipt=lambda *a: seen.append(a) or True,
         )
     assert result["state"] == "settled"
-    # The adapter must receive the actual verifier; only finance_controls.settle
-    # may invoke it after confirming an open reservation.
-    assert seen == []
+    # Precheck first; the original callback is also passed to the
+    # hardened ledger so it can independently reverify before settlement.
+    assert seen == [(job_id, "req_123", 75, {"receipt": "trusted"})]
     assert settle.call_args.kwargs["job_id"] == job_id
     assert settle.call_args.kwargs["provider_request_id"] == "req_123"
     assert settle.call_args.kwargs["provider_receipt"] == {"receipt": "trusted"}
