@@ -127,7 +127,7 @@ jobs:
       - name: Start isolated Azurite Table emulator
         run: |
           docker run --rm -d --name render-table-ci \
-            -p 10002:10002 \
+            -p 10001:10001 -p 10002:10002 \
             mcr.microsoft.com/azure-storage/azurite:latest
           sleep 2
           docker ps --filter name=render-table-ci
@@ -164,6 +164,13 @@ jobs:
         run: |
           python -m pytest -q backend/tests/test_azurite_finance_recovery.py
           python -m pytest -q backend/tests/test_azurite_bulk03_receipt_integration.py
+
+      - name: Test dispatch reconciliation against Azurite Queue and Table SDK
+        env:
+          AZURITE_DISPATCH_TEST: '1'
+        run: |
+          python -m pytest -q backend/tests/test_azurite_dispatch_integration.py
+          python -m dispatch_reconcile_cli --check
 
       - name: Run all backend regression tests
         run: python -m pytest -q backend/tests
