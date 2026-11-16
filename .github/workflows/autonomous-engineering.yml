@@ -1,0 +1,61 @@
+name: Autonomous Engineering Controller (opt-in)
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+  issues:
+    types: [opened, closed, reopened]
+  workflow_run:
+    workflows: ["Backend Python Tests", "Security Checks"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  issues: write
+
+concurrency:
+  group: autonomous-engineering-controller
+  cancel-in-progress: false
+
+jobs:
+  controller:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      vars.AUTONOMOUS_ENGINEERING_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      GITHUB_REF: refs/heads/main
+      AUTONOMOUS_ENGINEERING_ENABLED: ${{ vars.AUTONOMOUS_ENGINEERING_ENABLED }}
+      COPILOT_DISPATCH_ENABLED: ${{ vars.COPILOT_DISPATCH_ENABLED }}
+      COPILOT_REPAIR_ENABLED: ${{ vars.COPILOT_REPAIR_ENABLED }}
+      AUTO_MERGE_ENABLED: ${{ vars.AUTO_MERGE_ENABLED }}
+      PROTECTED_MAIN_VERIFIED: ${{ vars.PROTECTED_MAIN_VERIFIED }}
+      DECISION_INBOX_ENABLED: ${{ vars.DECISION_INBOX_ENABLED }}
+      COPILOT_DISPATCH_TOKEN: ${{ secrets.COPILOT_DISPATCH_TOKEN }}
+      GH_TOKEN: ${{ secrets.AUTO_MERGE_USER_TOKEN }}
+    steps:
+      - name: Use trusted default-branch source only
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate controller policy before any write
+        run: python -m unittest discover -s tests/design_management -p 'test_*.py' -v
+      - name: Route approved issues (max two concurrent Copilot agents)
+        run: python scripts/autonomous_controller.py --mode dispatch
+      - name: Repair failing Copilot PRs with bounded attempts (opt-in)
+        run: python scripts/autonomous_controller.py --mode repair
+      - name: Evaluate low-risk PRs for protected auto-merge
+        run: python scripts/autonomous_controller.py --mode merge
+      - name: Create deduplicated decision-only owner inbox entries
+        run: python scripts/autonomous_controller.py --mode decisions
