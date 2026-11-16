@@ -11,6 +11,7 @@ from azure.core import MatchConditions
 from azure.core.exceptions import HttpResponseError
 from azure.data.tables import UpdateMode
 from finance_controls import check_id
+from worker_readiness import require_worker_readiness, WorkerNotReadyError
 from fal_budget_guard import verify_job_reservation
 from budgeted_fal_execution import run_reserved_fal_job
 from storage import upload_rendered_video
@@ -57,6 +58,12 @@ def process_reserved_job(job_id, *, enabled=False, jobs_table,
     """
     if enabled is not True or not paid_worker_enabled():
         raise PaidWorkerDisabled("Paid FAL worker is disabled")
+    # Check the actual provider allowlist and the durable financial gate
+    # before reading/claiming jobs or invoking the injected provider.
+    try:
+        require_worker_readiness()
+    except WorkerNotReadyError as exc:
+        raise PaidWorkerDisabled("Paid worker readiness not verified") from exc
     check_id(job_id)
     original = jobs_table.get_entity(partition_key="video", row_key=job_id)
     project_id = check_id(original.get("projectId"))
@@ -111,6 +118,10 @@ def run_budgeted_once(*, enabled=False, queue_client=None,
     """
     if enabled is not True or not paid_worker_enabled():
         raise PaidWorkerDisabled("Paid FAL worker is disabled")
+    try:
+        require_worker_readiness()
+    except WorkerNotReadyError as exc:
+        raise PaidWorkerDisabled("Paid worker readiness not verified") from exc
     return consume_one(
         queue_client=queue_client,
         processor=lambda job_id: process_reserved_job(

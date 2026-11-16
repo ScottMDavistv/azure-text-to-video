@@ -9,6 +9,11 @@ from jobs import transition_job
 from worker import process_job
 
 
+@pytest.fixture(autouse=True)
+def local_legacy_api_behavior(monkeypatch):
+    monkeypatch.setenv("ALLOW_UNAUTHENTICATED_DEV", "true")
+
+
 client = TestClient(app)
 
 
