@@ -41,7 +41,7 @@ def emulator():
     table_name = "Disp" + uuid4().hex[:16]
     queue_name = "disp" + uuid4().hex[:16]
     table = service.create_table(table_name)
-    queue = QueueClient.from_connection_string(QUEUE_CONNECTION, queue_name)
+    queue = QueueClient.from_connection_string(QUEUE_CONNECTION, queue_name, api_version="2023-11-03")
     queue.create_queue()
     try:
         yield table, queue
