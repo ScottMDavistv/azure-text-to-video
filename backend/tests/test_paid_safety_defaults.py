@@ -52,3 +52,37 @@ def test_worker_not_ready_when_environment_empty(monkeypatch):
     assert not all(status["checks"].values())
     with pytest.raises(WorkerNotReadyError):
         require_worker_readiness()
+
+
+def test_fal_pipeline_rejected_even_with_all_enable_flags_and_client(monkeypatch):
+    from unittest.mock import MagicMock
+    from render_pipeline import create_render_pipeline, RenderingDisabledError
+    clear_runtime(monkeypatch)
+    for name in (
+        "ENABLE_WORKER_CONSUMPTION", "ENABLE_LIVE_VIDEO_RENDERING",
+        "ACKNOWLEDGE_PROVIDER_BILLING_RISK", "ENABLE_PAID_FAL_WORKER",
+    ):
+        monkeypatch.setenv(name, "true")
+    monkeypatch.setenv("VIDEO_RENDER_PROVIDER", "fal")
+    client = MagicMock()
+    with pytest.raises(RenderingDisabledError, match="allowlist"):
+        create_render_pipeline(client=client)
+    client.submit.assert_not_called()
+
+
+def test_ready_worker_always_requires_durable_financial_enforcement(monkeypatch):
+    from worker_readiness import require_worker_readiness
+    from worker_readiness import WorkerNotReadyError
+    clear_runtime(monkeypatch)
+    for name in (
+        "ENABLE_WORKER_CONSUMPTION", "ENABLE_LIVE_VIDEO_RENDERING",
+        "ACKNOWLEDGE_PROVIDER_BILLING_RISK", "ENABLE_PAID_FAL_WORKER",
+    ):
+        monkeypatch.setenv(name, "true")
+    monkeypatch.setenv("VIDEO_RENDER_PROVIDER", "fal")
+    state = worker_readiness()
+    assert state["checks"]["durable_cost_enforcement"] is False
+    assert state["checks"]["provider_allowed_by_application"] is False
+    assert state["ready_for_live_execution"] is False
+    with pytest.raises(WorkerNotReadyError):
+        require_worker_readiness()
