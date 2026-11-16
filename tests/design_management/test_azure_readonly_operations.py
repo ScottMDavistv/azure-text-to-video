@@ -1,11 +1,14 @@
 """Offline regressions for the no-write Azure operations evidence collector."""
 import importlib.util
 import json
+import os
 import pathlib
 import subprocess
 import unittest
 from unittest.mock import patch
 
+os.environ.setdefault('AZURE_AUDIT_CLIENT_ID', '82b41ada-d973-4ed4-8b13-7de4458185dd')
+os.environ.setdefault('AZURE_SUBSCRIPTION_ID', '41fbffdc-1793-44f9-b70f-220ea8a9bc6c')
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
     "azure_readonly_operations", ROOT / "scripts" / "azure_readonly_operations.py")
@@ -50,7 +53,7 @@ def sample(*, immutable=True):
                        "22222222-2222-2222-2222-222222222222")
     deploy = identity(audit.DEPLOY_IDENTITY, "different-client",
                       "33333333-3333-3333-3333-333333333333")
-    return [job, registry, worker, preview, deploy, [{"roleDefinitionName": "Reader"}], []]
+    return [job, registry, worker, preview, deploy, [{"roleDefinitionName": "Reader", "scope": RG_BASE}], []]
 
 
 class AzureReadOnlyOperationsTests(unittest.TestCase):
@@ -113,7 +116,11 @@ class AzureReadOnlyOperationsTests(unittest.TestCase):
             return Result()
         self.assertEqual(audit.run_read(["az", "account", "show"], runner=runner),
                          {"id": "ok"})
-        for cmd in (["az", "deployment", "group", "create"],
+        for cmd in (["az", "account", "get-access-token"],
+                    ["az", "acr", "import", "--name", audit.ACR],
+                    ["az", "identity", "federated-credential", "list"],
+                    ["az", "account", "show", "--query", "accessToken"],
+                    ["az", "deployment", "group", "create"],
                     ["az", "role", "assignment", "create"],
                     ["az", "identity", "credential", "list"]):
             with self.assertRaises(audit.AuditError):
@@ -138,14 +145,52 @@ class AzureReadOnlyOperationsTests(unittest.TestCase):
                 self.assertIn("Not verified", summary_text)
                 self.assertNotIn("22222222-2222", summary_text)
 
+    def test_case_insensitive_arm_ids_do_not_false_block(self):
+        values = sample()
+        job = values[0]
+        identity_map = job["identity"]["userAssignedIdentities"]
+        original = next(iter(identity_map))
+        identity_map[original.replace("/resourceGroups/", "/resourcegroups/")] = identity_map.pop(original)
+        job["properties"]["configuration"]["registries"][0]["identity"] = (
+            original.replace("/resourceGroups/", "/RESOURCEGROUPS/"))
+        report = audit.evaluate(*values)
+        self.assertEqual(report["deployment_readiness"], "preflight-only")
+
+    def test_null_provider_flag_is_blocked_without_crashing(self):
+        values = sample()
+        values[0]["properties"]["template"]["containers"][0]["env"][0]["value"] = None
+        report = audit.evaluate(*values)
+        self.assertIn("provider and worker flags", [
+            x["check"] for x in report["findings"] if x["status"] == "block"])
+
+    def test_subscription_reader_is_blocked_even_if_role_name_matches(self):
+        values = sample()
+        values[5] = [{"roleDefinitionName": "Reader",
+                      "scope": "/subscriptions/" + audit.EXPECTED_SUBSCRIPTION}]
+        report = audit.evaluate(*values)
+        self.assertIn("preview resource-group RBAC", [
+            x["check"] for x in report["findings"] if x["status"] == "block"])
+
+    def test_unexpected_azure_error_writes_sanitized_failure_artifact(self):
+        with patch.dict(os.environ, {"GITHUB_REF": "refs/heads/main"}):
+            with patch.object(audit, "collect", side_effect=TypeError("secret azure data")):
+                with patch.object(audit, "write_report") as report:
+                    with self.assertRaises(SystemExit) as raised:
+                        audit.main()
+                    self.assertEqual(raised.exception.code, 1)
+                    submitted = report.call_args.args[0]
+                    self.assertEqual(submitted["deployment_readiness"], "blocked")
+                    self.assertNotIn("secret azure data", json.dumps(submitted))
+
     def test_workflow_read_only_identity_and_event_isolation(self):
         workflow = (ROOT / ".github/workflows/azure-readonly-operations.yml").read_text()
-        self.assertIn("environment: dev-deployment", workflow)
+        self.assertIn("environment: azure-readonly-audit", workflow)
+        self.assertIn("AZURE_AUDIT_OPERATIONS_ENABLED", workflow)
         self.assertIn("id-token: write", workflow)
         self.assertIn("permissions:\n  contents: read", workflow)
         self.assertIn("github.ref == 'refs/heads/main'", workflow)
         self.assertIn("github.event_name != 'pull_request'", workflow)
-        self.assertIn("AZURE_PREVIEW_CLIENT_ID", workflow)
+        self.assertIn("AZURE_AUDIT_CLIENT_ID", workflow)
         self.assertNotIn("AZURE_DEPLOY_CLIENT_ID", workflow)
         self.assertNotIn("az deployment group create", workflow)
         self.assertNotIn("azure/login@v2\n        with:\n          client-id: ${{ vars.AZURE_DEPLOY_CLIENT_ID }}", workflow)
