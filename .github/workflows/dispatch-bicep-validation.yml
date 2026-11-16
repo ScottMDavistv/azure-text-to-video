@@ -6,6 +6,8 @@ on:
       - 'infra/dispatch-reconcile-job.bicep'
       - 'infra/dispatch-recovery-alerts.bicep'
       - '.github/workflows/dispatch-bicep-validation.yml'
+      - 'scripts/validate-dispatch-reconciliation-readiness.py'
+      - 'backend/tests/test_dispatch_deployment_readiness.py'
   workflow_dispatch:
 
 permissions:
@@ -26,6 +28,12 @@ jobs:
           chmod +x ./bicep
           sudo mv ./bicep /usr/local/bin/bicep
           bicep --version
+
+      - name: Static fail-closed release policy and negative-path tests
+        run: |
+          python scripts/validate-dispatch-reconciliation-readiness.py
+          python -m pip install 'pytest>=8,<10'
+          python -m pytest -q backend/tests/test_dispatch_deployment_readiness.py
 
       - name: Compile scheduled reconciliation job
         run: bicep build infra/dispatch-reconcile-job.bicep --stdout > /dev/null
