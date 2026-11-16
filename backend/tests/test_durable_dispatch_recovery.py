@@ -202,3 +202,33 @@ def test_sweep_classifies_uncertain_outcome():
     result = reconcile_queued_jobs(table=t, send=unavailable, now=NOW)
     assert result["results"] == [{"job_id": job_id, "outcome": "uncertain"}]
     assert t.row["dispatchState"] == "sending"
+
+
+def test_recovery_pagination_advances_past_first_page():
+    from unittest.mock import MagicMock, patch
+    ids = sorted(str(uuid4()) for _ in range(3))
+    table = MagicMock()
+
+    def query(*, query_filter):
+        if "RowKey gt" in query_filter:
+            return iter([{"RowKey": j} for j in ids if j > ids[1]])
+        return iter([{"RowKey": j} for j in ids])
+
+    table.query_entities.side_effect = query
+    with patch("dispatch_recovery.dispatch_queued_job",
+               return_value={"status": "sent"}) as dispatch:
+        first = reconcile_queued_jobs(table=table, now=NOW, limit=2)
+        assert first["next_cursor"] == ids[1]
+        second = reconcile_queued_jobs(table=table, now=NOW, limit=2,
+                                       cursor=first["next_cursor"])
+        assert second["next_cursor"] is None
+        assert [x["job_id"] for x in first["results"] + second["results"]] == ids
+        assert dispatch.call_count == 3
+
+
+def test_recovery_rejects_invalid_cursor_before_storage():
+    from unittest.mock import patch
+    with patch("dispatch_recovery.get_jobs_table_client") as storage:
+        with pytest.raises(ValueError):
+            reconcile_queued_jobs(cursor="not-a-uuid")
+        storage.assert_not_called()
