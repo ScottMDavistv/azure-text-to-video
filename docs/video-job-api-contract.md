@@ -148,3 +148,31 @@ download. The frontend and worker still need to agree on progress and
 job-level failure details, and the synthetic worker/artifact lifecycle must be
 integrated separately. Paid providers remain disabled by default; do not enable
 them to validate this contract.
+
+### Offline synthetic scene plan
+
+`backend/synthetic_scene_plan.py` defines version 1 of a deterministic,
+provider-independent scene plan. A queued stored job must have a canonical UUID
+`RowKey` and a 1–2,000 character prompt. The prompt is validated but is not used
+to create the synthetic content. The plan contains five ordered, 60-second
+scenes (300 seconds total), solid-color 320×180 video at 12 fps (`libx264`,
+`yuv420p`), and a synthetic 16 kHz mono AAC sine tone per scene. Plans are
+limited to 30 scenes, each 1–60 seconds; scene order, requirements, and total
+duration are validated. Unsupported versions, IDs, requirements, scene values,
+artifact names, or durations raise `ScenePlanValidationError`.
+
+The deterministic artifact name is `renders/{job_id}.mp4` with content type
+`video/mp4`. `worker.process_synthetic_job` claims the queued job using the
+existing ETag-based worker claim, then passes the validated plan to an injected
+renderer and writes bytes through an injected artifact writer. It is an offline
+seam only: it does not dispatch queue messages, invoke FFmpeg, configure Azure
+storage, or call a paid provider. The existing queue consumer still owns
+bounded retries and duplicate-message handling; this seam does not replace it.
+The synthetic FFmpeg fixture remains separate, so plan-to-FFmpeg-to-private-blob
+end-to-end integration remains unproven.
+
+Service-token authentication is not per-user identity or job-ownership
+authorization. No job or download endpoint is made public. Any future
+user-facing flow that needs per-user authorization must wait for an owner
+decision on an identity and ownership contract; neither the plan nor this seam
+defines user identity semantics.
