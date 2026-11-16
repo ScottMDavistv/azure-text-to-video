@@ -39,6 +39,17 @@ def reconcile_verified_fal_charge(
         )
     if not callable(verify_provider_receipt) or provider_receipt is None:
         raise BillingReviewRequired("Trusted billing evidence required")
+    # Precheck before invoking downstream adapters; the hardened ledger
+    # must separately reverify at commit time so adapter mocks cannot
+    # bypass its authenticated-receipt boundary.
+    try:
+        accepted = verify_provider_receipt(
+            job_id, request_id, actual_cents, provider_receipt
+        )
+    except Exception as exc:
+        raise BillingReviewRequired("Billing verification failed") from exc
+    if accepted is not True:
+        raise BillingReviewRequired("Unverified provider billing receipt")
     # Do not replace the real verifier with an ID/amount equality lambda.
     # The underlying finance_controls.settle will invoke this verifier
     # at its fail-closed ledger boundary.
