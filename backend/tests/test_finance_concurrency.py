@@ -7,6 +7,7 @@ application's conditional write expectations and safety invariants.
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Lock
 from uuid import uuid4
+from datetime import datetime, timezone
 
 import pytest
 from azure.core.exceptions import HttpResponseError
