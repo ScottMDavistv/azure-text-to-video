@@ -6,7 +6,7 @@ All financial records use one Azure Table partition
 to permit atomic conditional batch transactions.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import random
 import time
 from uuid import UUID, uuid4
@@ -22,6 +22,8 @@ from azure.data.tables import UpdateMode
 PARTITION = "render-finance-v1"
 MAX_CENTS = 2**31 - 1  # Azure Tables default Python int encoding: Edm.Int32
 MAX_RESERVATION_ATTEMPTS = 32
+INCREASE_REQUEST_TTL = timedelta(hours=24)
+INCREASE_CLOCK_SKEW = timedelta(minutes=5)
 
 
 class FinanceDenied(RuntimeError):
@@ -428,6 +430,44 @@ def request_increase(
     return request
 
 
+def require_fresh_increase(request):
+    """A pending request expires after 24h; old rows with no timestamp fail closed."""
+    created = request.get("createdAt")
+    try:
+        if not isinstance(created, str):
+            raise ValueError("Missing request timestamp")
+        timestamp = datetime.fromisoformat(created.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            raise ValueError("Untrusted naive timestamp")
+        age = datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)
+        if age < -INCREASE_CLOCK_SKEW or age > INCREASE_REQUEST_TTL:
+            raise ValueError("Expired or future-dated request")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise FinanceDenied("Budget increase request expired or invalid") from exc
+
+
+def cancel_increase(table, actor, request_id, *, admin_lookup=None):
+    """Audit a pending increase cancellation with the financial batch."""
+    check_id(request_id)
+    if getattr(actor, "authenticated", False) is not True:
+        raise FinanceDenied("Verified actor required")
+    check_id(getattr(actor, "user_id", None))
+    request = load(table, "increase:" + request_id)
+    if request.get("status") != "pending":
+        raise FinanceDenied("Request is not pending")
+    if actor.user_id != request.get("requesterId"):
+        require_admin(actor, admin_lookup)
+    op_id = str(uuid4())
+    commit(table, [
+        replace(request, status="cancelled", cancelledBy=actor.user_id,
+                cancelledAt=now()),
+        create(audit("increase_cancelled", op_id=op_id,
+                     requestId=request_id, actorId=actor.user_id,
+                     scope=request.get("scope", ""))),
+    ], op_id=op_id)
+    return "cancelled"
+
+
 def approve_increase(
     table, actor, request_id, admin_lookup
 ):
@@ -443,6 +483,8 @@ def approve_increase(
         raise FinanceDenied(
             "Request is not pending"
         )
+
+    require_fresh_increase(request)
 
     if actor.user_id in (
         request["requesterId"],
@@ -468,6 +510,10 @@ def approve_increase(
             event,
         ], op_id=op_id)
         return "awaiting_second_approval"
+
+    first_approver = check_id(request["firstApproverId"])
+    if admin_lookup(first_approver) is not True:
+        raise FinanceDenied("Original administrator approval has been revoked")
 
     limit = load(table, request["scope"])
 

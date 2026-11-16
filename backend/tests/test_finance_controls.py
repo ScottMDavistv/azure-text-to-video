@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock
 from azure.core.exceptions import HttpResponseError, ServiceResponseError
 from uuid import uuid4
+from datetime import datetime, timezone
 
 import pytest
 
@@ -181,6 +182,7 @@ def test_approved_request_requires_two_admins():
         secondApproverId="",
         scope="global:fal",
         proposedCents=10000,
+        createdAt=datetime.now(timezone.utc).isoformat(),
     )
 
     limit = record(
