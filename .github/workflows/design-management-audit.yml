@@ -53,5 +53,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: design-management-snapshot
-          path: |\n            design-management-report.md\n            azure-inventory.json
+          path: |
+            design-management-report.md
+            azure-inventory.json
           if-no-files-found: ignore
