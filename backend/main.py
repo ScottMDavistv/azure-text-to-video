@@ -92,74 +92,61 @@ def get_job(job_id: UUID):
 
 @app.post("/jobs/{job_id}/queue")
 def queue_job(job_id: UUID):
-    from azure.core.exceptions import AzureError
-    from job_queue import enqueue_job
     from jobs import transition_job
+    from dispatch_recovery import (
+        DispatchConflict, DispatchUncertain, dispatch_queued_job,
+    )
 
     try:
-        result = transition_job(str(job_id), "queued")
+        # The queued status and pending-dispatch marker commit together.
+        transition_job(str(job_id), "queued", dispatchState="pending")
     except ResourceNotFoundError:
-        raise HTTPException(
-            status_code=404,
-            detail="Video job not found",
-        )
+        raise HTTPException(status_code=404, detail="Video job not found")
     except ValueError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=str(exc),
-        )
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     try:
-        enqueue_job(str(job_id))
-    except AzureError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Job marked queued, but queue delivery failed. "
-                "Dispatch recovery is required."
-            ),
-        ) from exc
-
-    return {
-        "job_id": str(job_id),
-        "status": result["status"],
-        "dispatched": True,
-    }
-
-
-@app.post("/jobs/{job_id}/retry-dispatch")
-def retry_job_dispatch(job_id: UUID):
-    from azure.core.exceptions import AzureError
-    from job_queue import enqueue_job
-
-    try:
-        entity = get_jobs_table_client().get_entity(
-            partition_key="video",
-            row_key=str(job_id),
-        )
+        result = dispatch_queued_job(str(job_id))
     except ResourceNotFoundError:
-        raise HTTPException(
-            status_code=404,
-            detail="Video job not found",
-        )
-
-    if entity["status"] != "queued":
-        raise HTTPException(
-            status_code=409,
-            detail="Only queued jobs can be redispatched",
-        )
-
-    try:
-        enqueue_job(str(job_id))
-    except AzureError as exc:
+        raise HTTPException(status_code=404, detail="Video job not found")
+    except DispatchConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except DispatchUncertain as exc:
         raise HTTPException(
             status_code=503,
-            detail="Queue delivery failed",
+            detail="Job queued, but dispatch outcome is uncertain; recovery required",
         ) from exc
 
     return {
         "job_id": str(job_id),
         "status": "queued",
-        "dispatched": True,
+        "dispatched": result["dispatched"],
+    }
+
+
+@app.post("/jobs/{job_id}/retry-dispatch")
+def retry_job_dispatch(job_id: UUID):
+    """Safe, lease-based redispatch; duplicate queue messages may still occur."""
+    from dispatch_recovery import (
+        DispatchConflict, DispatchUncertain, dispatch_queued_job,
+    )
+
+    try:
+        result = dispatch_queued_job(str(job_id))
+    except ResourceNotFoundError:
+        raise HTTPException(status_code=404, detail="Video job not found")
+    except DispatchConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except DispatchUncertain as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Queue delivery is uncertain; retry only after lease expiry",
+        ) from exc
+
+    return {
+        "job_id": str(job_id),
+        "status": "queued",
+        "dispatched": result["dispatched"],
         "recovery": True,
+        "dispatch_outcome": result["status"],
     }
