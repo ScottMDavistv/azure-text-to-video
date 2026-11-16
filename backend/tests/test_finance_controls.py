@@ -256,14 +256,14 @@ def test_requester_cannot_approve():
 
 def test_settlement_fails_without_authenticated_receipt():
     table = MagicMock()
-    with pytest.raises(FinanceDenied, match="Verified provider"):
+    with pytest.raises(FinanceDenied, match="Legacy settlement disabled"):
         settle(table, uid(), 0)
     table.get_entity.assert_not_called()
 
 
 def test_settlement_rejects_unverified_receipt():
     table = MagicMock()
-    with pytest.raises(FinanceDenied, match="Unverified"):
+    with pytest.raises(FinanceDenied, match="Legacy settlement disabled"):
         settle(table, uid(), 0, provider_receipt={"claimed": True},
                verify_provider_receipt=lambda *args: False)
     table.get_entity.assert_not_called()
@@ -273,7 +273,7 @@ def test_settlement_rejects_receipt_verifier_exception():
     table = MagicMock()
     def unavailable(*args):
         raise RuntimeError("Provider receipt source unavailable")
-    with pytest.raises(FinanceDenied, match="verification failed"):
+    with pytest.raises(FinanceDenied, match="Legacy settlement disabled"):
         settle(table, uid(), 1, provider_receipt={"id": "x"},
                verify_provider_receipt=unavailable)
     table.get_entity.assert_not_called()
