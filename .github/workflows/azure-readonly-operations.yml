@@ -112,6 +112,8 @@ jobs:
         if: success()
         env:
           AZURE_AUDIT_OPERATIONS_ENABLED: ${{ vars.AZURE_AUDIT_OPERATIONS_ENABLED }}
+          AZURE_EXTENSION_USE_DYNAMIC_INSTALL: 'no'
+          AZURE_CORE_COLLECT_TELEMETRY: 'no'
         run: python scripts/azure_acr_manifest_evidence.py
       - name: Publish sanitized evidence artifact
         if: always()
