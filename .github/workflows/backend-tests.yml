@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: backend-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend-tests:
     name: Backend tests (Python 3.12)
@@ -19,87 +23,146 @@ jobs:
     env:
       PYTHONPATH: backend
       VIDEO_PROVIDER: disabled
+      VIDEO_RENDER_PROVIDER: disabled
       ENABLE_PAID_FAL_WORKER: 'false'
+      ENABLE_LIVE_VIDEO_RENDERING: 'false'
+      ENABLE_WORKER_CONSUMPTION: 'false'
       ENABLE_PROJECT_ROUTES: 'false'
       FAL_KEY: ''
       FAL_API_KEY: ''
+      AZURE_CLIENT_ID: ''
+      AZURE_TENANT_ID: ''
+      AZURE_SUBSCRIPTION_ID: ''
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: backend/requirements.txt
+
       - name: Install backend dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r backend/requirements.txt
+
       - name: Check Python syntax
         run: python -m compileall -q backend
-      - name: Run project foundation tests
-        run: python -m pytest -q backend/tests/test_project_foundation.py
-      - name: Run all backend tests
-        run: python -m pytest -q backend/tests
-      - name: Test signed Entra finance authorization
-        run: python -m pytest -q backend/tests/test_finance_authorization.py
 
-      - name: Start isolated local Azurite Table emulator
+      - name: Test project foundation
+        run: python -m pytest -q backend/tests/test_project_foundation.py
+
+      - name: Test financial controls
+        run: python -m pytest -q backend/tests/test_finance_controls.py
+
+      - name: Test FAL submission safeguards
+        run: python -m pytest -q backend/tests/test_fal_safe_submission.py
+
+      - name: Test held-job orchestration and dispatch
         run: |
-          docker run --rm -d --name finance-azurite-ci -p 10002:10002 mcr.microsoft.com/azure-storage/azurite:latest azurite --tableHost 0.0.0.0 --blobHost 0.0.0.0 --queueHost 0.0.0.0
+          python -m pytest -q backend/tests/test_bulk03_orchestration.py
+          python -m pytest -q backend/tests/test_held_job_dispatch.py
+          python -m pytest -q backend/tests/test_budgeted_fal_execution.py
+          python -m pytest -q backend/tests/test_held_job_coordinator.py
+          python -m pytest -q backend/tests/test_fal_safe_recovery.py
+          python -m pytest -q backend/tests/test_bulk03_integration.py
+
+      - name: Test OIDC, billing, outbox, and reconciliation integration
+        run: |
+          python -m pytest -q backend/tests/test_project_api_security.py
+          python -m pytest -q backend/tests/test_fal_billing_reconciliation.py
+          python -m pytest -q backend/tests/test_budget_hold_events.py
+          python -m pytest -q backend/tests/test_reconciliation_runner.py
+
+      - name: Test P0 security regressions
+        run: |
+          python -m pytest -q backend/tests/test_p0_security_regressions.py
+          python -m pytest -q backend/tests/test_paid_job_finalization.py
+
+      - name: Test first-user onboarding security and replay
+        run: python -m pytest -q backend/tests/test_first_user_onboarding.py
+
+      - name: Test restricted independent-administrator enrollment
+        run: python -m pytest -q backend/tests/test_restricted_onboarding.py
+
+      - name: Test Stage B Entra configuration preflight
+        run: python -m pytest -q backend/tests/test_entra_configuration.py
+
+      - name: Test Stage A orchestration and fail-closed defaults
+        run: |
+          python -m pytest -q backend/tests/test_stage_a_integration.py
+          python -m pytest -q backend/tests/test_stage_a_consumers.py
+          python -m stage_a_runtime_cli --check
+          if ENABLE_PAID_FAL_WORKER=true python -m stage_a_runtime_cli --check; then
+            echo "unsafe paid flag was accepted" >&2
+            exit 1
+          fi
+
+      - name: Build and smoke-test non-billable API container
+        run: |
+          docker build -t render-stage-a-ci:local backend
+          docker run --rm --network none \
+            -e VIDEO_PROVIDER=disabled \
+            -e ENABLE_PAID_FAL_WORKER=false \
+            -e ENABLE_PROJECT_ROUTES=false \
+            render-stage-a-ci:local python -m stage_a_runtime_cli --check
+          docker run --rm --network none \
+            -e VIDEO_PROVIDER=disabled \
+            render-stage-a-ci:local python -c "import main, stage_a_coordinator, notification_inbox, notification_consumer, paid_job_recovery, paid_job_finalization; assert main.app"
+
+      - name: Test current Bulk 02 signed finance authorization and disabled runtime
+        run: |
+          python -m pytest -q backend/tests/test_finance_authorization.py
+          python -m pytest -q backend/tests/test_paid_safety_defaults.py
+
+      - name: Test concurrency simulation
+        run: python -m pytest -q backend/tests/test_finance_concurrency.py
+
+      - name: Start isolated Azurite Table emulator
+        run: |
+          docker run --rm -d --name render-table-ci \
+            -p 10002:10002 \
+            mcr.microsoft.com/azure-storage/azurite:latest
+          sleep 2
+          docker ps --filter name=render-table-ci
+          docker logs render-table-ci
+          test "$(docker inspect -f '{{.State.Running}}' render-table-ci)" = "true"
           python - <<'PY'
           import socket, time
           for attempt in range(40):
               try:
                   with socket.create_connection(("127.0.0.1", 10002), timeout=1):
-                      print("Azurite Table port reachable")
+                      print("Azurite Table endpoint available")
                       break
               except OSError:
                   time.sleep(0.5)
           else:
-              raise RuntimeError("Azurite did not become ready")
-          PY
-          docker ps --filter name=finance-azurite-ci
-          docker logs finance-azurite-ci
-          python - <<'PY'
-          import uuid
-          from azure.data.tables import TableServiceClient
-          endpoint = ("DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;"
-                      "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;"
-                      "TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;")
-          svc = TableServiceClient.from_connection_string(endpoint)
-          name = "Health" + uuid.uuid4().hex[:16]
-          import time
-          last_error = None
-          for attempt in range(40):
-              try:
-                  svc.create_table(name)
-                  svc.delete_table(name)
-                  print("Azurite Table API ready")
-                  break
-              except Exception as exc:
-                  last_error = exc
-                  time.sleep(1)
-          else:
-              raise RuntimeError("Azurite Table API did not become ready") from last_error
-          svc.close()
+              raise RuntimeError("Azurite Table emulator did not start")
           PY
 
-      - name: Run Azure SDK finance contention and crash-recovery tests
+      - name: Test Azure SDK atomic transactions against Azurite
         env:
           AZURITE_TABLE_TEST: '1'
         run: python -m pytest -q backend/tests/test_azurite_finance_integration.py
 
-      - name: Test Azure SDK retry-after-commit fault injection
+      - name: Azure SDK retry-after-commit and transport-fault regression
         env:
           AZURITE_TABLE_TEST: '1'
-        run: python -m pytest -q backend/tests/test_azurite_finance_sdk_retry.py
+        run: |
+          python -m pytest -q backend/tests/test_azurite_finance_sdk_retry.py
+          python -m pytest -q backend/tests/test_sdk_retry_fault_injection.py
 
-      - name: Test SDK retry-after-commit with transport fault injection
-        env:
-          AZURITE_TABLE_TEST: '1'
-        run: python -m pytest -q backend/tests/test_sdk_retry_fault_injection.py
+      - name: Run all backend regression tests
+        run: python -m pytest -q backend/tests
 
-      - name: Verify actual disabled provider and worker readiness defaults
-        run: python -m pytest -q backend/tests/test_paid_safety_defaults.py
+      - name: Summarize test outcome
+        if: always()
+        run: |
+          echo '## Backend CI' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Python: 3.12' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Provider: disabled' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Azure credentials: not supplied' >> "$GITHUB_STEP_SUMMARY"
+          echo '- No deployment or paid rendering step exists in this workflow.' >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,41 @@
+# TEMPLATE ONLY: not a deployed resource.
+# Replace placeholders through an audited operator deployment.
+# Manual trigger cannot start scheduled or paid processing.
+location: ${AZURE_REGION}
+name: job-render-reconciliation-dev
+resourceGroup: ${AZURE_RESOURCE_GROUP}
+properties:
+  environmentId: ${AZURE_CONTAINERAPPS_ENVIRONMENT_ID}
+  configuration:
+    triggerType: Manual
+    replicaTimeout: 600
+    replicaRetryLimit: 0
+    manualTriggerConfig:
+      parallelism: 1
+      replicaCompletionCount: 1
+    registries:
+      - server: ${AZURE_CONTAINER_REGISTRY}
+        identity: ${AZURE_RECONCILIATION_MANAGED_IDENTITY_RESOURCE_ID}
+    identitySettings: []
+  template:
+    containers:
+      - name: stage-a-validator
+        image: ${AZURE_CONTAINER_REGISTRY}/render-api:${REVIEWED_IMAGE_DIGEST}
+        command:
+          - python
+          - -m
+          - stage_a_runtime_cli
+          - --check
+        env:
+          - name: VIDEO_PROVIDER
+            value: disabled
+          - name: ENABLE_PAID_FAL_WORKER
+            value: "false"
+          - name: ENABLE_PROJECT_ROUTES
+            value: "false"
+        resources:
+          cpu: 0.25
+          memory: 0.5Gi
+    scale:
+      minExecutions: 0
+      maxExecutions: 1

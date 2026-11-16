@@ -1,0 +1,114 @@
+name: Stage B Azure Read-Only Inventory
+
+on:
+  push:
+    branches:
+      - feature/bulk-03-integrated
+    paths:
+      - .github/workflows/stage-b-audit.yml
+      - deploy/stage-b/01-readonly-inventory.sh
+      - deploy/stage-b/02-identity-rbac-audit.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    name: Stage B - read-only Azure inventory
+    if: github.ref == 'refs/heads/feature/bulk-03-integrated'
+    runs-on: ubuntu-latest
+    environment: stage-b-audit
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 12
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_CORE_ONLY_SHOW_ERRORS: 'true'
+    steps:
+      - name: Checkout audited branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify required Azure identifiers are present
+        shell: bash
+        run: |
+          set -euo pipefail
+          for value in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+            if [[ -z "${!value:-}" ]]; then
+              echo "::error::Missing GitHub environment secret: $value"
+              exit 1
+            fi
+          done
+          echo "Three Azure identifier settings are present."
+
+      - name: Verify GitHub OIDC subject matches Azure immutable credential
+        shell: bash
+        env:
+          EXPECTED_OIDC_SUBJECT: 'repo:ScottMDavistv@212811615/azure-text-to-video@1457187422:environment:stage-b-audit'
+          EXPECTED_REPOSITORY_ID: '1457187422'
+          EXPECTED_OWNER_ID: '212811615'
+        run: |
+          python - <<'PY'
+          import base64
+          import json
+          import os
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+          url += ("&" if "?" in url else "?") + urlencode(
+              {"audience": "api://AzureADTokenExchange"}
+          )
+          request = Request(
+              url,
+              headers={"Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]},
+          )
+          with urlopen(request, timeout=15) as response:
+              token = json.load(response)["value"]
+          encoded = token.split(".")[1]
+          payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+          actual = payload.get("sub")
+          # The subject is public metadata; never print the token itself.
+          print("GitHub OIDC subject:", actual)
+          print("Repository ID match:", payload.get("repository_id") == os.environ["EXPECTED_REPOSITORY_ID"])
+          print("Owner ID match:", payload.get("repository_owner_id") == os.environ["EXPECTED_OWNER_ID"])
+          if (
+              actual != os.environ["EXPECTED_OIDC_SUBJECT"]
+              or str(payload.get("repository_id")) != os.environ["EXPECTED_REPOSITORY_ID"]
+              or str(payload.get("repository_owner_id")) != os.environ["EXPECTED_OWNER_ID"]
+          ):
+              raise SystemExit(
+                  "::error::GitHub OIDC subject does not match Azure's immutable federated credential. "
+                  "Verify repository immutable-subject setting; do not grant broader Azure access."
+              )
+          PY
+
+      - name: Azure login (federated OIDC, no secrets)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Execute read-only Azure inventory
+        shell: bash
+        run: bash deploy/stage-b/01-readonly-inventory.sh
+
+      - name: Audit API and worker identity data roles (read-only)
+        shell: bash
+        run: bash deploy/stage-b/02-identity-rbac-audit.sh
+
+      - name: Audit summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## Stage B read-only audit" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Environment: stage-b-audit" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Branch: feature/bulk-03-integrated" >> "$GITHUB_STEP_SUMMARY"
+          echo "- OIDC authentication; Reader permissions only" >> "$GITHUB_STEP_SUMMARY"
+          echo "- No Azure writes, deployments, paid jobs, or FAL credentials" >> "$GITHUB_STEP_SUMMARY"

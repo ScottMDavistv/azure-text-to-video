@@ -12,65 +12,19 @@ TEST_MP4 = (
 )
 
 
-def test_queue_to_fal_to_blob_to_completion():
-    job_id = str(uuid4())
-
-    message = MagicMock()
-    message.id = "message-123"
-    message.pop_receipt = "receipt-123"
-    message.dequeue_count = 1
-    message.content = json.dumps({
-        "job_id": job_id,
-    })
-
+def test_legacy_fal_pipeline_is_blocked_before_queue_or_paid_submit():
+    """The old prompt-only FAL adapter is no longer an allowed worker."""
+    import pytest
     queue = MagicMock()
-    queue.receive_messages.return_value = [message]
-
-    renderer = FalVideoRenderer(
-        MagicMock(),
-        downloader=lambda url: TEST_MP4,
-    )
-
-    with (
-        patch("fal_renderer.submit_and_wait") as submit,
-        patch("worker.claim_job") as claim,
-        patch("worker.upload_rendered_video") as upload,
-        patch("worker.transition_job") as transition,
-    ):
-        submit.return_value = {
-            "video_url": "https://fal.media/files/test.mp4"
-        }
-
-        claim.return_value = {
-            "status": "queued",
-            "prompt": "Cinematic ocean sunrise",
-        }
-
-        upload.return_value = f"renders/{job_id}.mp4"
-
-        result = run_once(
-            renderer,
-            queue_client=queue,
-        )
-
-    assert result["status"] == "acknowledged"
-    assert result["result"]["status"] == "completed"
-
-    submit.assert_called_once()
-
-    upload.assert_called_once_with(
-        job_id,
-        TEST_MP4,
-    )
-
-    transition.assert_called_once()
-
-    assert transition.call_args.args == (
-        job_id,
-        "completed",
-    )
-
-    queue.delete_message.assert_called_once()
+    provider = MagicMock()
+    renderer = FalVideoRenderer(provider, downloader=lambda url: TEST_MP4)
+    with patch("fal_renderer.submit_and_wait") as submit:
+        with pytest.raises(ValueError, match="Legacy FAL renderer"):
+            run_once(renderer, queue_client=queue)
+    provider.submit.assert_not_called()
+    submit.assert_not_called()
+    queue.receive_messages.assert_not_called()
+    queue.delete_message.assert_not_called()
 
 
 def test_duplicate_job_does_not_render():

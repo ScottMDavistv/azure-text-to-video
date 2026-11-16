@@ -105,7 +105,8 @@ def read_intent(table, job_id):
     )
 
 
-def record_provider_request_id(table, job_id, request_id):
+def record_provider_request_id(table, job_id, request_id, *,
+                               status_url=None, response_url=None):
     """Record the Fal ID after a successful provider response.
 
     Must never submit a request or reset an uncertain claim.
@@ -137,7 +138,17 @@ def record_provider_request_id(table, job_id, request_id):
             "Provider request ID already recorded"
         )
 
+    if (status_url is None) != (response_url is None):
+        raise SubmissionBlocked("Incomplete provider polling URLs")
+    if status_url is not None:
+        from fal_provider import validate_queue_url
+        validate_queue_url(status_url)
+        validate_queue_url(response_url)
+
     updated = dict(entity)
+    if status_url is not None:
+        updated["statusUrl"] = status_url
+        updated["responseUrl"] = response_url
     updated["state"] = "submitted"
     updated["providerRequestId"] = request_id
     updated["submittedAt"] = datetime.now(
