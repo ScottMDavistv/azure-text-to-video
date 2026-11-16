@@ -27,13 +27,16 @@ def consume_one(
     if processor is None:
         raise ValueError("A job processor is required")
 
-    if max_attempts < 1:
-        raise ValueError("max_attempts must be positive")
+    if (type(max_attempts) is not int or max_attempts < 1
+            or max_attempts > 100):
+        raise ValueError("max_attempts must be an integer between 1 and 100")
 
-    if visibility_timeout < 1:
-        raise ValueError("visibility_timeout must be positive")
+    if (type(visibility_timeout) is not int
+            or not 1 <= visibility_timeout <= 604800):
+        raise ValueError("Invalid visibility timeout")
 
-    if not 0 < renew_interval < visibility_timeout:
+    if (type(renew_interval) not in (int, float)
+            or not 0 < renew_interval < visibility_timeout):
         raise ValueError("Invalid visibility renewal interval")
 
     queue = (
@@ -62,7 +65,7 @@ def consume_one(
         }
 
     count = getattr(message, "dequeue_count", None)
-    attempts = count if isinstance(count, int) else 1
+    attempts = count if type(count) is int and count >= 1 else 1
 
     lease = QueueVisibilityLease(
         queue_client=queue,
