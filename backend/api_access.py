@@ -1,9 +1,10 @@
 """
-Optional service-level authentication for the job API.
+Fail-closed service-level authentication for the legacy job API.
 
-Default: authentication enforcement disabled.
+Default: authentication enforcement enabled. Only an explicit
+ALLOW_UNAUTHENTICATED_DEV=true override permits unsafe local development.
 
-When REQUIRE_JOB_API_AUTH=true, every /jobs request
+Unless this deliberate development override is enabled, every /jobs request
 requires an API_ACCESS_TOKEN Bearer token.
 
 This is a temporary service credential, not per-user
@@ -21,9 +22,11 @@ MINIMUM_TOKEN_LENGTH = 32
 
 
 def api_auth_required():
+    # A missing or false REQUIRE_JOB_API_AUTH is not sufficient to turn
+    # off authentication. Only this explicit local-dev-only opt-out can.
     return os.getenv(
-        "REQUIRE_JOB_API_AUTH", ""
-    ).strip().lower() in {"1", "true", "yes"}
+        "ALLOW_UNAUTHENTICATED_DEV", ""
+    ).strip().lower() not in {"1", "true", "yes"}
 
 
 def protected_job_path(path):
@@ -54,7 +57,7 @@ def check_api_authorization(authorization):
         if separator and scheme.lower() == "bearer":
             supplied = token.strip()
 
-    return hmac.compare_digest(supplied, expected)
+    return hmac.compare_digest(supplied.encode('utf-8'), expected.encode('utf-8'))
 
 
 class JobApiAuthMiddleware(BaseHTTPMiddleware):
