@@ -22,6 +22,10 @@ on:
         description: For deploy only, type DEPLOY-DEV-WORKER
         required: false
         type: string
+      approved_sha:
+        description: For deploy only, paste the full reviewed main commit SHA
+        required: false
+        type: string
 permissions:
   contents: read
   id-token: write
@@ -45,12 +49,19 @@ jobs:
           python scripts/validate-worker-infrastructure.py
           python scripts/validate-fal-keyvault-iac.py
           test "$OPERATION" = preview -o "$OPERATION" = whatif -o "$OPERATION" = deploy
+          if [ "$OPERATION" = whatif ] || [ "$OPERATION" = deploy ]; then
+            test "$TRIGGER_ACTOR" = ScottMDavistv
+          fi
           if [ "$OPERATION" = deploy ]; then
+            test "$APPROVED_SHA" = "$GITHUB_SHA"
+            test "${#APPROVED_SHA}" -eq 40
             test "$CONFIRMATION" = DEPLOY-DEV-WORKER
             test "$DEPLOY_ENABLED" = true
             test "$MAIN_PROTECTED" = true
           fi
         env:
+          TRIGGER_ACTOR: ${{ github.actor }}
+          APPROVED_SHA: ${{ inputs.approved_sha }}
           OPERATION: ${{ github.event_name == 'workflow_dispatch' && inputs.operation || 'preview' }}
           CONFIRMATION: ${{ inputs.confirmation }}
           DEPLOY_ENABLED: ${{ vars.AZURE_DEV_DEPLOY_ENABLED }}
@@ -84,7 +95,7 @@ jobs:
             --query '{name:name,trigger:properties.configuration.triggerType,profile:properties.workloadProfileName}' -o json
   whatif:
     needs: preview
-    if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'whatif' || inputs.operation == 'deploy') && vars.PROTECTED_MAIN_VERIFIED == 'true'
+    if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'whatif' || inputs.operation == 'deploy') && github.actor == 'ScottMDavistv' && vars.PROTECTED_MAIN_VERIFIED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: dev-deployment-apply
@@ -111,7 +122,7 @@ jobs:
           WORKER_IMAGE: acrtextvideo1794671698.azurecr.io/textvideo-worker:692bb1b7f7bd467f1d64e7288115424d21506c12
   deploy:
     needs: whatif
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy' && inputs.confirmation == 'DEPLOY-DEV-WORKER' && vars.AZURE_DEV_DEPLOY_ENABLED == 'true' && vars.PROTECTED_MAIN_VERIFIED == 'true'
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy' && github.actor == 'ScottMDavistv' && inputs.approved_sha == github.sha && inputs.confirmation == 'DEPLOY-DEV-WORKER' && vars.AZURE_DEV_DEPLOY_ENABLED == 'true' && vars.PROTECTED_MAIN_VERIFIED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     environment: dev-deployment-apply
