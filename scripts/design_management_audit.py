@@ -82,11 +82,11 @@ def publish_new_blockers(repo, token, paths):
         if key in existing:
             continue
         # Explicitly mark as a candidate, not a source-verified defect.
-        body = ("<!-- design-management-blocker:" + key + " -->\\n"
-                "## Automated critical release-gate candidate\\n"
-                + item["details"] + "\\n\\n"
+        body = ("<!-- design-management-blocker:" + key + " -->\n"
+                "## Automated critical release-gate candidate\n"
+                + item["details"] + "\n\n"
                 "Source: default-branch file inventory. **File absence is not proof "
-                "of missing functionality**; verify before acting.\\n"
+                "of missing functionality**; verify before acting.\n"
                 "No permission to merge, deploy, enable FAL, or spend money.")
         issue = github_post("/repos/" + repo + "/issues", {"title": item["title"], "body": body}, token)
         created.append((key, issue.get("html_url", "")))
@@ -133,7 +133,7 @@ def render_report(data, now):
         "**Scope:** source inventory, recent CI and PRs, not a deployed product acceptance test.",
         "**Base commit:** `" + data["sha"] + "`",
         "**Product acceptance:** NOT VERIFIED — no validated 300-second video evidence.",
-        "**Azure runtime:** NOT VERIFIED — this workflow has no Azure credentials.",
+        "**Azure runtime health:** NOT VERIFIED — resource metadata is not health validation.",
         "**Cost/provider activation:** NOT VERIFIED; no paid provider operations executed.",
         "",
         "#### Capability indicators (file existence only; NOT proof of functionality)",
