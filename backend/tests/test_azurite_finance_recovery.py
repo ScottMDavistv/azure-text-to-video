@@ -178,3 +178,58 @@ def test_concurrent_receipt_replay_one_winner(table):
     assert sum(results) == 1
     assert row(table, "global:fal")["spentCents"] == 40
     assert row(table, "global:fal")["reservedCents"] == 100
+
+
+def test_same_job_cannot_start_two_release_requests(table):
+    project, job, admin_id = uid(), uid(), uid()
+    seed(table, project)
+    reserve(table, project, job, 20)
+    actor = Actor(admin_id, True)
+    lookup = lambda v: v == admin_id
+    request_unsubmitted_release(table, job_id=job, first_admin=actor,
+                                admin_lookup=lookup, release_id=uid())
+    with pytest.raises(FinanceDenied):
+        request_unsubmitted_release(table, job_id=job, first_admin=actor,
+                                    admin_lookup=lookup, release_id=uid())
+    assert row(table, "global:fal")["reservedCents"] == 20
+
+
+def test_revoked_first_admin_blocks_release(table):
+    project, job, first_id, second_id = uid(), uid(), uid(), uid()
+    seed(table, project)
+    reserve(table, project, job, 30)
+    release_id = uid()
+    first, second = Actor(first_id, True), Actor(second_id, True)
+    request_unsubmitted_release(table, job_id=job, first_admin=first,
+                                admin_lookup=lambda v: v == first_id,
+                                release_id=release_id)
+    with pytest.raises(FinanceDenied, match="revoked"):
+        approve_unsubmitted_release(
+            table, release_id=release_id, second_admin=second,
+            admin_lookup=lambda v: v == second_id,
+            no_submission_evidence={"never_submitted": True},
+            verify_never_submitted=lambda j, e: True,
+        )
+    assert row(table, "global:fal")["reservedCents"] == 30
+    assert row(table, "release:" + release_id)["status"] == "pending"
+
+
+def test_ambiguous_non_submission_must_never_release(table):
+    project, job, first_id, second_id = uid(), uid(), uid(), uid()
+    seed(table, project)
+    reserve(table, project, job, 70)
+    approval_id = uid()
+    request_unsubmitted_release(
+        table, job_id=job, first_admin=Actor(first_id, True),
+        admin_lookup=lambda v: v in {first_id, second_id},
+        release_id=approval_id,
+    )
+    with pytest.raises(FinanceDenied):
+        approve_unsubmitted_release(
+            table, release_id=approval_id,
+            second_admin=Actor(second_id, True),
+            admin_lookup=lambda v: v in {first_id, second_id},
+            no_submission_evidence={"state": "unknown"},
+            verify_never_submitted=lambda job, evidence: False,
+        )
+    assert row(table, "global:fal")["reservedCents"] == 70
