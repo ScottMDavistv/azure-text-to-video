@@ -4,7 +4,6 @@
 No Azure writes, secrets, deployments, container executions, or provider SDKs.
 Output intentionally excludes identity IDs, raw Azure responses, and env secrets.
 """
-import datetime as dt
 import json
 import os
 import pathlib
@@ -17,8 +16,9 @@ WORKER_IDENTITY = "id-textvideo-worker-dev"
 AUDIT_IDENTITY = "id-textvideo-github-audit-dev"
 DEPLOY_IDENTITY = "id-textvideo-github-deploy-dev"
 ACR = "acrtextvideo1794671698"
-PREVIEW_CLIENT_ID = "82b41ada-d973-4ed4-8b13-7de4458185dd"
-EXPECTED_SUBSCRIPTION = "41fbffdc-1793-44f9-b70f-220ea8a9bc6c"
+# Validated against environment variables; identifiers must not be hardcoded in sources.
+PREVIEW_CLIENT_ID = os.environ.get("AZURE_AUDIT_CLIENT_ID", "")
+EXPECTED_SUBSCRIPTION = os.environ.get("AZURE_SUBSCRIPTION_ID", "")
 FLAGS = {
     "VIDEO_RENDER_PROVIDER": "disabled",
     "ENABLE_WORKER_CONSUMPTION": "false",
@@ -33,18 +33,39 @@ class AuditError(Exception):
     pass
 
 
+def is_uuid(value):
+    return bool(re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", str(value or "")))
+
+
+def allowed_command(command):
+    """Strict command-shape allowlist; optional CLI flags cannot widen reads."""
+    if not isinstance(command, list):
+        return False
+    if command == ["az", "account", "show"]:
+        return True
+    if command[:3] == ["az", "identity", "show"] and len(command) == 7:
+        return (command[3:5] == ["--resource-group", RG]
+                and command[5] == "--name"
+                and command[6] in (AUDIT_IDENTITY, DEPLOY_IDENTITY, WORKER_IDENTITY))
+    if command[:3] == ["az", "resource", "show"] and len(command) == 7:
+        expected = ("/subscriptions/" + EXPECTED_SUBSCRIPTION +
+                    "/resourceGroups/" + RG +
+                    "/providers/Microsoft.App/jobs/" + JOB)
+        return command[3:5] == ["--ids", expected] and command[5:] == [
+            "--api-version", "2024-03-01"]
+    if command == ["az", "acr", "show", "--resource-group", RG, "--name", ACR]:
+        return True
+    if command[:4] == ["az", "role", "assignment", "list"] and len(command) == 9:
+        scope = "/subscriptions/" + EXPECTED_SUBSCRIPTION + "/resourceGroups/" + RG
+        return (command[4] == "--assignee-object-id" and is_uuid(command[5])
+                and command[6:] == ["--scope", scope, "--include-inherited"])
+    return False
+
+
 def run_read(command, *, runner=subprocess.run):
-    """Pass argv directly; never surface raw Azure stdout/stderr on failure."""
-    if command[:2] not in (
-        ["az", "account"], ["az", "resource"], ["az", "identity"],
-        ["az", "acr"], ["az", "role"],
-    ):
-        raise AuditError("Non-allowlisted Azure command")
-    if any(part in command for part in (
-        "create", "update", "delete", "assign", "start", "exec",
-        "deployment", "secret", "credential",
-    )):
-        raise AuditError("Mutating or credential-related command forbidden")
+    """Only exact approved commands; never emit Azure CLI stdout/stderr on failure."""
+    if not allowed_command(command):
+        raise AuditError("Non-allowlisted Azure read operation")
     try:
         result = runner(command + ["--output", "json"], capture_output=True,
                         text=True, check=True, timeout=90)
@@ -78,7 +99,7 @@ def evaluate(job, registry, worker_identity, audit_identity, deploy_identity,
     safe_resource_id(deploy_identity.get("id"), suffix="/userAssignedIdentities/" + DEPLOY_IDENTITY)
     add("worker scope", bool(expected_job_id), "Existing development Container Apps job")
     identities = (job.get("identity") or {}).get("userAssignedIdentities") or {}
-    add("worker managed identity", len(identities) == 1 and worker_id in identities
+    add("worker managed identity", len(identities) == 1 and worker_id.casefold() in {str(k).casefold() for k in identities}
         and (job.get("identity") or {}).get("type") == "UserAssigned",
         "Dedicated user-assigned identity only")
     props = job.get("properties") or {}
@@ -87,7 +108,7 @@ def evaluate(job, registry, worker_identity, audit_identity, deploy_identity,
     containers = template.get("containers") or []
     regs = conf.get("registries") or []
     login_server = registry.get("loginServer") or (registry.get("properties") or {}).get("loginServer")
-    add("registry identity", len(regs) == 1 and regs[0].get("identity") == worker_id
+    add("registry identity", len(regs) == 1 and str(regs[0].get("identity") or "").casefold() == worker_id.casefold()
         and regs[0].get("server") == login_server
         and login_server == ACR + ".azurecr.io",
         "Registry uses dedicated worker identity")
@@ -108,7 +129,7 @@ def evaluate(job, registry, worker_identity, audit_identity, deploy_identity,
     env = {x.get("name"): x for x in env_items if isinstance(x, dict)}
     flags_safe = all(
         (name not in env and name == "ENABLE_PAID_FAL_WORKER") or
-        (name in env and env[name].get("value", "").lower() == expected
+        (name in env and str(env[name].get("value") or "").lower() == expected
          and not env[name].get("secretRef"))
         for name, expected in FLAGS.items()
     )
@@ -118,19 +139,24 @@ def evaluate(job, registry, worker_identity, audit_identity, deploy_identity,
         not any(isinstance(v, dict) and v.get("secretRef") for v in env_items),
         "No secrets or environment secret references")
     add("distinct GitHub identities",
-        audit_identity.get("clientId") == PREVIEW_CLIENT_ID and
+        bool(PREVIEW_CLIENT_ID) and audit_identity.get("clientId") == PREVIEW_CLIENT_ID and
         bool(deploy_identity.get("clientId")) and
         deploy_identity.get("clientId") != PREVIEW_CLIENT_ID and
         audit_identity.get("principalId") != deploy_identity.get("principalId"),
         "Preview and deployment identities differ")
-    def role_names(items):
+    required_scope = ("/subscriptions/" + EXPECTED_SUBSCRIPTION
+                      + "/resourceGroups/" + RG).casefold()
+    def role_entries(items):
         if not isinstance(items, list):
             raise AuditError("Azure RBAC response was not a list")
-        return sorted({str(x.get("roleDefinitionName", "")) for x in items})
-    preview = role_names(audit_roles)
-    deploy = role_names(deploy_roles)
-    add("preview resource-group RBAC", preview == ["Reader"],
-        "Preview identity must be Reader only (RG + inherited)")
+        return [(str(x.get("roleDefinitionName", "")),
+                 str(x.get("scope", "")).casefold()) for x in items
+                if isinstance(x, dict)]
+    preview = role_entries(audit_roles)
+    deploy = role_entries(deploy_roles)
+    add("preview resource-group RBAC",
+        len(preview) == 1 and preview[0] == ("Reader", required_scope),
+        "Exactly Reader at the development resource group; inherited/subscription grants block")
     add("deploy resource-group RBAC", not deploy,
         "Deployment identity must have no RG or inherited roles before authorization")
     return {"schema_version": 1,
@@ -150,6 +176,8 @@ def evaluate(job, registry, worker_identity, audit_identity, deploy_identity,
 
 
 def collect(*, reader=run_read):
+    if not is_uuid(EXPECTED_SUBSCRIPTION) or not is_uuid(PREVIEW_CLIENT_ID):
+        raise AuditError("Missing or invalid expected Azure identity configuration")
     account = reader(["az", "account", "show"])
     if account.get("id", "").lower() != EXPECTED_SUBSCRIPTION:
         raise AuditError("Wrong Azure subscription; refusing resource inspection")
@@ -164,7 +192,7 @@ def collect(*, reader=run_read):
                   "--api-version", "2024-03-01"])
     registry = reader(["az", "acr", "show", "--resource-group", RG, "--name", ACR])
     def roles(principal):
-        if not re.fullmatch(r"[0-9a-fA-F-]{36}", str(principal or "")):
+        if not is_uuid(principal):
             raise AuditError("Invalid identity principal ID")
         return reader(["az", "role", "assignment", "list",
                        "--assignee-object-id", principal,
@@ -191,8 +219,8 @@ def write_report(report):
 def main():
     if os.environ.get("GITHUB_REF") != "refs/heads/main":
         raise SystemExit("Only trusted main-branch automation may access Azure")
-    if os.environ.get("AZURE_PREVIEW_CLIENT_ID") != PREVIEW_CLIENT_ID:
-        raise SystemExit("Unexpected preview client ID")
+    if not is_uuid(PREVIEW_CLIENT_ID) or not is_uuid(EXPECTED_SUBSCRIPTION):
+        raise SystemExit("Dedicated audit identity and subscription UUIDs required")
     try:
         report = collect()
         write_report(report)
@@ -201,9 +229,20 @@ def main():
             with open(summary, "a", encoding="utf-8") as output:
                 output.write(SUMMARY_FILE.read_text(encoding="utf-8"))
         print("Read-only Azure preflight complete; readiness:", report["deployment_readiness"])
-    except AuditError as exc:
-        # Never print raw CLI output, env values, or identity attributes.
-        print("Read-only preflight failed:", str(exc))
+    except Exception:
+        # Fail closed without leaking exception text, raw CLI output, or identity values.
+        # A sanitized failure artifact is still published even on unexpected responses.
+        failure = {"schema_version": 1, "read_only": True,
+                   "deployment_performed": False, "provider_called": False,
+                   "deployment_readiness": "blocked",
+                   "findings": [{"check": "Azure audit execution", "status": "block",
+                                 "detail": "Azure read or response validation failed"}],
+                   "not_verified": ["Azure preflight did not complete"]}
+        try:
+            write_report(failure)
+        except OSError:
+            pass
+        print("Read-only preflight blocked: Azure read or response validation failed")
         raise SystemExit(1) from None
 
 
