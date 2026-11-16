@@ -10,6 +10,7 @@ from azure.core.exceptions import AzureError
 from fastapi import APIRouter, Header, HTTPException, Query
 
 import job_management
+import stale_jobs
 from job_admin_auth import authorize_job_admin
 
 
@@ -67,6 +68,35 @@ def list_jobs_endpoint(
         AzureError,
     ) as exc:
         map_job_error(exc)
+
+
+@router.get("/stale")
+def list_stale_jobs_endpoint(
+    stale_minutes: int = Query(default=60, ge=1, le=10080),
+    limit: int = Query(default=50, ge=1, le=50),
+    authorization: str | None = Header(default=None),
+):
+    """Read-only inspection; a timestamp does not authorize job recovery."""
+    authorize_job_admin(authorization)
+    if type(stale_minutes) is not int or not 1 <= stale_minutes <= 10080:
+        raise HTTPException(status_code=400, detail="Invalid stale-job threshold")
+    if type(limit) is not int or not 1 <= limit <= 50:
+        raise HTTPException(status_code=400, detail="Invalid result limit")
+
+    try:
+        jobs = stale_jobs.find_stale_jobs(
+            stale_minutes=stale_minutes, limit=limit
+        )
+    except (ValueError, AzureError) as exc:
+        map_job_error(exc)
+
+    return {
+        "jobs": jobs,
+        "count": len(jobs),
+        "stale_minutes": stale_minutes,
+        "limit": limit,
+        "recovery": "manual_confirmation_required",
+    }
 
 
 @router.get("/{job_id}")
