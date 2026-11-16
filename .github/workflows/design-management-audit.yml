@@ -1,0 +1,43 @@
+name: Design Management - Twice Daily Audit
+
+on:
+  schedule:
+    # Twice daily, approximately morning and evening in Mountain Time.
+    # UTC scheduling does not automatically adjust for daylight saving.
+    - cron: '0 2,14 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  issues: write
+
+concurrency:
+  group: design-management-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Offline agent regression tests
+        run: python -m unittest discover -s tests/design_management -p 'test_*.py' -v
+      - name: Collect evidence and update issue 16
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DESIGN_MANAGEMENT_PUBLISH: 'true'
+        run: python scripts/design_management_audit.py
+      - name: Upload audit snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: design-management-snapshot
+          path: design-management-report.md
+          if-no-files-found: ignore
