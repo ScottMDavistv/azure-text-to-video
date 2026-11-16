@@ -3,7 +3,7 @@ import importlib.util
 import pathlib
 import unittest
 
-PATH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "design_management_audit.py"
+PATH = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "design_management_audit.py"
 spec = importlib.util.spec_from_file_location("design_management_audit", PATH)
 audit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(audit)
