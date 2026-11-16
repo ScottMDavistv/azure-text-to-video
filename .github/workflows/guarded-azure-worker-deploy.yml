@@ -16,7 +16,7 @@ on:
       operation:
         description: Read-only preview or supervised worker deployment
         type: choice
-        options: [preview, deploy]
+        options: [preview, whatif, deploy]
         required: true
       confirmation:
         description: For deploy only, type DEPLOY-DEV-WORKER
@@ -44,7 +44,7 @@ jobs:
         run: |
           python scripts/validate-worker-infrastructure.py
           python scripts/validate-fal-keyvault-iac.py
-          test "$OPERATION" = preview -o "$OPERATION" = deploy
+          test "$OPERATION" = preview -o "$OPERATION" = whatif -o "$OPERATION" = deploy
           if [ "$OPERATION" = deploy ]; then
             test "$CONFIRMATION" = DEPLOY-DEV-WORKER
             test "$DEPLOY_ENABLED" = true
@@ -76,10 +76,33 @@ jobs:
           test "$(az account show --query id -o tsv)" = "41fbffdc-1793-44f9-b70f-220ea8a9bc6c"
           az identity show -g rg-textvideo-dev -n id-textvideo-worker-dev --output none
           python scripts/verify_azure_worker_safe.py
-      - name: Preview worker only (no foundation redeployment)
+      - name: Read-only worker inventory (no ARM deployment permissions)
         shell: bash
         run: |
           set -euo pipefail
+          az containerapp job show -g rg-textvideo-dev -n job-textvideo-worker-dev \
+            --query '{name:name,trigger:properties.configuration.triggerType,profile:properties.workloadProfileName}' -o json
+  whatif:
+    needs: preview
+    if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'whatif' || inputs.operation == 'deploy') && vars.PROTECTED_MAIN_VERIFIED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: dev-deployment-apply
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Supervised Bicep what-if
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(az account show --query id -o tsv)" = "41fbffdc-1793-44f9-b70f-220ea8a9bc6c"
+          python scripts/verify_azure_worker_safe.py
           az deployment group what-if -g rg-textvideo-dev \
             --template-file infra/worker-job.bicep \
             --parameters workerImage="$WORKER_IMAGE" \
@@ -87,7 +110,7 @@ jobs:
         env:
           WORKER_IMAGE: acrtextvideo1794671698.azurecr.io/textvideo-worker:692bb1b7f7bd467f1d64e7288115424d21506c12
   deploy:
-    needs: preview
+    needs: whatif
     if: github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy' && inputs.confirmation == 'DEPLOY-DEV-WORKER' && vars.AZURE_DEV_DEPLOY_ENABLED == 'true' && vars.PROTECTED_MAIN_VERIFIED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
