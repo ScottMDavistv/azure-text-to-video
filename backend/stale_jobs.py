@@ -57,7 +57,11 @@ def is_stale(entity, now=None, stale_minutes=DEFAULT_STALE_MINUTES):
     )
 
 
-def find_stale_jobs(now=None, stale_minutes=DEFAULT_STALE_MINUTES):
+def find_stale_jobs(now=None, stale_minutes=DEFAULT_STALE_MINUTES, limit=50):
+    if type(limit) is not int or not 1 <= limit <= 50:
+        raise ValueError("Stale job limit must be between 1 and 50")
+    if type(stale_minutes) is not int or not 1 <= stale_minutes <= 10080:
+        raise ValueError("Invalid stale-job threshold")
     table = get_jobs_table_client()
 
     entities = table.query_entities(
@@ -80,6 +84,8 @@ def find_stale_jobs(now=None, stale_minutes=DEFAULT_STALE_MINUTES):
                 "status": entity["status"],
                 "started_at": entity["startedAt"],
             })
+            if len(results) >= limit:
+                break
 
     return results
 
