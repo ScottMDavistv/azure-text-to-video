@@ -108,6 +108,11 @@ jobs:
             -e VIDEO_PROVIDER=disabled \
             render-stage-a-ci:local python -c "import main, stage_a_coordinator, notification_inbox, notification_consumer, paid_job_recovery, paid_job_finalization; assert main.app"
 
+      - name: Test current Bulk 02 signed finance authorization and disabled runtime
+        run: |
+          python -m pytest -q backend/tests/test_finance_authorization.py
+          python -m pytest -q backend/tests/test_paid_safety_defaults.py
+
       - name: Test concurrency simulation
         run: python -m pytest -q backend/tests/test_finance_concurrency.py
 
