@@ -122,6 +122,18 @@ def replace_report(body, report):
         return body[:body.index(START)] + block + body[body.index(END) + len(END):]
     return body.rstrip() + "\n\n" + block + "\n"
 
+def report_execution_signature():
+    """Bind an Actions publication to an unambiguous run ID and attempt."""
+    if os.environ.get("GITHUB_ACTIONS", "").lower() != "true":
+        return None
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
+    if not (re.fullmatch(r"[1-9][0-9]*", run_id)
+            and re.fullmatch(r"[1-9][0-9]*", attempt)):
+        raise RuntimeError("Missing valid GitHub Actions run ID/attempt")
+    return "**GitHub Actions execution:** `" + run_id + "/" + attempt + "`"
+
+
 def status_for_run(run):
     return (run.get("name", "Unnamed workflow"), run.get("conclusion") or run.get("status", "unknown"),
             run.get("html_url", ""))
@@ -197,6 +209,10 @@ def main():
     if azure_file.exists():
         data["azure"] = json.loads(azure_file.read_text(encoding="utf-8"))
     report = render_report(data, now)
+    execution = report_execution_signature()
+    if execution is not None:
+        # Include a unique, verifiable execution identity in the published block.
+        report = report.replace("\n", "\n" + execution + "\n", 1)
     print(report)
     with open("design-management-report.md", "w", encoding="utf-8") as fh:
         fh.write(report + "\n")
