@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -21,9 +21,10 @@ def test_created_to_queued():
     job_id = str(uuid4())
 
     with patch("jobs.get_jobs_table_client") as mock_client:
-        mock_client.return_value.get_entity.return_value = {
-            "status": "created"
-        }
+        entity = MagicMock()
+        entity.__getitem__.side_effect = {"status": "created"}.__getitem__
+        entity.metadata = {"etag": 'W/"1"'}
+        mock_client.return_value.get_entity.return_value = entity
 
         result = transition_job(job_id, "queued")
 
