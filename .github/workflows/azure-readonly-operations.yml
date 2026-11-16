@@ -68,6 +68,34 @@ jobs:
           test -n "$AZURE_SUBSCRIPTION_ID"
         env:
           AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      - name: Verify GitHub OIDC immutable audit subject before Azure login
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64
+          import json
+          import os
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          expected = ("repo:ScottMDavistv@212811615/"
+                      "azure-text-to-video@1457187422:environment:azure-readonly-audit")
+          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+          url += ("&" if "?" in url else "?") + urlencode(
+              {"audience": "api://AzureADTokenExchange"})
+          request = Request(url, headers={
+              "Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+          with urlopen(request, timeout=15) as response:
+              token = json.load(response)["value"]
+          payload = token.split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+          if (claims.get("sub") != expected
+                  or str(claims.get("repository_id")) != "1457187422"
+                  or str(claims.get("repository_owner_id")) != "212811615"):
+              raise SystemExit("::error::Unrecognized immutable GitHub audit OIDC subject")
+          print("Dedicated audit OIDC subject and immutable repository IDs verified")
+          PY
       - name: Login with Reader identity (OIDC, no client secrets)
         uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
         with:
