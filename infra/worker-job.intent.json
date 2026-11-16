@@ -6,7 +6,7 @@
   "resource_name": "job-textvideo-worker-dev",
   "existing_environment": "cae-textvideo-dev",
   "existing_registry": "acrtextvideo1794671698",
-  "existing_managed_identity": "id-textvideo-api-dev",
+  "existing_managed_identity": "id-textvideo-worker-dev",
   "trigger_type": "Manual",
   "execution_command": [
     "python",
@@ -20,5 +20,7 @@
   "allowed_resource_changes": [
     "Create Microsoft.App/jobs/job-textvideo-worker-dev"
   ],
-  "deployment_approved": false
+  "deployment_approved": false,
+  "provider_credentials_configured": false,
+  "requires_separate_worker_identity": true
 }
