@@ -202,6 +202,33 @@ def publish(repo, token, tasks, indexed, dry_run):
             indexed[key] = item
     return changes
 
+def update_dashboard(repo, token, queues, candidates):
+    path = "https://api.github.com/repos/" + repo + "/issues/16"
+    issue = http_json("GET", path, token)
+    body = issue.get("body") or ""
+    start = "<!-- design-agent-queues:start -->"
+    end = "<!-- design-agent-queues:end -->"
+    lines = ["### Development agent work queues",
+             "_Status is based on GitHub issue records; CI-review-ready is not product acceptance._"]
+    for agent, items in queues.items():
+        lines.append("**" + agent.capitalize() + "**")
+        for item in items:
+            link = ("[#" + item["id"] + "](" + item["issue"] + ")"
+                    if item["issue"] else item["id"])
+            lines.append("- " + item["priority"] + " " + link + " — " + item["status"] +
+                         ((" (awaiting: " + ", ".join(item["dependencies_remaining"]) + ")")
+                          if item["dependencies_remaining"] else ""))
+    lines += ["", "**Completion evidence candidates:** " + str(len(candidates))]
+    for item in candidates:
+        lines.append("- " + item["task"] + " PR #" + str(item["pr"]) +
+                     ": " + item["status"] + " — manual acceptance required")
+    block = start + "\n" + "\n".join(lines) + "\n" + end
+    if start in body and end in body and body.index(start) < body.index(end):
+        body = body[:body.index(start)] + block + body[body.index(end) + len(end):]
+    else:
+        body = body.rstrip() + "\n\n" + block + "\n"
+    http_json("PATCH", path, token, {"body": body})
+
 def main():
     tasks = json.loads(MANIFEST.read_text(encoding="utf-8"))["tasks"]
     validate(tasks)
@@ -237,6 +264,8 @@ def main():
         "completion_candidates": candidates,
         "note": "No automatic closure or verification of acceptance; owner/CI evidence review required.",
     }
+    if publish_enabled:
+        update_dashboard(repo, token, queues, candidates)
     output = pathlib.Path("design-management-queues.json")
     output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2))
