@@ -98,13 +98,14 @@ def render_report(data, now):
 
 def collect(repo, token):
     owner_repo = urllib.parse.quote(repo, safe="/")
-    tree = github_get("/repos/" + owner_repo + "/git/trees/main?recursive=1", token)
+    branch = github_get("/repos/" + owner_repo + "/branches/main", token)
+    tree = github_get("/repos/" + owner_repo + "/git/trees/" + branch["commit"]["sha"] + "?recursive=1", token)
     if tree.get("truncated"):
         raise RuntimeError("Repository tree truncated; refusing incomplete audit")
     runs = github_get("/repos/" + owner_repo + "/actions/runs?branch=main&per_page=10", token)
     prs = github_get("/repos/" + owner_repo + "/pulls?state=open&per_page=50", token)
     return {
-        "sha": tree["sha"],
+        "sha": branch["commit"]["sha"],
         "paths": [entry["path"] for entry in tree["tree"] if entry.get("type") == "blob"],
         "runs": [status_for_run(run) for run in runs.get("workflow_runs", [])][:10],
         "prs": [(pr["number"], pr.get("title", ""), pr.get("html_url", ""), pr.get("draft", False))
