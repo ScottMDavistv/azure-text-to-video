@@ -38,6 +38,8 @@ class CoordinationTests(unittest.TestCase):
         index["video-job-api-contract"]["state_reason"] = "not_planned"
         self.assertTrue(mod.dependency_status(self.tasks[2], mod.validate(self.tasks), index))
         index["video-job-api-contract"]["state_reason"] = "completed"
+        self.assertTrue(mod.dependency_status(self.tasks[2], mod.validate(self.tasks), index))
+        index["video-job-api-contract"]["body"] = "<!-- design-agent-accepted:video-job-api-contract -->"
         self.assertFalse(mod.dependency_status(self.tasks[2], mod.validate(self.tasks), index))
 
     def test_issue_index_skips_pr_and_deduplicates(self):
@@ -71,6 +73,15 @@ class CoordinationTests(unittest.TestCase):
         result = mod.verify_completion(pr, runs, self.tasks[0])
         self.assertEqual(result["status"], "ci-review-ready")
         self.assertTrue(result["manual_acceptance_required"])
+
+    def test_owner_acceptance_requires_completed_and_marker(self):
+        issue = {"state": "open", "state_reason": "completed",
+                 "body": "<!-- design-agent-accepted:video-job-api-contract -->"}
+        self.assertFalse(mod.owner_accepted("video-job-api-contract", issue))
+        issue["state"] = "closed"
+        self.assertTrue(mod.owner_accepted("video-job-api-contract", issue))
+        issue["body"] = ""
+        self.assertFalse(mod.owner_accepted("video-job-api-contract", issue))
 
     def test_issue_body_never_authorizes_merge(self):
         text = mod.issue_body(self.tasks[0])
