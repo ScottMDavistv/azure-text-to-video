@@ -43,7 +43,7 @@ class CoordinationTests(unittest.TestCase):
     def test_issue_index_skips_pr_and_deduplicates(self):
         marker = mod.task_marker("video-job-api-contract")
         issue = {"body": marker, "number": 42}
-        self.assertEqual(mod.issue_index([issue, dict(issue, pull_request={})])["video-job-api-contract"]["number"], 42)
+        self.assertEqual(mod.issue_index([issue, dict(issue, pull_request={"url": "https://github.com/pr"})])["video-job-api-contract"]["number"], 42)
         with self.assertRaises(RuntimeError):
             mod.issue_index([issue, issue])
 
@@ -58,6 +58,19 @@ class CoordinationTests(unittest.TestCase):
                {"number": 2, "body": "Closes #24", "base": {"ref": "main"}, "merged_at": "2026-11-16"},
                {"number": 3, "body": "#240", "base": {"ref": "main"}, "merged_at": "2026-11-16"}]
         self.assertEqual([x["number"] for x in mod.candidate_completion(issue, prs)], [2])
+
+    def test_completion_requires_exact_sha_checks(self):
+        pr = {"merge_commit_sha": "a" * 40}
+        runs = [{"head_sha": "a" * 40, "name": "Backend Python Tests",
+                 "event": "push", "status": "completed", "conclusion": "success", "html_url": "https://ci/1"},
+                {"head_sha": "b" * 40, "name": "Security Checks",
+                 "event": "push", "status": "completed", "conclusion": "success", "html_url": "https://ci/2"}]
+        result = mod.verify_completion(pr, runs, self.tasks[0])
+        self.assertEqual(result["status"], "ci-unverified")
+        runs[1]["head_sha"] = "a" * 40
+        result = mod.verify_completion(pr, runs, self.tasks[0])
+        self.assertEqual(result["status"], "ci-review-ready")
+        self.assertTrue(result["manual_acceptance_required"])
 
     def test_issue_body_never_authorizes_merge(self):
         text = mod.issue_body(self.tasks[0])
