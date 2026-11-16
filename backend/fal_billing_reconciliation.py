@@ -20,9 +20,9 @@ def reconcile_verified_fal_charge(
 ):
     """Confirm exact provider request and ledger before settlement.
 
-    verify_provider_receipt(receipt, request_id, actual_cents) must
-    validate billing against an authenticated provider API, not
-    client-submitted charge metadata.
+    verify_provider_receipt(job_id, request_id, actual_cents, receipt)
+    MUST validate independently authenticated billing and durable
+    request/job linkage, never client-submitted charge metadata.
     """
     check_id(job_id)
     check_money(actual_cents, allow_zero=True)
@@ -37,17 +37,14 @@ def reconcile_verified_fal_charge(
         raise BillingReviewRequired(
             "Provider charge exceeds reservation; manual correction required"
         )
-    if not callable(verify_provider_receipt):
-        raise BillingReviewRequired("Trusted billing verifier required")
-    if verify_provider_receipt(
-        provider_receipt, request_id, actual_cents,
-    ) is not True:
-        raise BillingReviewRequired("Unverified provider billing receipt")
+    if not callable(verify_provider_receipt) or provider_receipt is None:
+        raise BillingReviewRequired("Trusted billing evidence required")
+    # Do not replace the real verifier with an ID/amount equality lambda.
+    # The underlying finance_controls.settle will invoke this verifier
+    # at its fail-closed ledger boundary.
     return settle_verified_charge(
-        finance_table=finance_table,
-        job_id=job_id,
-        charge_cents=actual_cents,
-        verified_billing=lambda claimed_id, cents: (
-            claimed_id == job_id and cents == actual_cents
-        ),
+        finance_table=finance_table, job_id=job_id,
+        charge_cents=actual_cents, provider_request_id=request_id,
+        provider_receipt=provider_receipt,
+        verify_provider_receipt=verify_provider_receipt,
     )
