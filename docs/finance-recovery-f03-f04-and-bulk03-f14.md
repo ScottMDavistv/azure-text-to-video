@@ -16,17 +16,19 @@ Critical remaining requirement: bind the provider request ID to the
 **durable server-side provider submission ledger** and verify the receipt
 with real independently authenticated FAL billing evidence. The passed
 callback itself cannot be trusted if a caller can supply it; never expose
-this primitive as an HTTP endpoint. The old `finance_controls.settle`
-still exists, which means universal receipt uniqueness is **not
-enforced across all financial entry points** until all callers migrate.
-This branch is not an operational settlement solution.
+this primitive as an HTTP endpoint. The old `finance_controls.settle` entry point now exists solely as a
+**fail-closed compatibility guard** and raises `FinanceDenied`. The
+experimental `settle_unique_receipt` is the only functional settlement
+operation in this branch. It is still **not** an operational settlement
+solution until trusted server-owned external billing proof exists.
 
 ## F-04: read-only reconciliation and dual-admin release prototype
 
 `inspect_reservation` provides a read-only diagnosis of reservation
 state. `request_unsubmitted_release` records the first verified
-administrator's request; `approve_unsubmitted_release` requires a
-second distinct verified administrator, a separate conclusive
+administrator's request with an atomic one-release-intent-per-job guard; `approve_unsubmitted_release` requires a
+second distinct verified administrator, a recheck that the first
+administrator has not been revoked, a separate conclusive
 no-submission verification, and a single atomic project/global balance
 release plus immutable-style audit event. ETag conflicts fail closed.
 
