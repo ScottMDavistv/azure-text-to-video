@@ -153,22 +153,27 @@ def dispatch_queued_job(job_id, *, table=None, send=None, now=None):
     return {"job_id": job_id, "status": "sent", "dispatched": True}
 
 
-def reconcile_queued_jobs(*, table=None, send=None, now=None, limit=50):
-    """Explicit, bounded recovery sweep; never auto-started by API or worker.
+def reconcile_queued_jobs(*, table=None, send=None, now=None, limit=50,
+                          cursor=None):
+    """Explicit, cursor-paged recovery sweep; never auto-started.
 
-    Reinspection is necessary after crashes. An old sent marker is *not*
-    proof the queue still holds the message. May enqueue duplicates but cannot
-    cause duplicate worker claims when the ETag claim contract is respected.
+    Callers must persist next_cursor across bounded batches, advancing through
+    all queued jobs rather than repeatedly inspecting the first page. Restart
+    from cursor=None after the final page. No paid submission is authorized.
     """
     if type(limit) is not int or not 1 <= limit <= 50:
         raise ValueError("Recovery batch limit must be 1..50")
+    if cursor is not None:
+        cursor = _id(cursor)
     now = _utc(now)
     table = table if table is not None else get_jobs_table_client()
-    rows = table.query_entities(
-        query_filter="PartitionKey eq 'video' and status eq 'queued'",
-    )
+    query = "PartitionKey eq 'video' and status eq 'queued'"
+    if cursor is not None:
+        query += f" and RowKey gt '{cursor}'"
+    rows = table.query_entities(query_filter=query)
+    page = list(islice(rows, limit + 1))
     results = []
-    for row in islice(rows, limit):
+    for row in page[:limit]:
         job_id = _id(row["RowKey"])
         try:
             result = dispatch_queued_job(
@@ -179,5 +184,7 @@ def reconcile_queued_jobs(*, table=None, send=None, now=None, limit=50):
             results.append({"job_id": job_id, "outcome": "held"})
         except DispatchUncertain:
             results.append({"job_id": job_id, "outcome": "uncertain"})
+    next_cursor = results[-1]["job_id"] if len(page) > limit else None
     return {"inspected": len(results), "results": results,
+            "next_cursor": next_cursor,
             "requires_repeated_sweeps": True}
