@@ -10,7 +10,7 @@ NOT authoritative spending controls.
 import os
 
 from fal_provider import validate_model_id
-from provider_config import get_provider_name
+from provider_config import get_provider_name, validate_provider_config, ProviderConfigurationError
 from provider_credentials import credential_is_configured
 from render_budget import (
     BudgetConfigurationError,
@@ -49,7 +49,22 @@ def worker_readiness():
         except ValueError:
             pass
 
+    try:
+        validated_provider = validate_provider_config()
+    except ProviderConfigurationError:
+        validated_provider = {"enabled": False, "provider": "disabled"}
+
+    # There is no live, authenticated financial-ledger reservation gate
+    # wired to the worker. Never infer this from environment flags or an
+    # estimate-only budget check.
+    durable_cost_enforcement = False
+
     checks = {
+        "provider_allowed_by_application": (
+            validated_provider["provider"] == "fal"
+            and validated_provider["enabled"] is True
+        ),
+        "durable_cost_enforcement": durable_cost_enforcement,
         "worker_consumption_enabled": env_enabled(
             "ENABLE_WORKER_CONSUMPTION"
         ),
@@ -95,7 +110,7 @@ def worker_readiness():
         "ready_for_live_execution": ready,
         "checks": checks,
         "budget_status": budget_status,
-        "durable_cost_enforcement": False,
+        "durable_cost_enforcement": durable_cost_enforcement,
         "provider_access_verified": False,
         "azure_connectivity_verified": False,
     }

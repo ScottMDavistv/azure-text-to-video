@@ -47,16 +47,20 @@ def test_missing_configuration_blocks_start():
             require_worker_readiness()
 
 
-def test_explicit_configuration_passes():
+def test_explicit_configuration_still_blocks_without_durable_ledger():
     with patch.dict(
         "os.environ",
         READY_ENV,
         clear=True,
     ):
-        status = require_worker_readiness()
+        status = worker_readiness()
+        with pytest.raises(WorkerNotReadyError):
+            require_worker_readiness()
 
-    assert status["ready_for_live_execution"] is True
+    assert status["ready_for_live_execution"] is False
     assert status["durable_cost_enforcement"] is False
+    assert status["checks"]["durable_cost_enforcement"] is False
+    assert status["checks"]["provider_allowed_by_application"] is False
 
 
 def test_missing_fal_key_blocks_start():

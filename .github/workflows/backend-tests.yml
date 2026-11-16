@@ -23,6 +23,11 @@ jobs:
     env:
       PYTHONPATH: backend
       VIDEO_PROVIDER: disabled
+      VIDEO_RENDER_PROVIDER: disabled
+      ENABLE_PAID_FAL_WORKER: 'false'
+      ENABLE_LIVE_VIDEO_RENDERING: 'false'
+      ENABLE_WORKER_CONSUMPTION: 'false'
+      ENABLE_PROJECT_ROUTES: 'false'
       FAL_KEY: ''
       FAL_API_KEY: ''
       AZURE_CLIENT_ID: ''
@@ -142,6 +147,13 @@ jobs:
         env:
           AZURITE_TABLE_TEST: '1'
         run: python -m pytest -q backend/tests/test_azurite_finance_integration.py
+
+      - name: Azure SDK retry-after-commit and transport-fault regression
+        env:
+          AZURITE_TABLE_TEST: '1'
+        run: |
+          python -m pytest -q backend/tests/test_azurite_finance_sdk_retry.py
+          python -m pytest -q backend/tests/test_sdk_retry_fault_injection.py
 
       - name: Run all backend regression tests
         run: python -m pytest -q backend/tests

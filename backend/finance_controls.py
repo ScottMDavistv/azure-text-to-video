@@ -33,6 +33,7 @@ class FinanceConflict(FinanceDenied):
 
 
 class AmbiguousCommit(FinanceDenied):
+    op_id = None
     """Write may have committed: reconcile using the same operation ID.
 
     Never blindly retry provider submission or financial settlement.
@@ -108,38 +109,55 @@ def create(entity):
     return ("create", entity)
 
 
-def audit(event, **fields):
+def audit(event, op_id=None, **fields):
     return {
         "PartitionKey": PARTITION,
-        "RowKey": "audit:" + str(uuid4()),
+        "RowKey": "audit:" + (op_id or str(uuid4())),
         "eventType": event,
         "createdAt": now(),
         **fields,
     }
 
 
-def commit(table, actions):
+def operation_applied(table, op_id):
+    """Read the operation audit row committed atomically with ledger updates.
+
+    Never mistake a failed verification read for a definite non-commit.
+    """
+    if not op_id:
+        return False
     try:
-        table.submit_transaction(actions)
+        table.get_entity(partition_key=PARTITION, row_key="audit:" + op_id)
+        return True
+    except ResourceNotFoundError:
+        return False
+    except AzureError as exc:
+        error = AmbiguousCommit("Cannot verify financial operation outcome")
+        error.op_id = op_id
+        raise error from exc
+
+
+def commit(table, actions, op_id=None):
+    try:
+        # The Tables SDK may resend a POST after the first batch committed.
+        # An atomic audit row differentiates that scenario from a real 409/412.
+        table.submit_transaction(actions, retry_total=0)
     except HttpResponseError as exc:
-        # 412 is a definite conditional ETag failure. Azure Tables atomic
-        # batches do not apply any updates when a condition fails.
-        # A 409 create collision is also a definite refusal, but must NOT
-        # be treated as a safe retry (duplicate job/request ID).
+        if exc.status_code in (409, 412) and operation_applied(table, op_id):
+            return
         if exc.status_code == 412:
             raise FinanceConflict("Concurrent financial update; retryable") from exc
         if exc.status_code in (400, 403, 404, 409, 413):
             raise FinanceDenied("Atomic financial write rejected") from exc
-        # 408, 429 and 5xx can follow an applied commit. Fail closed.
-        raise AmbiguousCommit(
-            "Financial write outcome uncertain; reconcile before retry"
-        ) from exc
+        error = AmbiguousCommit(
+            "Financial write outcome uncertain; reconcile before retry")
+        error.op_id = op_id
+        raise error from exc
     except AzureError as exc:
-        # Connection drops and read timeouts are AzureError but NOT
-        # necessarily HttpResponseError; the server may have committed.
-        raise AmbiguousCommit(
-            "Financial write outcome uncertain; reconcile before retry"
-        ) from exc
+        error = AmbiguousCommit(
+            "Financial write outcome uncertain; reconcile before retry")
+        error.op_id = op_id
+        raise error from exc
 
 
 def require_admin(actor, admin_lookup):
@@ -172,6 +190,7 @@ def provision_limit(
             raise FinanceDenied("Invalid budget scope")
         check_id(scope[len("project:"):])
 
+    op_id = str(uuid4())
     entity = {
         "PartitionKey": PARTITION,
         "RowKey": scope,
@@ -184,11 +203,11 @@ def provision_limit(
     commit(table, [
         create(entity),
         create(audit(
-            "limit_provisioned",
+            "limit_provisioned", op_id=op_id,
             actorId=actor.user_id,
             scope=scope,
         )),
-    ])
+    ], op_id=op_id)
     return entity
 
 
@@ -218,6 +237,7 @@ def reserve(
             if available < amount:
                 raise FinanceDenied("Insufficient spending capacity")
 
+        op_id = str(uuid4())
         reservation = {
             "PartitionKey": PARTITION,
             "RowKey": "reservation:" + job_id,
@@ -239,12 +259,12 @@ def reserve(
                 ),
                 create(reservation),
                 create(audit(
-                    "spend_reserved",
+                    "spend_reserved", op_id=op_id,
                     projectId=project_id,
                     jobId=job_id,
                     amountCents=amount,
                 )),
-            ])
+            ], op_id=op_id)
             return reservation
         except FinanceConflict:
             if attempt + 1 == MAX_RESERVATION_ATTEMPTS:
@@ -298,6 +318,7 @@ def settle(table, job_id, actual_cents, *, provider_receipt=None,
     )
     global_limit = load(table, "global:fal")
 
+    op_id = str(uuid4())
     updates = []
 
     for limit in (project, global_limit):
@@ -324,12 +345,12 @@ def settle(table, job_id, actual_cents, *, provider_receipt=None,
             settledAt=now(),
         ),
         create(audit(
-            "spend_settled",
+            "spend_settled", op_id=op_id,
             jobId=job_id,
             projectId=record["projectId"],
             actualCents=actual,
         )),
-    ])
+    ], op_id=op_id)
 
     return {
         "job_id": job_id,
@@ -381,6 +402,7 @@ def request_increase(
             "New ceiling must exceed current limit"
         )
 
+    op_id = str(uuid4())
     request = {
         "PartitionKey": PARTITION,
         "RowKey": "increase:" + request_id,
@@ -396,12 +418,12 @@ def request_increase(
     commit(table, [
         create(request),
         create(audit(
-            "increase_requested",
+            "increase_requested", op_id=op_id,
             requestId=request_id,
             actorId=actor.user_id,
             scope=scope,
         )),
-    ])
+    ], op_id=op_id)
 
     return request
 
@@ -430,8 +452,9 @@ def approve_increase(
             "Self-approval or duplicate approval"
         )
 
+    op_id = str(uuid4())
     event = create(audit(
-        "increase_approval",
+        "increase_approval", op_id=op_id,
         requestId=request_id,
         actorId=actor.user_id,
     ))
@@ -443,7 +466,7 @@ def approve_increase(
                 firstApproverId=actor.user_id,
             ),
             event,
-        ])
+        ], op_id=op_id)
         return "awaiting_second_approval"
 
     limit = load(table, request["scope"])
@@ -468,6 +491,6 @@ def approve_increase(
             ceilingCents=request["proposedCents"],
         ),
         event,
-    ])
+    ], op_id=op_id)
 
     return "approved"

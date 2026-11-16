@@ -343,6 +343,10 @@ def test_reserve_retries_only_etag_conflict(monkeypatch):
     table = MagicMock()
     project_id, job_id = uid(), uid()
     def fetch(partition_key, row_key):
+        # An uncommitted 412 must NOT have an operation's atomic audit row.
+        if row_key.startswith("audit:"):
+            from azure.core.exceptions import ResourceNotFoundError
+            raise ResourceNotFoundError(message="audit operation not applied")
         return record(row_key, ceilingCents=1000, spentCents=0, reservedCents=0)
     table.get_entity.side_effect = fetch
     etag = HttpResponseError(message="ETag")
