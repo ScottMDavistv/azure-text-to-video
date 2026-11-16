@@ -100,11 +100,17 @@ def issue_index(issues):
             indexed[key] = issue
     return indexed
 
+def owner_accepted(key, issue):
+    """Explicit issue-body evidence gate, not inferred from a closed issue."""
+    if not issue or issue.get("state") != "closed" or issue.get("state_reason") != "completed":
+        return False
+    return "<!-- design-agent-accepted:" + key + " -->" in (issue.get("body") or "")
+
 def dependency_status(task, by_id, indexed):
     missing = []
     for dep in task.get("depends_on", []):
         prior = indexed.get(dep)
-        if not prior or prior.get("state") != "closed" or prior.get("state_reason") != "completed":
+        if not owner_accepted(dep, prior):
             missing.append(dep)
     return missing
 
@@ -115,7 +121,7 @@ def work_queues(tasks, indexed):
         issue = indexed.get(task["id"])
         missing = dependency_status(task, by_id, indexed)
         status = ("unpublished" if not issue else
-                  "completed-recorded" if issue["state"] == "closed" and issue.get("state_reason") == "completed" else
+                  "accepted-recorded" if owner_accepted(task["id"], issue) else
                   "closed-unverified" if issue["state"] == "closed" else
                   "blocked" if missing else "ready")
         queues[task["agent"]].append({
@@ -151,7 +157,9 @@ def issue_body(task):
         "**Governance:** The task is approved to plan and implement development-only changes.",
         "No automatic merge, deployment, paid FAL activation, credential access, financial-policy change or self-approval.",
         "Sensitive changes require separate explicit owner authorization.",
-        "Close as completed only after verified evidence; this coordinator does not close issues.",
+        "Close as completed only after verified evidence. Owner records the exact",
+        "marker `<!-- design-agent-accepted:" + task["id"] + " -->` after manual acceptance.",
+        "This coordinator does not add acceptance markers or close issues.",
     ])
 
 def candidate_completion(issue, prs):
