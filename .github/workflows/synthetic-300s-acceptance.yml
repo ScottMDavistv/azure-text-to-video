@@ -29,10 +29,12 @@ jobs:
           python-version: '3.12'
       - name: Validate synthetic generator and audit logic without network
         run: python -m unittest discover -s tests/design_management -p 'test_*.py' -v
-      - name: Check FFmpeg availability
+      - name: Install FFmpeg and FFprobe on runner
         run: |
-          ffmpeg -version
-          ffprobe -version
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          command -v ffmpeg
+          command -v ffprobe
       - name: Generate five-minute synthetic MP4 and validate streams/duration
         run: python scripts/synthetic_300s_render.py --duration 300 --segment 60
       - name: Store nonbillable acceptance evidence
