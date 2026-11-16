@@ -55,14 +55,34 @@ def run_reserved_fal_job(*, enabled, job_id, jobs_table, finance_table,
 
 
 def settle_verified_charge(*, finance_table, job_id, charge_cents,
-                           verified_billing):
-    """Settle only with trustworthy provider-billing confirmation."""
+                           provider_request_id, provider_receipt,
+                           verify_provider_receipt):
+    """Bridge hardened Bulk 02's receipt-aware settlement boundary.
+
+    The verifier MUST use independently authenticated provider billing
+    records bound to the server-side provider submission intent, not UI
+    claims. Callback is backend-injected only; there is no live route.
+    """
     from finance_controls import settle, check_money
 
     check_id(job_id)
     charge_cents = check_money(charge_cents, allow_zero=True)
-    if not callable(verified_billing) or (
-        verified_billing(job_id, charge_cents) is not True
-    ):
-        raise ExecutionBlocked("Verified provider billing evidence required")
-    return settle(finance_table, job_id, charge_cents)
+    if (not isinstance(provider_request_id, str)
+            or not provider_request_id.strip()
+            or provider_receipt is None
+            or not callable(verify_provider_receipt)):
+        raise ExecutionBlocked("Authenticated provider billing evidence required")
+
+    def verify_for_ledger(claimed_job_id, claimed_cents, claimed_receipt):
+        if (claimed_job_id != job_id or claimed_cents != charge_cents
+                or claimed_receipt is not provider_receipt):
+            return False
+        return verify_provider_receipt(
+            job_id, provider_request_id, charge_cents, claimed_receipt
+        ) is True
+
+    return settle(
+        finance_table, job_id, charge_cents,
+        provider_receipt=provider_receipt,
+        verify_provider_receipt=verify_for_ledger,
+    )
