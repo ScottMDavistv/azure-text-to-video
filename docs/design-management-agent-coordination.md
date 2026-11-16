@@ -1,13 +1,13 @@
 # Hybrid multi-agent coordination — Video Render Tool
 
-Status: **draft PR #17**. This is a task routing and evidence system, not an autonomous coding runner.
+Status: **merged on main via PR #17**. Design Management is the sole source of approved workstream priorities and dependencies. PR #19 added a separate *opt-in* execution controller; code in the repository is not evidence that dispatch is activated.
 
 ## Roles
 
 - **Design Management** owns the approved-scope backlog and orders work by priority and dependency.
 - **Frontend**, **Backend**, **Infrastructure**, and **Integration** agents each read their issue queue.
 - A ChatGPT development chat or external coding agent is **not** automatically invoked by GitHub Issues. The owner starts its session and provides the GitHub assignment, or separately configures an authorized runner.
-- The coordinator never starts coding agents or authorizes merges.
+- The Design Management coordinator owns the single approved task manifest; its trusted, separately gated execution controller can assign Copilot only after owner authorization and GitHub activation. Neither component authorizes merges or owner acceptance.
 
 ## Source of truth
 
@@ -50,7 +50,18 @@ These instructions guide each separately started ChatGPT chat, but do not create
 
 - Task creation is the sole additional GitHub write operation; no PR comments, PR approvals, merges, Azure writes or payments.
 - Existing single-owner safeguards and mandatory security checks remain unchanged.
-- No frontend or backend agents are invoked automatically; that would require a separate runner and authorization.
+- No coding agent is invoked by the audit alone. Automatic assignment requires the separately gated GitHub Actions controller, explicit owner authorization, a working scoped Copilot token, and enabled GitHub Actions variables; it is never inferred from a merged workflow.
 - GitHub permissions still govern who can modify the task manifest and issue bodies; the single-owner process must review changes to this manifest before merge.
 - The queue's prioritization is deterministic (P0, P1, P2), not an AI architectural assessment. ChatGPT can interpret the report on demand without using a paid API.
 - A task can be accepted only by explicit owner action; the coordinator does not independently establish provenance of a marker.
+
+## Central-controller policy — owner decision 2026-11-16
+
+- **Single authoritative planner:** Design Management reads `docs/design-management-tasks.json` and publishes issue #16. Backend, frontend, infrastructure and integration are queues, **not independent policy controllers**.
+- **Execution mechanism:** The existing opt-in `autonomous-engineering.yml` may assign eligible GitHub Copilot tasks only after all runtime toggles and credentials have been verified. The planner remains authoritative and dispatch never bypasses accepted dependencies.
+- **Two-agent maximum:** Count assigned coding issues and open Copilot-authored PRs conservatively; do not assign milestones as coding tasks. One workstream cannot silently authorize another's security or deployment changes.
+- **Included credits only:** No paid overages. Verify Copilot account usage/overage restrictions externally before enabling dispatch; the controller does not have a quota API and cannot guarantee credit availability.
+- **Synthetic-generation priority:** Use `dispatch_order` (lower first) within priority class. In order: API contract verification, synthetic scene/job orchestration, frontend prompt-to-download, full 300s integration; Infrastructure Reader-only reviews remain P1 and never auto-dispatched. Work already in a PR stays under review; do not spawn overlapping tasks.
+- **Human gates:** Signed-off acceptance marker and closed-completed GitHub task prerequisite, CI on exact head, owner decisions for security/auth/finance/deployment; do not automatically merge sensitive PRs. Keep GitHub Copilot workflow approvals and protected main, Azure write RBAC unassigned, paid FAL off.
+- **Proof of activation:** A real main-branch Design Management audit must publish a timestamped issue #16 report; a real controller dispatch must record an eligible, newly assigned task without duplicate assignment or paid service use. A skipped workflow or a dry-run is not proof of activation.
+- **Status:** Owner has authorized controlled assignment and synthetic prioritization; actual unattended dispatch remains blocked until repository variables, scoped token, included-credit controls and main-branch workflow verification are demonstrated.
