@@ -86,7 +86,7 @@ def evaluate(job, registry, worker_identity, audit_identity, deploy_identity,
     template = props.get("template") or {}
     containers = template.get("containers") or []
     regs = conf.get("registries") or []
-    login_server = (registry.get("properties") or {}).get("loginServer")
+    login_server = registry.get("loginServer") or (registry.get("properties") or {}).get("loginServer")
     add("registry identity", len(regs) == 1 and regs[0].get("identity") == worker_id
         and regs[0].get("server") == login_server
         and login_server == ACR + ".azurecr.io",
