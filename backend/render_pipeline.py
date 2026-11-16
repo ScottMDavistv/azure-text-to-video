@@ -49,6 +49,17 @@ def create_render_pipeline(
             "Fal is not enabled for rendering"
         )
 
+    # An allowed provider name is not authority to spend. The worker's
+    # durable ledger-backed reservation gate is deliberately unavailable
+    # in this development PR; fail closed even if the allowlist is widened.
+    from worker_readiness import require_worker_readiness, WorkerNotReadyError
+    try:
+        require_worker_readiness()
+    except WorkerNotReadyError as exc:
+        raise RenderingDisabledError(
+            "Durable finance and worker readiness required before paid rendering"
+        ) from exc
+
     if client is None:
         client = FalQueueClient()
 
