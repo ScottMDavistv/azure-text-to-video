@@ -45,7 +45,7 @@ class SupervisedSmokeTests(unittest.TestCase):
                 "owner/repo", "dummy", report,
                 fetch={"body": "outside " + report + "\n" + issued("old")["body"] +
                        "\n<!-- design-management-report:end -->"}, env=env)
-        with self.assertRaisesRegex(ValueError):
+        with self.assertRaisesRegex(ValueError, "Audit snapshot missing or malformed"):
             publication.verify_published_snapshot(
                 "owner/repo", "dummy", "not an audit", fetch=issued(report), env=env)
         with patch.dict("os.environ", env, clear=True):
