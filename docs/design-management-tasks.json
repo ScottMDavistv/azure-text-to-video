@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "policy": "approved-development-only",
+  "tasks": [
+    {
+      "id": "video-job-api-contract",
+      "agent": "backend",
+      "priority": "P0",
+      "approval": "approved-development",
+      "sensitive": false,
+      "title": "Define and test simulated video-job API contract",
+      "objective": "Document authenticated request, job state/progress, download URI and error responses for the synthetic 300-second flow, without exposing paid provider operations.",
+      "depends_on": [],
+      "acceptance": [
+        "API contract published with example JSON and auth requirements",
+        "Negative-path authentication and error tests pass",
+        "Provider enablement remains disabled by default"
+      ]
+    },
+    {
+      "id": "synthetic-orchestrator",
+      "agent": "backend",
+      "priority": "P0",
+      "approval": "approved-development",
+      "sensitive": false,
+      "title": "Integrate synthetic scenes into non-billable job lifecycle",
+      "objective": "Wire the validated synthetic generator through job transitions and durable artifact handling without paid providers.",
+      "depends_on": [
+        "video-job-api-contract"
+      ],
+      "acceptance": [
+        "Prompt request creates a job and defined scene plan",
+        "Worker lifecycle can assemble five simulated scenes totaling 300 seconds",
+        "Crash/retry paths do not duplicate execution or produce inconsistent artifacts",
+        "No paid provider calls"
+      ]
+    },
+    {
+      "id": "frontend-video-journey",
+      "agent": "frontend",
+      "priority": "P0",
+      "approval": "approved-development",
+      "sensitive": false,
+      "title": "Build authenticated prompt-to-download UI against video API contract",
+      "objective": "Implement prompt submission, progress display, errors, preview and download using the agreed API contract.",
+      "depends_on": [
+        "video-job-api-contract"
+      ],
+      "acceptance": [
+        "Authenticated user can submit a prompt",
+        "Job progress and recoverable errors are shown",
+        "Completed synthetic MP4 is playable and downloadable",
+        "API tokens are not displayed or logged"
+      ]
+    },
+    {
+      "id": "azure-reader-monitoring",
+      "agent": "infrastructure",
+      "priority": "P1",
+      "approval": "approved-development",
+      "sensitive": false,
+      "title": "Document and verify read-only Azure audit integration",
+      "objective": "Review proposed GitHub OIDC and resource-group Reader monitoring; create no Azure resources or role assignments without separate owner authorization.",
+      "depends_on": [],
+      "acceptance": [
+        "Document exact Reader scope and OIDC trust restrictions",
+        "Offline collector tests pass and no secrets are collected",
+        "Actual Azure setup remains explicitly gated on owner authorization"
+      ]
+    },
+    {
+      "id": "synthetic-300s-integration",
+      "agent": "integration",
+      "priority": "P0",
+      "approval": "approved-development",
+      "sensitive": false,
+      "title": "Prove full prompt-to-download synthetic 300-second acceptance",
+      "objective": "Exercise the frontend, API, background synthetic render path, saved artifact, playable output and download in isolated CI.",
+      "depends_on": [
+        "frontend-video-journey",
+        "synthetic-orchestrator"
+      ],
+      "acceptance": [
+        "A user-level test starts with a text prompt",
+        "An authenticated job reaches completed state",
+        "MP4 is downloadable, has both audio and video and is 300 seconds ±0.6 seconds",
+        "Negative-path tests cover failures, retries and authorization",
+        "No paid FAL/LLM/provider calls and artifacts/CI evidence retained"
+      ]
+    }
+  ]
+}

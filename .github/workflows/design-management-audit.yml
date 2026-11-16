@@ -1,0 +1,65 @@
+name: Design Management - Twice Daily Audit
+
+on:
+  schedule:
+    # Twice daily, approximately morning and evening in Mountain Time.
+    # UTC scheduling does not automatically adjust for daylight saving.
+    - cron: '0 2,14 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  issues: write
+  id-token: write
+
+concurrency:
+  group: design-management-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Offline agent regression tests
+        run: python -m unittest discover -s tests/design_management -p 'test_*.py' -v
+      - name: Authenticate to Azure only when read-only monitoring is enabled
+        if: vars.AZURE_AUDIT_ENABLED == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_AUDIT_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_AUDIT_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_AUDIT_SUBSCRIPTION_ID }}
+      - name: Inventory Azure resources with a Reader identity
+        if: vars.AZURE_AUDIT_ENABLED == 'true'
+        env:
+          AZURE_AUDIT_RESOURCE_GROUP: ${{ vars.AZURE_AUDIT_RESOURCE_GROUP }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_AUDIT_SUBSCRIPTION_ID }}
+        run: python scripts/azure_readonly_inventory.py
+      - name: Collect evidence and update issue 16
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DESIGN_MANAGEMENT_PUBLISH: 'true'
+        run: python scripts/design_management_audit.py
+      - name: Route approved development work and update agent queues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DESIGN_MANAGEMENT_PUBLISH: 'true'
+        run: python scripts/design_agent_coordination.py
+      - name: Upload audit snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: design-management-snapshot
+          path: |
+            design-management-report.md
+            azure-inventory.json
+            design-management-queues.json
+          if-no-files-found: ignore
