@@ -113,7 +113,7 @@ export default function App() {
               <p className="muted">Describe your story. This form runs only a deterministic local simulation.</p>
               <form onSubmit={submitDemo}>
                 <label htmlFor="video-prompt" className="eyebrow">Video prompt</label>
-                <textarea id="video-prompt" maxLength={2001} value={prompt} onChange={e => { setPrompt(e.target.value); setError(null) }} placeholder="Create a five-minute educational video about..." aria-invalid={Boolean(error)} aria-describedby={error ? 'prompt-error' : undefined} />
+                <textarea id="video-prompt" maxLength={2000} value={prompt} onChange={e => { setPrompt(e.target.value); setError(null) }} placeholder="Create a five-minute educational video about..." aria-invalid={Boolean(error)} aria-describedby={error ? 'prompt-error' : undefined} />
                 {error ? <p className="field-error" id="prompt-error" role="alert">{error}</p> : null}
                 <div className="actions">
                   <span className="muted">{prompt.trim().length}/2,000 characters</span>
