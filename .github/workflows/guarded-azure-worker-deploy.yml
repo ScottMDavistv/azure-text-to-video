@@ -1,5 +1,16 @@
 name: Guarded Azure Dev Worker Deployment
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/worker-job.bicep'
+      - 'infra/worker-job.intent.json'
+      - 'scripts/validate-worker-infrastructure.py'
+      - 'scripts/validate-fal-keyvault-iac.py'
+      - 'scripts/verify_azure_worker_safe.py'
+      - '.github/workflows/guarded-azure-worker-deploy.yml'
+  schedule:
+    - cron: '23 13 * * *'
   workflow_dispatch:
     inputs:
       operation:
@@ -40,7 +51,7 @@ jobs:
             test "$MAIN_PROTECTED" = true
           fi
         env:
-          OPERATION: ${{ inputs.operation }}
+          OPERATION: ${{ github.event_name == 'workflow_dispatch' && inputs.operation || 'preview' }}
           CONFIRMATION: ${{ inputs.confirmation }}
           DEPLOY_ENABLED: ${{ vars.AZURE_DEV_DEPLOY_ENABLED }}
           MAIN_PROTECTED: ${{ vars.PROTECTED_MAIN_VERIFIED }}
@@ -55,7 +66,7 @@ jobs:
           persist-credentials: false
       - uses: azure/login@v3
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          client-id: ${{ vars.AZURE_PREVIEW_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - name: Verify subscription and deployment safety
@@ -77,7 +88,7 @@ jobs:
           WORKER_IMAGE: acrtextvideo1794671698.azurecr.io/textvideo-worker:692bb1b7f7bd467f1d64e7288115424d21506c12
   deploy:
     needs: preview
-    if: inputs.operation == 'deploy' && inputs.confirmation == 'DEPLOY-DEV-WORKER' && vars.AZURE_DEV_DEPLOY_ENABLED == 'true' && vars.PROTECTED_MAIN_VERIFIED == 'true'
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy' && inputs.confirmation == 'DEPLOY-DEV-WORKER' && vars.AZURE_DEV_DEPLOY_ENABLED == 'true' && vars.PROTECTED_MAIN_VERIFIED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     environment: dev-deployment-apply
