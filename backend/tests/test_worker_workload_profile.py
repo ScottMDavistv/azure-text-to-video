@@ -18,9 +18,10 @@ def test_worker_is_inspection_only():
     assert "'--check'" in SOURCE
 
 
-def test_fal_key_uses_keyvault():
-    assert "keyVaultUrl: falKeyVaultSecretUri" in SOURCE
-    assert "secretRef: 'fal-api-key'" in SOURCE
+def test_inspection_worker_has_no_provider_secret():
+    assert "falKeyVaultSecretUri" not in SOURCE
+    assert "secretRef: 'fal-api-key'" not in SOURCE
+    assert "secrets: []" in SOURCE
 
 
 def test_rendering_flags_remain_present():

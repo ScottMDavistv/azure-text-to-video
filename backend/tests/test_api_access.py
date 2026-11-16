@@ -11,12 +11,19 @@ from api_access import (
 TOKEN = "a" * 48
 
 
-def test_auth_disabled_by_default():
-    with patch.dict(
-        "os.environ",
-        {"REQUIRE_JOB_API_AUTH": ""},
-    ):
+def test_auth_required_by_default():
+    with patch.dict("os.environ", {}, clear=True):
+        assert api_auth_required() is True
+
+
+def test_auth_only_disabled_by_explicit_dev_override():
+    with patch.dict("os.environ", {"ALLOW_UNAUTHENTICATED_DEV": "true"}, clear=True):
         assert api_auth_required() is False
+
+
+def test_legacy_false_switch_does_not_disable_auth():
+    with patch.dict("os.environ", {"REQUIRE_JOB_API_AUTH": "false"}, clear=True):
+        assert api_auth_required() is True
 
 
 def test_auth_explicitly_enabled():
