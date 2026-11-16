@@ -133,6 +133,7 @@ def test_two_approvals_concurrently_cannot_double_increase():
         "firstApproverId": first,
         "secondApproverId": "",
         "proposedCents": 500,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
     }
     table = SimulatedTable(data)
 
