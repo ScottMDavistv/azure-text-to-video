@@ -5,6 +5,8 @@ on:
       - '.github/workflows/azure-readonly-operations.yml'
       - 'scripts/azure_readonly_operations.py'
       - 'tests/design_management/test_azure_readonly_operations.py'
+      - 'scripts/azure_acr_manifest_evidence.py'
+      - 'tests/design_management/test_azure_acr_manifest_evidence.py'
   push:
     branches: [main]
     paths:
@@ -37,7 +39,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Exercise mocked read-only Azure evidence and failure gates
-        run: python -m unittest discover -s tests/design_management -p 'test_azure_readonly_operations.py' -v
+        run: |
+          python -m unittest discover -s tests/design_management -p 'test_azure_readonly_operations.py' -v
+          python -m unittest discover -s tests/design_management -p 'test_azure_acr_manifest_evidence.py' -v
 
   audit:
     name: Reader-only Azure preflight
@@ -104,6 +108,11 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - name: Read-only Azure worker, registry, identity and RBAC preflight
         run: python scripts/azure_readonly_operations.py
+      - name: Inspect current worker ACR manifest (existing Reader identity; no RBAC changes)
+        if: success()
+        env:
+          AZURE_AUDIT_OPERATIONS_ENABLED: ${{ vars.AZURE_AUDIT_OPERATIONS_ENABLED }}
+        run: python scripts/azure_acr_manifest_evidence.py
       - name: Publish sanitized evidence artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 pinned
@@ -112,5 +121,7 @@ jobs:
           path: |
             azure-readonly-operations.json
             azure-readonly-operations.md
+            azure-acr-manifest-evidence.json
+            azure-acr-manifest-evidence.md
           if-no-files-found: warn
           retention-days: 14
