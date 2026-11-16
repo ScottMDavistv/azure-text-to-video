@@ -27,3 +27,21 @@ test('mock submission fails closed on invalid input', () => {
   assert.throws(() => createMockJob('  ', 1), /at least 1/)
   assert.equal(createMockJob('x', 2).prompt, 'x')
 })
+
+test('offline scene planning never invokes a network request', () => {
+  const originalFetch = globalThis.fetch
+  let fetchCalls = 0
+  globalThis.fetch = () => { fetchCalls += 1; throw new Error('Network use is prohibited in offline simulation') }
+  try {
+    let job = createMockJob('An offline five-minute demo', 9)
+    assert.equal(SCENES.length, 5)
+    assert.equal(TOTAL_SECONDS, 300)
+    for (let i = 0; i < MOCK_STAGES.length - 1; i++) {
+      job = advanceMockJob(job)
+    }
+    assert.equal(MOCK_STAGES[job.stage], 'completed')
+    assert.equal(fetchCalls, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
