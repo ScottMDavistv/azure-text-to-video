@@ -1,0 +1,108 @@
+name: Guarded Azure Dev Worker Deployment
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Read-only preview or supervised worker deployment
+        type: choice
+        options: [preview, deploy]
+        required: true
+      confirmation:
+        description: For deploy only, type DEPLOY-DEV-WORKER
+        required: false
+        type: string
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: azure-dev-worker-deployment
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fail closed on unsafe intent
+        run: |
+          python scripts/validate-worker-infrastructure.py
+          python scripts/validate-fal-keyvault-iac.py
+          test "$OPERATION" = preview -o "$OPERATION" = deploy
+          if [ "$OPERATION" = deploy ]; then
+            test "$CONFIRMATION" = DEPLOY-DEV-WORKER
+            test "$DEPLOY_ENABLED" = true
+            test "$MAIN_PROTECTED" = true
+          fi
+        env:
+          OPERATION: ${{ inputs.operation }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          DEPLOY_ENABLED: ${{ vars.AZURE_DEV_DEPLOY_ENABLED }}
+          MAIN_PROTECTED: ${{ vars.PROTECTED_MAIN_VERIFIED }}
+  preview:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: dev-deployment
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Verify subscription and deployment safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(az account show --query id -o tsv)" = "41fbffdc-1793-44f9-b70f-220ea8a9bc6c"
+          az identity show -g rg-textvideo-dev -n id-textvideo-worker-dev --output none
+          test "$(az containerapp job show -g rg-textvideo-dev -n job-textvideo-worker-dev --query properties.configuration.triggerType -o tsv)" = Manual
+          test "$(az containerapp job show -g rg-textvideo-dev -n job-textvideo-worker-dev --query 'properties.template.containers[0].env[?name==\x60VIDEO_RENDER_PROVIDER\x60].value | [0]' -o tsv)" = disabled
+      - name: Preview worker only (no foundation redeployment)
+        shell: bash
+        run: |
+          set -euo pipefail
+          az deployment group what-if -g rg-textvideo-dev \
+            --template-file infra/worker-job.bicep \
+            --parameters workerImage="$WORKER_IMAGE" \
+            --result-format ResourceIdOnly
+        env:
+          WORKER_IMAGE: acrtextvideo1794671698.azurecr.io/textvideo-worker:692bb1b7f7bd467f1d64e7288115424d21506c12
+  deploy:
+    needs: preview
+    if: inputs.operation == 'deploy' && inputs.confirmation == 'DEPLOY-DEV-WORKER' && vars.AZURE_DEV_DEPLOY_ENABLED == 'true' && vars.PROTECTED_MAIN_VERIFIED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: dev-deployment-apply
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy allowlisted worker template
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(az account show --query id -o tsv)" = "41fbffdc-1793-44f9-b70f-220ea8a9bc6c"
+          python scripts/validate-worker-infrastructure.py
+          python scripts/validate-fal-keyvault-iac.py
+          az deployment group create -g rg-textvideo-dev \
+            --name "dev-worker-${{ github.run_id }}" \
+            --template-file infra/worker-job.bicep \
+            --parameters workerImage="$WORKER_IMAGE" \
+            --output none
+          python scripts/verify_azure_worker_safe.py
+        env:
+          WORKER_IMAGE: acrtextvideo1794671698.azurecr.io/textvideo-worker:692bb1b7f7bd467f1d64e7288115424d21506c12
