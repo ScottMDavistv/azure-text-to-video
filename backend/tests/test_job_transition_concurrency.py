@@ -45,9 +45,9 @@ def test_valid_transition_uses_compare_and_swap():
 @pytest.mark.parametrize("code", (409, 412))
 def test_conflicting_transition_is_rejected(code):
     table = make_table()
-    table.update_entity.side_effect = HttpResponseError(
-        message="concurrent write", status_code=code
-    )
+    conflict = HttpResponseError(message="concurrent write")
+    conflict.status_code = code
+    table.update_entity.side_effect = conflict
     with patch("jobs.get_jobs_table_client", return_value=table):
         with pytest.raises(JobTransitionConflict, match="changed"):
             transition_job(str(uuid4()), "completed")
