@@ -80,10 +80,10 @@ def write_report(report):
         f"**State:** {report['state']}",
         f"**Registry:** {REGISTRY}",
         f"**Repository:** {REPOSITORY}",
-        f"**Git-SHA source tag:** \`{EXPECTED_TAG}\`",
-        "**Manifest digest:** " + (f"\`{report['manifest_digest']}\`"
+        f"**Git-SHA source tag:** `{EXPECTED_TAG}`",
+        "**Manifest digest:** " + (f"`{report['manifest_digest']}`"
                                    if report["manifest_digest"] else "NOT VERIFIED"),
-        "**Candidate immutable image:** " + (f"\`{report['candidate_immutable_image']}\`"
+        "**Candidate immutable image:** " + (f"`{report['candidate_immutable_image']}`"
                                             if report["candidate_immutable_image"] else "NOT VERIFIED"),
         "",
         "Metadata verification never authorizes deployment, registry writes, or IAM grants.",
