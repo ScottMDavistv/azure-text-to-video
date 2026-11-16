@@ -1,0 +1,45 @@
+name: Synthetic 300-second MP4 Acceptance
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/synthetic_300s_render.py'
+      - 'tests/design_management/**'
+      - '.github/workflows/synthetic-300s-acceptance.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-300-seconds:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ENABLE_PAID_FAL_WORKER: 'false'
+      ENABLE_LIVE_VIDEO_RENDERING: 'false'
+      ENABLE_WORKER_CONSUMPTION: 'false'
+      VIDEO_PROVIDER: disabled
+      FAL_KEY: ''
+      FAL_API_KEY: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate synthetic generator and audit logic without network
+        run: python -m unittest discover -s tests/design_management -p 'test_*.py' -v
+      - name: Check FFmpeg availability
+        run: |
+          ffmpeg -version
+          ffprobe -version
+      - name: Generate five-minute synthetic MP4 and validate streams/duration
+        run: python scripts/synthetic_300s_render.py --duration 300 --segment 60
+      - name: Store nonbillable acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-300-second-acceptance
+          path: artifacts/nonbillable-render/
+          if-no-files-found: warn
+          retention-days: 14
