@@ -11,6 +11,11 @@ param containerAppsEnvironmentName string = 'cae-textvideo-dev'
 @description('Existing user-assigned managed identity')
 param backendIdentityName string = 'id-textvideo-api-dev'
 
+@description('Key Vault secret URI holding a high-entropy legacy jobs API bearer token; required for secure deployment.')
+@minLength(1)
+@secure()
+param jobsApiTokenSecretUri string
+
 @description('Verified Docker image in Azure Container Registry')
 param backendImage string = 'acrtextvideo1794671698.azurecr.io/textvideo-api:9c8fa57d1442ba15e89d81214142aeb9c5da4fc7'
 
@@ -35,6 +40,13 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
     environmentId: environment.id
     configuration: {
       activeRevisionsMode: 'Single'
+      secrets: [
+        {
+          name: 'jobs-api-access-token'
+          keyVaultUrl: jobsApiTokenSecretUri
+          identity: backendIdentity.id
+        }
+      ]
       registries: [
         {
           server: 'acrtextvideo1794671698.azurecr.io'
@@ -54,6 +66,18 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'textvideo-api'
           image: backendImage
           env: [
+            {
+              name: 'REQUIRE_JOB_API_AUTH'
+              value: 'true'
+            }
+            {
+              name: 'ALLOW_UNAUTHENTICATED_DEV'
+              value: 'false'
+            }
+            {
+              name: 'API_ACCESS_TOKEN'
+              secretRef: 'jobs-api-access-token'
+            }
             {
               name: 'AZURE_CLIENT_ID'
               value: backendIdentity.properties.clientId
