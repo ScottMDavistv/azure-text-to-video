@@ -15,6 +15,22 @@ class ControllerTests(unittest.TestCase):
         issues = [{"state":"open","assignees":[{"login":"copilot-swe-agent[bot]"}]}]
         prs = [{"state":"open","user":{"login":"copilot-swe-agent[bot]"}}]
         self.assertEqual(controller.active_slots(issues, prs), 2)
+    def test_central_manifest_orders_synthetic_before_frontend_regardless_of_issue_number(self):
+        import json
+        tasks = json.loads(controller.MANIFEST.read_text())["tasks"]
+        accepted = {"number": 21, "state": "closed", "state_reason": "completed",
+                    "body": "<!-- design-agent-task:video-job-api-contract -->\\n"
+                            "<!-- design-agent-accepted:video-job-api-contract -->"}
+        index = {
+            "video-job-api-contract": accepted,
+            "frontend-video-journey": {"number": 30, "state": "open", "assignees": []},
+            "synthetic-orchestrator": {"number": 40, "state": "open", "assignees": []},
+        }
+        plan = controller.dispatch_plan(tasks, index, slots=0)
+        self.assertEqual([item[2]["id"] for item in plan],
+                         ["synthetic-orchestrator", "frontend-video-journey"])
+        self.assertEqual(controller.dispatch_plan(tasks, index, slots=2), [])
+
     def test_missing_token_fails_before_dispatch(self):
         with patch.object(controller, "pages", side_effect=[
             [{"state":"open","number":10,"body":"<!-- design-agent-task:video-job-api-contract -->","assignees":[]}],
