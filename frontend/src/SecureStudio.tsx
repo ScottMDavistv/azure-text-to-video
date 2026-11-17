@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { acquireApiToken, getSignedInAccount, isAuthConfigured, signIn } from './entraAuth'
+import { acquireApiToken, getSignedInAccount } from './entraAuth'
 import { SCENES, TOTAL_SECONDS, validatePrompt } from './mockJourney.mjs'
 import { createVideoApi, validateProjectId, type VideoJob } from './secureJourney.mjs'
 
@@ -14,8 +14,7 @@ function displayError(error: unknown): string {
   return 'The authenticated request could not complete. Check connectivity and permissions.'
 }
 
-export default function SecureStudio() {
-  const [account, setAccount] = useState<string | null>(null)
+export default function SecureStudio({ accountIdentity }: { accountIdentity: string | null }) {
   const [projectId, setProjectId] = useState(initialProject)
   const [prompt, setPrompt] = useState('')
   const [job, setJob] = useState<VideoJob | null>(null)
@@ -41,23 +40,31 @@ export default function SecureStudio() {
   const api = useMemo(() => createVideoApi({
     baseUrl: apiOrigin,
     tokenProvider: async () => {
+      const before = await getSignedInAccount()
+      if (!accountIdentity || before?.homeAccountId !== accountIdentity) {
+        throw new Error('Authentication session changed')
+      }
       const result = await acquireApiToken()
-      if (!result?.accessToken) throw new Error('API permission required')
+      const after = await getSignedInAccount()
+      if (after?.homeAccountId !== accountIdentity || !result?.accessToken) {
+        throw new Error('Authentication session changed')
+      }
       return result.accessToken
     },
-  }), [])
-  useEffect(() => {
-    let active = true
-    getSignedInAccount().then(user => {
-      if (active) setAccount(user?.name ?? user?.username ?? null)
-    }).catch(() => { if (active) setError('Microsoft sign-in has not been initialized.') })
-    return () => { active = false }
-  }, [])
+    fetcher: async (url, options) => {
+      const response = await fetch(url, options)
+      const current = await getSignedInAccount()
+      if (!accountIdentity || current?.homeAccountId !== accountIdentity) {
+        throw new Error('Authentication session changed')
+      }
+      return response
+    },
+  }), [accountIdentity])
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl) }, [videoUrl])
   useEffect(() => () => { generation.current += 1; inFlight.current?.abort() }, [])
 
   useEffect(() => {
-    if (!job || job.status === 'completed' || job.status === 'failed') return
+    if (!accountIdentity || !job || job.status === 'completed' || job.status === 'failed') return
     let alive = true
     let stopped = false
     const version = generation.current
@@ -65,7 +72,8 @@ export default function SecureStudio() {
     const timer = window.setInterval(async () => {
       try {
         const next = await api.status(projectId, job.job_id, abort.signal)
-        if (alive && !stopped && generation.current === version) setJob(next)
+        if (alive && !stopped && generation.current === version &&
+            (await getSignedInAccount())?.homeAccountId === accountIdentity) setJob(next)
       } catch (cause) {
         if (alive && !abort.signal.aborted && generation.current === version) {
           setError(displayError(cause))
@@ -79,7 +87,7 @@ export default function SecureStudio() {
       }
     }, 3000)
     return () => { alive = false; abort.abort(); window.clearInterval(timer) }
-  }, [api, job, projectId])
+  }, [api, job, projectId, accountIdentity])
 
   async function create(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -87,7 +95,7 @@ export default function SecureStudio() {
     if (promptError) { setError(promptError); return }
     try {
       validateProjectId(projectId)
-      if (!account) { setError('Sign in with Microsoft first.'); return }
+      if (!accountIdentity) { setError('Sign in with Microsoft first.'); return }
     } catch (cause) { setError(displayError(cause)); return }
     const project = projectId
     const task = begin()
@@ -97,13 +105,13 @@ export default function SecureStudio() {
     setVideoUrl(null)
     try {
       const created = await api.submit(project, prompt, task.controller.signal)
-      if (!task.current()) return
+      if (!task.current() || (await getSignedInAccount())?.homeAccountId !== accountIdentity) return
       setJob(created)
       try {
         await api.queue(project, created.job_id, task.controller.signal)
         if (!task.current()) return
         const next = await api.status(project, created.job_id, task.controller.signal)
-        if (task.current()) setJob(next)
+        if (task.current() && (await getSignedInAccount())?.homeAccountId === accountIdentity) setJob(next)
       } catch (cause) {
         if (task.current()) setError(displayError(cause) +
           ' Job creation was retained; queue it after the service is available.')
@@ -125,7 +133,7 @@ export default function SecureStudio() {
       await api.queue(project, jobId, task.controller.signal)
       if (!task.current()) return
       const next = await api.status(project, jobId, task.controller.signal)
-      if (task.current()) setJob(next)
+      if (task.current() && (await getSignedInAccount())?.homeAccountId === accountIdentity) setJob(next)
     } catch (cause) {
       if (task.current()) setError(displayError(cause))
     } finally {
@@ -141,7 +149,7 @@ export default function SecureStudio() {
     setError(null)
     try {
       const blob = await api.download(project, jobId, task.controller.signal)
-      if (task.current()) setVideoUrl(URL.createObjectURL(blob))
+      if (task.current() && (await getSignedInAccount())?.homeAccountId === accountIdentity) setVideoUrl(URL.createObjectURL(blob))
     } catch (cause) {
       if (task.current()) setError(displayError(cause))
     } finally {
@@ -153,14 +161,13 @@ export default function SecureStudio() {
       <section className="panel" aria-labelledby="secure-prompt-heading">
         <h2 id="secure-prompt-heading">Authenticated video request</h2>
         <p className="muted">Microsoft Entra identity and project membership are verified by the backend. Paid rendering remains disabled.</p>
-        <p className="muted">{account ? `Signed in: ${account}` : 'Sign in with Microsoft before submitting.'}</p>
-        {!account ? <button className="secondary" type="button" disabled={!isAuthConfigured() || busy} onClick={() => signIn().catch(() => setError('Microsoft sign-in failed.'))}>Sign in with Microsoft</button> : null}
+        <p className="muted">{accountIdentity ? 'Microsoft session selected; project access is checked by the backend.' : 'Sign in using the account controls above before submitting.'}</p>
         <form onSubmit={create}>
           <label htmlFor="project-id" className="eyebrow">Authorized project ID</label>
           <input className="project-input" id="project-id" value={projectId} onChange={e => { invalidate(); setProjectId(e.target.value); setJob(null); setVideoUrl(null); setBusy(false); setError(null) }} placeholder="Project UUID" />
           <label htmlFor="secure-video-prompt" className="eyebrow">Video prompt</label>
           <textarea id="secure-video-prompt" maxLength={2000} value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="Describe your video..." />
-          <div className="actions"><span className="muted">{prompt.length}/2,000</span><button className="primary" type="submit" disabled={!account || busy}>{busy ? 'Working…' : 'Submit authenticated job'}</button></div>
+          <div className="actions"><span className="muted">{prompt.length}/2,000</span><button className="primary" type="submit" disabled={!accountIdentity || busy}>{busy ? 'Working…' : 'Submit authenticated job'}</button></div>
         </form>
         {error ? <p role="alert" className="field-error">{error}</p> : null}
       </section>
