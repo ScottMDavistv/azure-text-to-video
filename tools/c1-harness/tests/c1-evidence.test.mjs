@@ -144,6 +144,17 @@ test('a missing or skipped offline test fails R3 (no SKIPPED counted as PASS)', 
   assert.equal(evaluate({ meta, phases: allPhases(), reports, artifactHits: 0 }).overall, 'FAIL')
 })
 
+test('R3 is INCOMPLETE, never PASS, when an expected offline test reports INCOMPLETE', () => {
+  const reports = allReports()
+  reports.offline = summarizeReport(report(OFFLINE_EXPECTED.map((t, i) =>
+    spec(t, i === 0 ? 'skipped' : 'passed', i === 0
+      ? { annotations: [{ type: 'skip', description: 'INCOMPLETE: controlled offline cancellation not observed' }] }
+      : {}))))
+  const r = evaluate({ meta, phases: allPhases(), reports, artifactHits: 0 })
+  assert.equal(r.rows.find(x => x.id === 'R3').verdict, 'INCOMPLETE')
+  assert.equal(r.overall, 'INCOMPLETE')
+})
+
 test('phase that ran without a report (config refused dirty tree) is FAIL', () => {
   const reports = allReports(); delete reports.live
   const r = evaluate({ meta, phases: allPhases(), reports, artifactHits: 0 })
