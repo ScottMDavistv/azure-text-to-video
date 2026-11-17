@@ -21,6 +21,7 @@ def record(owner=UID, project=PID, state="completed"):
 def enabled(monkeypatch):
     monkeypatch.setenv("ENABLE_AUTHENTICATED_VIDEO_JOBS", "true")
     monkeypatch.setenv("ENABLE_PROJECT_ROUTES", "true")
+    monkeypatch.setenv("AZURE_SYNTHETIC_JOBS_QUEUE", "textvideo-synthetic-only")
 
 def test_routes_disabled_without_configuration(monkeypatch):
     monkeypatch.delenv("ENABLE_AUTHENTICATED_VIDEO_JOBS", raising=False)
@@ -297,3 +298,12 @@ def test_real_rs256_signed_token_through_project_status_route(enabled, monkeypat
         bad = jwt.encode(claims, forged, algorithm="RS256",
                          headers={"kid": "c42-test"})
         assert client.get(url, headers={"Authorization": "Bearer " + bad}).status_code == 401
+
+
+def test_synthetic_dispatch_fails_closed_on_shared_queue(enabled, monkeypatch):
+    from job_queue import QUEUE_NAME
+    monkeypatch.setenv("ENABLE_SYNTHETIC_VIDEO_DISPATCH", "true")
+    monkeypatch.setenv("VIDEO_RENDER_PROVIDER", "disabled")
+    for value in ("", QUEUE_NAME, "BAD_QUEUE"):
+        monkeypatch.setenv("AZURE_SYNTHETIC_JOBS_QUEUE", value)
+        assert routes.synthetic_dispatch_enabled() is False
