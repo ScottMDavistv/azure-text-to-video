@@ -5,6 +5,7 @@ The application must provide an *independent trusted* verifier for both
 provider receipts and conclusive evidence that submission never occurred.
 """
 import hashlib
+import unicodedata
 from uuid import uuid4
 
 from finance_controls import (
@@ -19,10 +20,29 @@ def receipt_key(provider_name, receipt_id):
             or not isinstance(receipt_id, str)
             or not 1 <= len(receipt_id) <= 256):
         raise FinanceDenied("Valid provider and receipt identity required")
+    if receipt_id != receipt_id.strip() or any(
+        unicodedata.category(char).startswith("C") for char in receipt_id
+    ):
+        raise FinanceDenied("Noncanonical provider receipt identity")
+    canonical_id = unicodedata.normalize("NFKC", receipt_id).casefold()
+    if not canonical_id or canonical_id != canonical_id.strip():
+        raise FinanceDenied("Noncanonical provider receipt identity")
     digest = hashlib.sha256(
-        (provider_name + ":" + receipt_id).encode("utf-8")
+        (provider_name + ":" + canonical_id).encode("utf-8")
     ).hexdigest()
     return "receipt:" + digest
+
+
+def provider_request_key(provider_name, request_id):
+    """Provider-scoped unique submission identity, across all jobs."""
+    if (provider_name != "fal" or not isinstance(request_id, str)
+            or not 1 <= len(request_id) <= 256
+            or request_id != request_id.strip()
+            or any(unicodedata.category(c).startswith("C") for c in request_id)):
+        raise FinanceDenied("Valid provider request identity required")
+    return "provider-request:" + hashlib.sha256(
+        (provider_name + ":" + request_id).encode("utf-8")
+    ).hexdigest()
 
 
 def settle_unique_receipt(table, *, job_id, actual_cents,
@@ -41,6 +61,7 @@ def settle_unique_receipt(table, *, job_id, actual_cents,
             or not 1 <= len(provider_request_id) <= 256):
         raise FinanceDenied("Provider request ID required")
     key = receipt_key("fal", receipt_id)
+    request_key = provider_request_key("fal", provider_request_id)
     if provider_receipt is None or not callable(verify_provider_receipt):
         raise FinanceDenied("Authenticated provider billing evidence required")
     try:
@@ -73,6 +94,10 @@ def settle_unique_receipt(table, *, job_id, actual_cents,
         replace(reservation, state="settled", actualCents=actual,
                 providerRequestId=provider_request_id, receiptKey=key,
                 settledAt=now()),
+        create({"PartitionKey": PARTITION, "RowKey": request_key,
+                "jobId": job_id, "provider": "fal",
+                "providerRequestId": provider_request_id,
+                "receiptKey": key, "createdAt": now()}),
         create({"PartitionKey": PARTITION, "RowKey": key, "jobId": job_id,
                 "provider": "fal", "providerRequestId": provider_request_id,
                 "receiptId": receipt_id, "actualCents": actual,
