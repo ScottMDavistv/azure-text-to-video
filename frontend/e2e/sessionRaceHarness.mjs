@@ -47,6 +47,15 @@ async function run() {
   assert(document.body.textContent.includes('No authorized job in this session.'), 'A job leaked into B session')
   assert(!document.querySelector('video'), 'A video remained after switching to B')
 
+  // An in-flight project-A submission must not survive a project-ID edit.
+  changeText('#secure-video-prompt', 'offline browser test')
+  click('Submit authenticated job')
+  await until(() => window.__racePending.length >= 2, 'pending project submission')
+  changeText('#project-id', 'b7c6a845-cb0c-468c-9a18-1e9df0b20545')
+  await until(() => document.querySelector('#project-id')?.value.startsWith('b7c6'), 'project changed')
+  assert(document.body.textContent.includes('No authorized job in this session.'), 'Previous project job leaked')
+  changeText('#project-id', 'c7e6a845-cb0c-468c-9a18-1e9df0b20545')
+
   window.__raceMode = 'immediate'
   changeText('#secure-video-prompt', 'offline browser test')
   click('Submit authenticated job')
@@ -64,13 +73,13 @@ async function run() {
   window.__raceMode = 'held'
   changeText('#secure-video-prompt', 'offline browser test')
   click('Submit authenticated job')
-  await until(() => window.__racePending.length >= 2, 'pending C submission')
+  await until(() => window.__racePending.length >= 3, 'pending C submission')
   click('Sign out')
   await until(() => !document.body.textContent.includes('Signed in: Account C'), 'logout clears C')
   assert(!document.querySelector('video'), 'Video remained after logout')
   assert(document.body.textContent.includes('No authorized job in this session.'), 'Job remained after logout')
   assert(window.__raceRequests.every(r => r.auth?.startsWith('Bearer offline-mocked-')),
     'Unexpected API credential or missing bearer token')
-  result('Account A->B late submit, B->C MP4 URL revocation, C logout in-flight', true)
+  result('Account A->B late submit, project switch, B->C MP4 URL revocation, C logout in-flight', true)
 }
 run().catch(error => result(error?.stack || String(error), false))
