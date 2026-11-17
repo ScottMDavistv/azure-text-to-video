@@ -92,7 +92,9 @@ def validate_sources(job, alert):
         raise ReadinessError("No conditional preflight/runtime command")
     if " : [ '--check' ]" not in job:
         raise ReadinessError("Preflight-only default removed")
-    if "= if (activateReconciliation) {" not in job:\n        raise ReadinessError("Disabled mode must create no scheduled Azure job")\n    if "replicaTimeout: 300" not in job or "cpu: json('0.5')" not in job or "memory: '1Gi'" not in job:
+    if "= if (activateReconciliation) {" not in job:
+        raise ReadinessError("Disabled mode must create no scheduled Azure job")
+    if "replicaTimeout: 300" not in job or "cpu: json('0.5')" not in job or "memory: '1Gi'" not in job:
         raise ReadinessError("Unexpected unit runtime / resource cost bound")
     return {"static_checks": "pass", "live_azure": "not_verified",
             "image_digest": "requires_approved_parameter",
