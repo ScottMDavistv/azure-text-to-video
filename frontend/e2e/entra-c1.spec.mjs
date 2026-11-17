@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 const live = process.env.C1_LIVE === '1'
 const unconfigured = process.env.C1_UNCONFIGURED === '1'
 const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+const checkoutDirty = Boolean(execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' }).trim())
 const tenant = '773e9051-c546-4b75-9432-90f4f8242660'
 const audience = 'a5a09b74-aead-455f-9de7-9b844c8a8465'
 const scope = 'api://' + audience + '/access_as_user'
@@ -29,7 +30,7 @@ function allowedRequest(url) {
 let evidenceBrowser = 'unknown'
 test.beforeAll(async ({ browser }) => {
   evidenceBrowser = browser.version()
-  console.log('C1 BEGIN sha=' + sha + ' dirty=' + (process.env.C1_MUTATION_MODE === '1') +
+  console.log('C1 BEGIN sha=' + sha + ' dirty=' + checkoutDirty +
     ' browser=' + evidenceBrowser + ' utc=' + new Date().toISOString())
 })
 test.afterEach(async ({}, info) => {
@@ -112,7 +113,7 @@ async function assertBuild(page) {
     return { sha: c1BuildSha, dirty: c1BuildDirty }
   })
   expect(served.sha).toBe(sha)
-  expect(served.dirty).toBe(process.env.C1_MUTATION_MODE === '1')
+  expect(served.dirty).toBe(checkoutDirty)
 }
 
 async function assertMemoryOnly(page, context) {
@@ -240,7 +241,15 @@ test('M4 browser: interaction-required token recovery invokes popup, never redir
   await page.goto('/')
   const calls = await page.evaluate(async () => {
     const { initializeAuth, acquireApiToken } = await import('/src/entraAuth.ts')
-    const { InteractionRequiredAuthError } = await import('@azure/msal-browser')
+    // Resolve the exact optimized MSAL module URL imported by Vite's
+    // transformed entraAuth.ts; a bare package import in page.evaluate
+    // cannot resolve and a second module instance breaks instanceof.
+    const transformed = await (await fetch('/src/entraAuth.ts')).text()
+    const msalUrl = transformed.match(/from\\s*["']([^"']*azure_msal-browser[^"']*)["']/)?.[1]
+    if (!msalUrl || !msalUrl.startsWith('/node_modules/.vite/deps/')) {
+      throw new Error('Cannot resolve the MSAL module instance used by entraAuth')
+    }
+    const { InteractionRequiredAuthError } = await import(/* @vite-ignore */ msalUrl)
     const auth = await initializeAuth()
     const account = { homeAccountId: 'synthetic-account', username: 'synthetic@example.invalid' }
     const original = {
@@ -248,10 +257,12 @@ test('M4 browser: interaction-required token recovery invokes popup, never redir
       acquireTokenPopup: auth.acquireTokenPopup, acquireTokenRedirect: auth.acquireTokenRedirect,
       loginRedirect: auth.loginRedirect,
     }
-    const counts = { popup: 0, redirect: 0, result: false }
+    const counts = { popup: 0, redirect: 0, result: false, sameClass: false }
     try {
+      const injected = new InteractionRequiredAuthError('interaction_required')
+      counts.sameClass = injected instanceof InteractionRequiredAuthError
       auth.getActiveAccount = () => account
-      auth.acquireTokenSilent = async () => { throw new InteractionRequiredAuthError('interaction_required') }
+      auth.acquireTokenSilent = async () => { throw injected }
       auth.acquireTokenPopup = async () => { counts.popup++; return { accessToken: 'synthetic-non-token' } }
       auth.acquireTokenRedirect = async () => { counts.redirect++ }
       auth.loginRedirect = async () => { counts.redirect++ }
@@ -262,7 +273,7 @@ test('M4 browser: interaction-required token recovery invokes popup, never redir
       for (const [key, method] of Object.entries(original)) auth[key] = method
     }
   })
-  expect(calls).toEqual({ popup: 1, redirect: 0, result: true })
+  expect(calls).toEqual({ popup: 1, redirect: 0, result: true, sameClass: true })
   expect(audit.problems).toEqual([])
 })
 
