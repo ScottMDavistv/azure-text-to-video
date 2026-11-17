@@ -76,6 +76,43 @@ idempotent writes, and manual recovery of partial failures.
 **Never paste or commit tokens, raw credentials, user IDs, or keys.**
 The GitHub `stage-b-audit` managed identity remains Reader only.
 
+## 4. Mocked MSAL tests and manual localhost popup validation (L-6)
+
+`npm test` runs `tests/entraAuth.test.mjs`, which drives the popup flow in
+`src/entraAuthCore.ts` with a mocked MSAL client (no network, no Entra):
+popup login, silent token, interaction-required → popup consent, popup
+logout, the memory-only cache configuration, localhost-only redirect URIs,
+and negative paths (cancelled/blocked popups, declined consent, failed
+initialization retry, logout failure clearing the local account and
+in-memory cache). `src/entraAuth.ts` only wires the real
+`PublicClientApplication` into that core.
+
+The live round trip below is **prepared, not executed**. It uses the
+existing SPA registration unchanged; do not edit the app registration,
+redirect URIs, permissions or consent to make it pass. Only the owner (or
+someone the owner authorizes) should run it, on `http://localhost:5173`.
+
+1. `npm ci && npm run dev`; open exactly `http://localhost:5173`, DevTools open.
+2. **Sign in** → a popup opens (no full-page redirect); select the test
+   account; the page shows the signed-in name.
+3. **Check API permission** → silent token, or a consent popup on first use;
+   the success message appears. No token is displayed or logged.
+4. DevTools → Application: `localStorage` and cookies hold no MSAL
+   account/token entries. `sessionStorage` may briefly hold MSAL
+   *interaction* state during a popup (MSAL's default temporary cache);
+   it must not hold access, ID or refresh tokens afterwards.
+5. Reload the page → signed out (tokens were memory-only).
+6. Negative: close the sign-in popup early, and separately block popups for
+   the origin → an error message, no signed-in name, and a later
+   **Sign in** works without reloading.
+7. **Sign out** → logout popup; the name clears. Repeat with popups blocked:
+   "Microsoft sign-out failed" appears and the in-memory account is cleared
+   (**Check API permission** now asks you to sign in). Known residual: the
+   page keeps showing the previous name until reload, because `App.tsx`
+   only clears it on success; this PR does not change `App.tsx`.
+8. Record pass/fail per step in Issue #62 without screenshots of tokens,
+   account IDs or other secrets.
+
 ## Safety defaults
 
 - `ENABLE_PROJECT_ROUTES=false` in Azure

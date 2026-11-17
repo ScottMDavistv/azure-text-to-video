@@ -108,6 +108,11 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - name: Read-only Azure worker, registry, identity and RBAC preflight
         run: python scripts/azure_readonly_operations.py
+      - name: Collect sanitized resource-group inventory (Reader only)
+        if: success()
+        env:
+          AZURE_AUDIT_RESOURCE_GROUP: rg-textvideo-dev
+        run: python scripts/azure_readonly_inventory.py
       - name: Inspect current worker ACR manifest (existing Reader identity; no RBAC changes)
         if: success()
         env:
@@ -121,6 +126,7 @@ jobs:
         with:
           name: azure-readonly-operations
           path: |
+            azure-inventory.json
             azure-readonly-operations.json
             azure-readonly-operations.md
             azure-acr-manifest-evidence.json

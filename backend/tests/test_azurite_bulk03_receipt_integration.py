@@ -4,7 +4,6 @@ These simulated "trusted" receipts are NOT an authenticated FAL source.
 """
 import os
 from uuid import uuid4
-from unittest.mock import patch
 
 import pytest
 from azure.data.tables import TableServiceClient
@@ -12,6 +11,9 @@ from azure.data.tables import TableServiceClient
 from finance_controls import FinanceDenied, PARTITION, reserve, scope_key
 from fal_billing_reconciliation import reconcile_verified_fal_charge, BillingReviewRequired
 from budgeted_fal_execution import ExecutionBlocked
+from provider_submission_ledger import (
+    claim_intent, create_intent, read_intent, record_provider_request_id,
+)
 
 CONNECTION = (
     "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;"
@@ -34,6 +36,25 @@ def table():
     finally:
         service.delete_table(name)
         service.close()
+
+
+@pytest.fixture
+def subs():
+    """Real, separate durable submission-intent table (L-2 binding)."""
+    service = TableServiceClient.from_connection_string(CONNECTION)
+    name = "F14Intents" + uuid4().hex[:13]
+    client = service.create_table(name)
+    try:
+        yield client
+    finally:
+        service.delete_table(name)
+        service.close()
+
+
+def submitted(subs, job, request_id):
+    create_intent(subs, job)
+    claim_intent(subs, job)
+    record_provider_request_id(subs, job, request_id)
 
 
 def setup_budget(table, project):
@@ -62,21 +83,22 @@ def receipt(job, request, cents, receipt_id):
             "actual_cents": cents, "receipt_id": receipt_id, "verified": True}
 
 
-def reconcile(table, job, request, amount, proof, verifier=valid_receipt):
-    with patch("fal_billing_reconciliation.read_intent",
-               return_value={"state": "submitted", "providerRequestId": request}):
-        return reconcile_verified_fal_charge(
-            table, None, job,
-            actual_cents=amount, provider_receipt=proof,
-            verify_provider_receipt=verifier,
-        )
+def reconcile(table, subs, job, request, amount, proof, verifier=valid_receipt):
+    """Reconcile from the real durable intent; ``request`` must match it."""
+    assert read_intent(subs, job)["providerRequestId"] == request
+    return reconcile_verified_fal_charge(
+        table, subs, job,
+        actual_cents=amount, provider_receipt=proof,
+        verify_provider_receipt=verifier,
+    )
 
 
-def test_real_atomic_verified_charge_settlement(table):
+def test_real_atomic_verified_charge_settlement(table, subs):
     project, job = str(uuid4()), str(uuid4())
     setup_budget(table, project)
     reserve(table, project, job, 100)
-    result = reconcile(table, job, "provider-req", 45,
+    submitted(subs, job, "provider-req")
+    result = reconcile(table, subs, job, "provider-req", 45,
                        receipt(job, "provider-req", 45, "receipt-a"))
     assert result["state"] == "settled"
     assert read(table, "global:fal")["spentCents"] == 45
@@ -85,48 +107,53 @@ def test_real_atomic_verified_charge_settlement(table):
     assert read(table, scope_key(project))["spentCents"] == 45
 
 
-def test_real_ledger_rejects_cross_job_duplicate_receipt(table):
+def test_real_ledger_rejects_cross_job_duplicate_receipt(table, subs):
     project, first, second = str(uuid4()), str(uuid4()), str(uuid4())
     setup_budget(table, project)
     reserve(table, project, first, 100)
     reserve(table, project, second, 100)
-    reconcile(table, first, "request-a", 40,
+    submitted(subs, first, "request-a")
+    submitted(subs, second, "request-b")
+    reconcile(table, subs, first, "request-a", 40,
               receipt(first, "request-a", 40, "duplicate-id"))
     with pytest.raises(FinanceDenied):
-        reconcile(table, second, "request-b", 40,
+        reconcile(table, subs, second, "request-b", 40,
                   receipt(second, "request-b", 40, "duplicate-id"))
     assert read(table, "global:fal")["spentCents"] == 40
     assert read(table, "global:fal")["reservedCents"] == 100
 
 
-def test_real_ledger_rejects_forged_request(table):
+def test_real_ledger_rejects_forged_request(table, subs):
     project, job = str(uuid4()), str(uuid4())
     setup_budget(table, project)
     reserve(table, project, job, 90)
+    submitted(subs, job, "request-real")
     with pytest.raises(Exception):
-        reconcile(table, job, "request-real", 55,
+        reconcile(table, subs, job, "request-real", 55,
                   receipt(job, "request-fake", 55, "receipt-b"))
     assert read(table, "global:fal")["reservedCents"] == 90
     assert read(table, "global:fal")["spentCents"] == 0
 
 
-def test_real_ledger_requires_receipt_id(table):
+def test_real_ledger_requires_receipt_id(table, subs):
     project, job = str(uuid4()), str(uuid4())
     setup_budget(table, project)
     reserve(table, project, job, 40)
+    submitted(subs, job, "request")
     with pytest.raises((ExecutionBlocked, BillingReviewRequired)):
-        reconcile(table, job, "request", 20,
+        reconcile(table, subs, job, "request", 20,
                   {"job_id": job, "provider_request_id": "request",
                    "actual_cents": 20, "verified": True})
     assert read(table, "reservation:" + job)["state"] == "reserved"
 
 
-def test_no_zero_charge_without_positive_no_charge_proof(table):
+def test_no_zero_charge_without_positive_no_charge_proof(table, subs):
     project, job = str(uuid4()), str(uuid4())
     setup_budget(table, project)
     reserve(table, project, job, 40)
+    submitted(subs, job, "request")
     with pytest.raises(Exception):
-        reconcile(table, job, "request", 0,
+        reconcile(table, subs, job, "request", 0,
                   receipt(job, "request", 0, "zero-receipt"),
                   verifier=lambda *args: False)
     assert read(table, "global:fal")["reservedCents"] == 40
