@@ -17,12 +17,14 @@ def sensitive(paths, *, complete=False):
     """Unknown or incomplete file inventory ALWAYS requires security review."""
     if not complete or not isinstance(paths, list) or not paths:
         return True
-    blocked = ("finance", "auth", "identity", "oidc", "secret", "security",
-               "credential", "deploy", "azure", "infra", "provider",
-               "budget", "payment", "worker", "workflow", "policy", "api")
-    return any(not isinstance(p, str) or
-               any(word in p.lower() for word in blocked) or
-               p.startswith(".github/") for p in paths)
+    # Only explicitly approved documentation paths are low-risk. Any unknown,
+    # executable, malformed or traversal path is classified as sensitive.
+    return any(not isinstance(p, str) or not p or len(p) > 512 or
+               "\\x00" in p or "\\" in p or p.startswith("/") or
+               any(part in ("", ".", "..") for part in p.split("/")) or
+               not (p.startswith("docs/") and p.endswith(".md") and
+                    all(re.fullmatch(r"[A-Za-z0-9_.-]+", part)
+                        for part in p.split("/"))) for p in paths)
 
 
 def fingerprint(repo, number, path, body):
@@ -40,7 +42,10 @@ def fingerprint(repo, number, path, body):
     return MARKER_PREFIX + hashlib.sha256(source.encode()).hexdigest()[:24]
 
 
-def plan(pr, reviews, existing_issues, *, reviewer_login=None, reviewer_type=None):
+def plan(pr, reviews, existing_issues, *, reviewer_login=None, reviewer_type=None,
+         coding_actor_login=None, coding_session_id=None, reviewer_session_id=None,
+         independence_verified=False, reviews_complete=False,
+         comments_complete=False, issues_complete=False):
     """Return bounded remediation issue candidates with no side effects.
 
     Reviews must be API-authenticated objects from protected GitHub endpoints,
@@ -53,11 +58,26 @@ def plan(pr, reviews, existing_issues, *, reviewer_login=None, reviewer_type=Non
         return {"state": "hold", "reason": "Unverified draft/main/head", "tasks": []}
     if reviewer_login not in SAFE_REVIEWERS or reviewer_type != "Bot":
         return {"state": "hold", "reason": "Review identity not independently verified", "tasks": []}
-    if not isinstance(reviews, list) or not isinstance(existing_issues, list):
+    # All provenance must come from authenticated trusted intake, not PR text.
+    author = (pr.get("user") or {}).get("login")
+    identities = (reviewer_login, coding_actor_login, author)
+    if (independence_verified is not True or
+            not all(isinstance(x, str) and x.strip() for x in identities) or
+            reviewer_login.casefold() in (coding_actor_login.casefold(), author.casefold()) or
+            not isinstance(coding_session_id, str) or not coding_session_id.strip() or
+            not isinstance(reviewer_session_id, str) or not reviewer_session_id.strip() or
+            coding_session_id == reviewer_session_id):
+        return {"state": "hold", "reason": "Coder/reviewer independence unverified", "tasks": []}
+    if (reviews_complete is not True or comments_complete is not True or
+            issues_complete is not True):
+        return {"state": "hold", "reason": "Pagination or evidence incomplete", "tasks": []}
+    if not isinstance(reviews, list) or not isinstance(existing_issues, list) or any(
+            not isinstance(i, dict) for i in existing_issues):
         return {"state": "hold", "reason": "Incomplete review or issue inventory", "tasks": []}
     markers = "\n".join(str(i.get("body") or "") for i in existing_issues
                        if isinstance(i, dict) and not i.get("pull_request"))
     tasks = []
+    eligible = 0
     for item in reviews:
         if not isinstance(item, dict) or item.get("commit_id") != head:
             continue
@@ -66,7 +86,8 @@ def plan(pr, reviews, existing_issues, *, reviewer_login=None, reviewer_type=Non
         if (item.get("user") or {}).get("login") != reviewer_login or (
                 item.get("user") or {}).get("type") != reviewer_type:
             continue
-        comments = item.get("comments", [])
+        eligible += 1
+        comments = item.get("comments")
         if not isinstance(comments, list):
             return {"state": "hold", "reason": "Unverified review comments", "tasks": []}
         for finding in comments:
@@ -84,6 +105,8 @@ def plan(pr, reviews, existing_issues, *, reviewer_login=None, reviewer_type=Non
                           "path": path, "finding": body[:30000],
                           "action": "would-create-remediation-issue",
                           "assignment": "held-until-separate-coder-and-security-gates"})
+    if eligible == 0:
+        return {"state": "hold", "reason": "No eligible exact-head review", "tasks": []}
     return {"state": "review-findings" if tasks else "no-new-findings",
             "reason": "Dry-run only; no approval or agent dispatch", "tasks": tasks}
 
