@@ -30,7 +30,7 @@ PR #46 is merged into `main` (reviewed auth head `6b62c05aad50620f60f4d26ad2821b
    export DISPLAY=:99
    export VITE_ENTRA_SPA_CLIENT_ID=6d5e9e96-8be6-445c-9176-3b67d020612c
    # Set this to the complete current PR #60 head after independent exact-head review.
-   export C1_EXPECTED_SHA=<independently-reviewed-full-pr60-head-sha>
+   export C1_EXPECTED_SHA=REPLACE_WITH_REVIEWED_PR60_SHA
    C1_LIVE=1 npx playwright test --config=playwright.config.mjs --headed --workers=1 --grep '^LIVE:'
    ```
 4. In the private noVNC desktop, complete sign-in and consent using only the verified Microsoft domain. Pause/resume the Playwright Inspector. Perform the separate consent-denial and cancelled-logout checks using an appropriately unconsented test user where tenant policy permits; if tenant consent or app registration changes would be required, STOP and request separate approval.
