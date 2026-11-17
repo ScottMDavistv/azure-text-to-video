@@ -50,3 +50,9 @@ The independent reviewer found 4/7 browser mutation detections at `e36f2b0`, wit
 **These new browser checks are not independently executed or certified.** Claude must rerun both offline suites in a trusted checkout, compare each original mutation against browser assertions with source invariants disabled, and repeat M6-B wrong-port HTTP, M6-C WebSocket, and M7-B opaque token storage checks using a controlled local sink. M7-S post-success token leakage still requires an authorized live account; do not award a synthetic-browser PASS. Independent reviewer must verify the Microsoft domain allowlist on an owner-approved non-billable supervised dry run without leaking authorization URLs or tokens. Live consent-denial and cancelled-logout handling require separate explicit evidence. PR #46 C1 remains OPEN.
 
 If using `C1_MUTATION_MODE=1`, test runs are development-only and are never acceptable as live C1 SHA attestation. Do not change source code and then run with `C1_LIVE=1`.
+
+## Follow-up to Claude review at ad64f2b
+
+Claude's independent browser re-review found 6 pass / 1 fail / 3 skipped on the offline baseline. B-1 was a bare `@azure/msal-browser` specifier inside `page.evaluate`, which the browser could not resolve. The M4 test now obtains the optimized dependency URL from Vite's transformed `/src/entraAuth.ts` and imports the same module instance, preserving `InteractionRequiredAuthError instanceof` identity. It requires the synthetic fallback to invoke 1 popup and 0 redirects. The evidence `dirty=` marker now reflects actual `git status`, not just `C1_MUTATION_MODE`.
+
+**Not yet independently verified at the new exact head:** clean 0-fail offline baseline and M4 mutant fail at the popup/redirect assertion with static checks disabled. Claude must rerun both, and confirm that the optimized MSAL module resolution works with the actual Vite version. The independent review request is on PR #60 and Issue #61. Live C1 remains INCOMPLETE.
