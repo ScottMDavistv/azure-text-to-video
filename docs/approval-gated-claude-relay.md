@@ -70,3 +70,36 @@ Manual zero-overage proof-of-concept: owner reviews a frozen proposed message; a
 - [ ] Owner approves any outgoing PR #46 security-review handoff after refreshing exact SHA.
 - [ ] Claude pilot report retrieved and provenance independently checked.
 - [ ] Exact-head CI and security re-review of PR #46 completed; PR #46 remains draft until owner authorizes a security-sensitive merge.
+
+
+## Standard engineering relay policies (owner decision 2026-11-17)
+
+The offline decision engine is `scripts/approval_relay_policy.py`, with tests at `tests/design_management/test_approval_relay_policy.py`. **These rules are committed as a nonexecuting implementation; no trigger, agent runner, GitHub Actions workflow or unattended reader has been activated.**
+
+### A. Wrong-base PR detection and narrowly safe automatic correction
+
+For every new Copilot coding task, record the target PR number, exact target head SHA, target head branch, and independently verified coding branch *creation origin*. The desired coding PR base is the **target PR's head branch**, not `main`.
+
+A future independently reviewed adapter may **automatically retarget only the PR base field** (not merge/rebase, force-push, create a replacement, or alter code), and only when all of the following are established from trusted GitHub metadata:
+- Repository, task, head, draft state, expected current base and target branch match the allowlist.
+- Branch-origin attestation proves coding branch started at exactly the owner-approved target PR head; self-reported PR text is not proof.
+- The target PR head remains exactly the approved SHA, both PRs are open, and the retarget is guarded by an immediate re-fetch / compare-and-swap style check against concurrent changes.
+- The adapter has minimally scoped permissions and emits an audit record with old/new base, immutable task ID, origin evidence, current head and action result.
+
+If **any** condition fails, fail closed, flag wrong-origin and propose creating a **new coding branch from the target exact head**. The agent must not use a normal retarget as a substitute for ancestry correction. Do not rewrite branch history automatically. In particular, PR #63's already-corrected base does **not** prove its branch started from PR #46's head.
+
+The current offline planner only returns `aligned`, `propose_retarget` or `block`; no PR mutation endpoint is called. Do not present a proposal as a completed correction. Because GitHub's generic PR update endpoint cannot atomically couple a head check to an update, active execution additionally needs a reviewed concurrency/race strategy; on ambiguity, stop.
+
+### B. Mandatory exact-head origin for *every* coding branch
+
+Create coding branches from the target PR's current, full, immutable SHA, not from default `main`. Re-check immediately before branch creation and require persisted trusted provenance. If the target head moved before creation or assignment, discard/recreate the request; if after creation, block further automated integration and request a refreshed plan. This requirement applies even if the coding PR visually shows zero files changed.
+
+### C. Automatically prepare (never send) Claude re-review
+
+After a coding agent finishes and its authorized changes are **verified incorporated into the target PR head** by trusted Git ancestry (not an issue comment or just an open child PR), fetch fresh CI for that exact head. Verify all required workflows and checks are completed/success, scope and provenance are correct, no stale review SHA, and the target remains open/draft. Then produce one immutable pending-owner-approval message targeting independent Claude for **full-diff** re-review. No automatic launch, GitHub mention, network dispatch, or approval assumption. If any check is missing/pending, state `blocked` with a reason; a subsequent evaluation can retry. Deduplicate by target PR + SHA + review-kind; a new SHA invalidates the old draft.
+
+For the PR #46 pilot, the outgoing Claude request remains subject to explicit owner approval and manual subscription-backed Claude Code cloud start. CI is necessary but not sufficient: the reviewer must verify source and tests, accepted residual-risk severity, and any open security comments. A PASS is not authorization to merge.
+
+### Testing and activation boundaries
+
+Offline tests simulate correct and wrong bases, wrong origin, stale target, forged provenance, failed or stale CI, unintegrated changes, and non-draft/closed targets. They **do not** prove that a live GitHub adapter handles race conditions or authenticates branch-creation events. Before enabling automatic detection or base-only correction, add read-only GitHub adapter tests, protected-main/ruleset tests, least-privilege verification, and independent security review; no paid Actions or Claude automation may be introduced without separate approval and billing verification.
