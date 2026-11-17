@@ -86,6 +86,7 @@ def create_project_job(project_id: UUID, request: PromptRequest,
             "PartitionKey": "video", "RowKey": str(uuid4()),
             "prompt": request.prompt.strip(), "status": "created",
             "createdAt": now, "projectId": pid, "createdBy": actor.user_id,
+            "dispatchQueueType": "synthetic",
         }
         if not job["prompt"]:
             raise HTTPException(422, "Prompt cannot be blank")
@@ -138,7 +139,9 @@ def queue_project_job(project_id: UUID, job_id: UUID,
     try:
         table = get_jobs_table_client()
         actor = verified_actor(table, authorization)
-        authorized_job(table, str(project_id), str(job_id), actor, Action.CREATE_JOB)
+        job = authorized_job(table, str(project_id), str(job_id), actor, Action.CREATE_JOB)
+        if job.get("dispatchQueueType") != "synthetic":
+            raise HTTPException(409, "Synthetic queue ownership marker required")
         if not synthetic_dispatch_enabled():
             raise HTTPException(503, "Synthetic dispatch is disabled")
         transition_job(str(job_id), "queued", dispatchState="pending")
