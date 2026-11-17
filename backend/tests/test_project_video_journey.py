@@ -126,6 +126,6 @@ def test_owner_metadata_uses_private_project_download_path(enabled, monkeypatch)
 
 def test_no_exposure_of_legacy_jobs_without_backend_service_secret():
     from main import app
-    paths = {r.path for r in app.routes}
+    paths = {r.path for r in app.routes if hasattr(r, 'path')}
     assert "/projects/{project_id}/jobs" in paths
     assert "/projects/{project_id}/jobs/{job_id}/video" in paths
