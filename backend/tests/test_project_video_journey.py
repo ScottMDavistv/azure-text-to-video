@@ -133,3 +133,16 @@ def test_project_video_routes_are_registered_and_disabled_by_default(monkeypatch
         response = client.get(f"/projects/{PID}/jobs/{JID}")
     assert response.status_code == 503
     assert response.json()["detail"] == "Authenticated video jobs are disabled"
+
+def test_private_video_not_exposed_before_completed_even_to_owner(enabled, monkeypatch):
+    monkeypatch.setenv("ENABLE_VIDEO_DOWNLOADS", "true")
+    table = MagicMock()
+    table.get_entity.return_value = record(state="processing")
+    with patch.object(routes, "get_jobs_table_client", return_value=table), \
+         patch.object(routes, "verify_project_token", return_value=ACTOR), \
+         patch.object(routes, "require_project_role"), \
+         patch.object(routes, "get_video_resource") as video:
+        with pytest.raises(HTTPException) as e:
+            routes.project_video_metadata(PID, JID, authorization="Bearer signed")
+    assert e.value.status_code == 409
+    video.assert_not_called()
