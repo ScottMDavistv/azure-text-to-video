@@ -16,6 +16,23 @@ def events(document):
         return {value}
     return set()
 
+def privileged_secrets(value):
+    """Extract custom Actions secret references from job YAML, never secret values."""
+    if isinstance(value, dict):
+        found = set()
+        for entry in value.values():
+            found.update(privileged_secrets(entry))
+        return found
+    if isinstance(value, list):
+        found = set()
+        for entry in value:
+            found.update(privileged_secrets(entry))
+        return found
+    if isinstance(value, str):
+        return set(re.findall(r"\bsecrets\.([A-Za-z0-9_]+)\b", value)) - {"GITHUB_TOKEN"}
+    return set()
+
+
 def main_only(expression):
     return isinstance(expression, str) and "github.ref" in expression and "refs/heads/main" in expression
 
@@ -63,6 +80,16 @@ def examine(path, document, raw=""):
             problems.append(where + ": invalid job")
             continue
         condition = job.get("if", "")
+        privileged = privileged_secrets(job)
+        if privileged and not job.get("environment"):
+            problems.append(where + ": custom secret requires a restricted environment")
+        if privileged and not main_only(condition):
+            problems.append(where + ": custom secret job must be explicitly main-only")
+        if path == ".github/workflows/autonomous-engineering.yml" and privileged:
+            if "DM_COPILOT_DISPATCH_TOKEN" not in privileged:
+                problems.append(where + ": controller must use dedicated environment-only credential name")
+            if "COPILOT_DISPATCH_TOKEN" in privileged or "AUTO_MERGE_USER_TOKEN" in privileged:
+                problems.append(where + ": legacy repository secret references forbidden")
         can_run_on_pr = not (main_only(condition) and excludes_pr(condition))
         job_permissions = job.get("permissions", permissions)
         if not isinstance(job_permissions, dict):

@@ -58,6 +58,49 @@ class IsolationTests(unittest.TestCase):
         obj["jobs"]["preview"]["if"] = "github.ref == 'refs/heads/main'"
         self.assertEqual(self.evaluate(obj), [])
 
+
+    def test_custom_secret_requires_environment_and_main(self):
+        token_ref = "$" + "{{ secrets.DM_COPILOT_DISPATCH_TOKEN }}"
+        obj = {"on": {"workflow_dispatch": None},
+               "permissions": {"contents": "read"},
+               "jobs": {"controller": {"runs-on": "ubuntu-latest",
+                                       "env": {"TOKEN": token_ref},
+                                       "steps": []}}}
+        self.assertTrue(self.evaluate(obj))
+        obj["jobs"]["controller"]["environment"] = {"name": "design-management-control",
+                                                         "deployment": "false"}
+        self.assertTrue(self.evaluate(obj))
+        obj["jobs"]["controller"]["if"] = "github.ref == 'refs/heads/main'"
+        self.assertEqual(self.evaluate(obj), [])
+
+    def test_legacy_controller_secret_names_are_forbidden(self):
+        job = {"runs-on": "ubuntu-latest",
+               "if": "github.ref == 'refs/heads/main'",
+               "environment": "design-management-control",
+               "env": {"TOKEN": "$" + "{{ secrets.COPILOT_DISPATCH_TOKEN }}"},
+               "steps": []}
+        document = {"on": {"workflow_dispatch": None},
+                    "permissions": {"contents": "read"},
+                    "jobs": {"controller": job}}
+        findings = checker.examine(".github/workflows/autonomous-engineering.yml",
+                                   document)
+        self.assertTrue(any("legacy repository secret" in problem for problem in findings))
+
+    def test_controller_uses_environment_only_credentials(self):
+        workflow = (ROOT / ".github/workflows/autonomous-engineering.yml").read_text()
+        self.assertIn("name: design-management-control", workflow)
+        self.assertIn("vars.CONTROLLER_ENV_ISOLATION_VERIFIED == 'true'", workflow)
+        self.assertIn("secrets.DM_COPILOT_DISPATCH_TOKEN", workflow)
+        self.assertIn("secrets.DM_AUTO_MERGE_USER_TOKEN", workflow)
+        self.assertNotIn("secrets.COPILOT_DISPATCH_TOKEN", workflow)
+        self.assertNotIn("secrets.AUTO_MERGE_USER_TOKEN", workflow)
+
+    def test_legacy_stage_b_uses_no_repository_secret_references(self):
+        workflow = (ROOT / ".github/workflows/stage-b-audit.yml").read_text()
+        for item in ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID"):
+            self.assertIn("vars." + item, workflow)
+            self.assertNotIn("secrets." + item, workflow)
+
     def test_real_workflow_tree_when_yaml_installed(self):
         try:
             import yaml
