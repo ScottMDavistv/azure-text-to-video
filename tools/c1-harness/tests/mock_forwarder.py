@@ -9,6 +9,7 @@ STATE_DIR/mode (re-read on every request) selects the behaviour:
   interstitial unauthenticated -> 200 sign-in page (no upstream content); token -> proxied
   down         502 for everything (port not forwarded)
   wrongport    token -> a fixed unrelated page (forwarding to the wrong port)
+  ambiguous    unauthenticated -> 503, authenticated -> proxied (unsafe to assume private)
   slow         like private, but each response is delayed 2 s
 GET /repos/OWNER/REPO with "Authorization: token <token>" returns
 {"owner": {"type": <STATE_DIR/owner>}} (GitHub API stand-in).
@@ -58,6 +59,8 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.reply(502, b'not forwarded')
         if mode == 'public':
             return self.proxy()
+        if mode == 'ambiguous':
+            return self.proxy() if authed else self.reply(503, b'forwarder error')
         if mode == 'wrongport':
             return self.reply(200, b'some other service') if authed else self.reply(302, b'', {'Location': 'https://github.com/login'})
         if authed:
