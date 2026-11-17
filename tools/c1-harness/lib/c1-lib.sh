@@ -6,16 +6,25 @@
 # pinned approved values below. There is deliberately NO environment override
 # for the approved SHAs.
 
-C1_AUTH_SHA_APPROVED='73fe6d2a8aeeef97d34ba23c83fcce5e63f649cc'
-C1_PW_SHA_APPROVED='6b45d0acad10065cb825c12c4544cabdad3441d7'
+C1_AUTH_SHA_APPROVED='6b62c05aad50620f60f4d26ad2821b74b939f920'
+C1_PW_SHA_APPROVED='79f87cb4d4ddba819da57095da0ec3bcca8cb452'
 C1_PLAYWRIGHT_VERSION='1.65.1'
 # Exact set of files that may differ between the approved auth commit and the
 # approved Playwright commit. Anything else (e.g. src/entraAuth.ts) => reject.
-C1_AUTH_TO_PW_FILES='frontend/.gitignore
+C1_AUTH_TO_PW_FILES='.github/workflows/frontend-quality-gates.yml
+frontend/.gitignore
 frontend/e2e/README.md
+frontend/e2e/TIER1-TIER2.md
+frontend/e2e/c1-guards.mjs
+frontend/e2e/c1-lockfile-check.mjs
 frontend/e2e/c1-mutation-check.mjs
+frontend/e2e/c1-mutations.mjs
+frontend/e2e/c1-source-policy.mjs
 frontend/e2e/entra-c1.spec.mjs
+frontend/e2e/entra-tier1.spec.mjs
+frontend/e2e/run-browser-mutations.mjs
 frontend/playwright.config.mjs
+frontend/src/App.tsx
 frontend/src/c1BuildInfo.ts'
 C1_APT_PACKAGES='xvfb x11vnc novnc websockify fluxbox xauth iproute2'
 C1_NOVNC_PORT=6080

@@ -15,16 +15,21 @@ const which = process.env.C1_SUPERVISED_CASE
 const frontend = process.env.C1_WORKTREE_FRONTEND
 const sha = execFileSync('git', ['-C', frontend, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
 
-// --- replicated from approved entra-c1.spec.mjs (LIVE branch) ---------------
+// --- replicated from approved e2e/c1-guards.mjs + entra-c1.spec.mjs (LIVE) ---
 const allowedHosts = new Set([
-  'localhost', '127.0.0.1', 'login.microsoftonline.com',
+  'localhost', '127.0.0.1', 'login.microsoftonline.com', 'login.microsoft.com',
   'login.live.com', 'aadcdn.msftauth.net', 'aadcdn.msauth.net',
   'logincdn.msftauth.net', 'secure.aadcdn.microsoftonline-p.com',
 ])
 const allowedLocalOrigins = new Set(['http://localhost:5173', 'http://127.0.0.1:5173'])
 const allowedHmrOrigins = new Set(['ws://localhost:5173', 'ws://127.0.0.1:5173'])
 function allowedRequest(url) {
-  return allowedLocalOrigins.has(url.origin) || (url.protocol === 'https:' && allowedHosts.has(url.hostname) && !['localhost', '127.0.0.1'].includes(url.hostname))
+  // Remote hosts: exact hostname, HTTPS, default port only (no :8443 etc.).
+  return allowedLocalOrigins.has(url.origin) || (url.protocol === 'https:' && url.port === '' && allowedHosts.has(url.hostname) && !['localhost', '127.0.0.1'].includes(url.hostname))
+}
+// Diagnostics record scheme://host[:port] only; never path, query or fragment.
+function originLabel(url) {
+  return url.protocol + '//' + url.host
 }
 
 async function observeContext(context) {
@@ -39,29 +44,29 @@ async function observeContext(context) {
     })
     page.on('websocket', socket => {
       const url = new URL(socket.url())
-      if (!allowedHmrOrigins.has(url.origin)) problems.push('Unauthorized WebSocket host ' + url.hostname)
+      if (!allowedHmrOrigins.has(url.origin)) problems.push('Unauthorized WebSocket origin ' + originLabel(url))
     })
   }
   for (const page of context.pages()) listen(page)
   context.on('page', listen)
   context.on('request', request => {
     const url = new URL(request.url())
-    if (!allowedRequest(url)) problems.push('Unexpected request host ' + url.hostname)
-    if (!allowedRequest(url) && request.headers().authorization) problems.push('Authorization header to unauthorized host ' + url.hostname)
+    if (!allowedRequest(url)) problems.push('Unexpected request origin ' + originLabel(url))
+    if (!allowedRequest(url) && request.headers().authorization) problems.push('Authorization header to unauthorized origin ' + originLabel(url))
   })
   await context.routeWebSocket(/.*/, async route => {
     const url = new URL(route.url())
     if (allowedHmrOrigins.has(url.origin)) {
       await route.connectToServer()
     } else {
-      problems.push('Blocked unauthorized WebSocket host ' + url.hostname)
+      problems.push('Blocked unauthorized WebSocket origin ' + originLabel(url))
       route.close()
     }
   })
   await context.route('**/*', async route => {
     const url = new URL(route.request().url())
     if (!allowedRequest(url)) {
-      problems.push('Blocked unauthorized HTTP origin ' + url.hostname)
+      problems.push('Blocked unauthorized HTTP origin ' + originLabel(url))
       await route.abort('blockedbyclient')
     } else {
       await route.continue()

@@ -206,7 +206,11 @@ test('supplemental spec prints only sanitized RESULT/OBSERVATION lines', () => {
 function approvedSpec() {
   // L-5: FAIL (not skip) when the pinned approved suite cannot be read.
   const top = execFileSync('git', ['-C', here, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim()
-  return execFileSync('git', ['-C', top, 'show', SHA + ':frontend/e2e/entra-c1.spec.mjs'], { encoding: 'utf8' })
+  // Since PR #60 ec8886b the shared guards live in e2e/c1-guards.mjs; both
+  // files must exist at the pinned SHA. `export ` is stripped so the
+  // replicated (non-exported) declarations compare byte-for-byte.
+  const show = f => execFileSync('git', ['-C', top, 'show', SHA + ':frontend/e2e/' + f], { encoding: 'utf8' })
+  return (show('c1-guards.mjs') + '\n' + show('entra-c1.spec.mjs')).replace(/^export /gm, '')
 }
 const block = (src, start) => {
   const i = src.indexOf(start)
@@ -221,7 +225,7 @@ const block = (src, start) => {
 
 test('replicated allowlists and storage checks are identical to the approved suite', () => {
   const approved = approvedSpec()
-  for (const start of ['const allowedHosts = new Set([', 'const allowedLocalOrigins', 'const allowedHmrOrigins', 'function allowedRequest(url)', 'async function assertMemoryOnly(page, context)']) {
+  for (const start of ['const allowedHosts = new Set([', 'const allowedLocalOrigins', 'const allowedHmrOrigins', 'function allowedRequest(url)', 'function originLabel(url)', 'async function assertMemoryOnly(page, context)']) {
     const a = start.startsWith('const') ? approved.split('\n').find(l => l.startsWith(start)) : block(approved, start)
     const b = start.startsWith('const') ? supSpec.split('\n').find(l => l.startsWith(start)) : block(supSpec, start)
     if (start === 'const allowedHosts = new Set([') {
@@ -236,14 +240,15 @@ test('replicated egress guard matches the approved LIVE branch (route aborts eve
   const norm = s => s.replace(/\s+/g, ' ')
   for (const frag of [
     "page.on('console'", "page.on('pageerror'", "page.on('websocket'", 'context.routeWebSocket(/.*/',
-    "problems.push('Authorization header to unauthorized host ' + url.hostname)",
+    "problems.push('Authorization header to unauthorized origin ' + originLabel(url))",
+    "problems.push('Blocked unauthorized WebSocket origin ' + originLabel(url))",
     "await route.abort('blockedbyclient')", 'const credentialPattern = /Bearer\\s+[\\w.-]{24,}|eyJ[A-Za-z0-9_-]{20,}\\.|client_secret\\s*[:=]/i',
   ]) {
     assert.ok(norm(approved).includes(norm(frag)), 'approved has ' + frag)
     assert.ok(norm(supSpec).includes(norm(frag)), 'supplemental has ' + frag)
   }
   // LIVE semantics: approved aborts when (live && !allowedRequest(url)); supplemental is live-only.
-  assert.match(supSpec, /if \(!allowedRequest\(url\)\) \{\s*problems\.push\('Blocked unauthorized HTTP origin ' \+ url\.hostname\)\s*await route\.abort\('blockedbyclient'\)/)
+  assert.match(supSpec, /if \(!allowedRequest\(url\)\) \{\s*problems\.push\('Blocked unauthorized HTTP origin ' \+ originLabel\(url\)\)\s*await route\.abort\('blockedbyclient'\)/)
 })
 
 // ---- remediation regressions (M-1, M-4, L-2, L-5) ------------------------------

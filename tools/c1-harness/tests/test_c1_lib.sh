@@ -127,7 +127,7 @@ markerbig() {   # large environment must not hide the marker (pipe/SIGPIPE regre
   c1_pid_has_marker "$p" "$s"; local r=$?; kill "$p"; return $r
 }
 t 'session marker found in a process with a very large environment' markerbig
-t 'approved SHAs are pinned constants with no environment override' bash -c 'C1_PW_SHA_APPROVED=bad C1_AUTH_SHA_APPROVED=bad; source "$1"; [[ $C1_PW_SHA_APPROVED == 6b45d0acad10065cb825c12c4544cabdad3441d7 && $C1_AUTH_SHA_APPROVED == 73fe6d2a8aeeef97d34ba23c83fcce5e63f649cc ]]' _ "$HERE/../lib/c1-lib.sh"
+t 'approved SHAs are pinned constants with no environment override' bash -c 'C1_PW_SHA_APPROVED=bad C1_AUTH_SHA_APPROVED=bad; source "$1"; [[ $C1_PW_SHA_APPROVED == 79f87cb4d4ddba819da57095da0ec3bcca8cb452 && $C1_AUTH_SHA_APPROVED == 6b62c05aad50620f60f4d26ad2821b74b939f920 ]]' _ "$HERE/../lib/c1-lib.sh"
 t 'launcher scrubs mode/secret-adjacent variables before running tests' bash -c 'grep -q "unset C1_LIVE C1_UNCONFIGURED C1_MUTATION_MODE C1_EXPECTED_SHA" "$1" && grep -q "PWDEBUG DEBUG" "$1"' _ "$HERE/../c1-session.sh"
 t 'launcher never passes trace/video/screenshot or mutation mode to Playwright' bash -c '! grep -Eq -- "--trace|--video|--screenshot|C1_MUTATION_MODE=1|--update-snapshots" "$1"' _ "$HERE/../c1-session.sh"
 
