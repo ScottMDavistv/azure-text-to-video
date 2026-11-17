@@ -4,6 +4,11 @@ import { defineConfig, devices } from '@playwright/test'
 const live = process.env.C1_LIVE === '1'
 const unconfigured = process.env.C1_UNCONFIGURED === '1'
 const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' }).trim()
+const mutationMode = process.env.C1_MUTATION_MODE === '1'
+if (live && mutationMode) throw new Error('C1_MUTATION_MODE cannot run with live Entra credentials')
+if (dirty && !mutationMode) throw new Error('C1 exact-head validation requires a clean tracked and untracked Git checkout')
+if (mutationMode && !process.env.CI) console.log('C1 OFFLINE MUTATION MODE: dirty checkout permitted; no live certification')
 if (live && unconfigured) throw new Error('C1_LIVE and C1_UNCONFIGURED cannot both be set')
 if (live && !/^[0-9a-f-]{36}$/i.test(process.env.VITE_ENTRA_SPA_CLIENT_ID || '')) {
   throw new Error('Live C1 requires the public VITE_ENTRA_SPA_CLIENT_ID (never a secret)')
