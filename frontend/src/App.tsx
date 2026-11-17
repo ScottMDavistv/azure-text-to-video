@@ -69,6 +69,7 @@ export default function App() {
       setAccountName(null)
       setAuthMessage('Signed out. Offline demo remains available.')
     } catch {
+      setAccountName(null)
       setAuthMessage('Microsoft sign-out failed.')
     } finally { setBusy(false) }
   }
