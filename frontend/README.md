@@ -174,3 +174,73 @@ actual Entra-submitted job → Azure Queue → deployed synthetic worker →
 private Blob MP4 → browser download **is not yet deployed or verified**.
 Any actual worker execution, private download enabling, Azure IAM changes or
 job image updates need separate authorized review and operational evidence.
+
+
+## 4. Mocked MSAL tests and manual localhost popup validation (L-6)
+
+`npm test` runs `tests/entraAuth.test.mjs`, which drives the popup flow in
+`src/entraAuthCore.ts` with a mocked MSAL client (no network, no Entra):
+popup login, silent token, interaction-required → popup consent, popup
+logout, the memory-only cache configuration, localhost-only redirect URIs,
+and negative paths (cancelled/blocked popups, declined consent, failed
+initialization retry, logout failure clearing the local account and
+in-memory cache). `src/entraAuth.ts` only wires the real
+`PublicClientApplication` into that core.
+
+The live round trip below is **prepared, not executed**. It uses the
+existing SPA registration unchanged; do not edit the app registration,
+redirect URIs, permissions or consent to make it pass. Only the owner (or
+someone the owner authorizes) should run it, on `http://localhost:5173`.
+
+1. `npm ci && npm run dev`; open exactly `http://localhost:5173`, DevTools open.
+2. **Sign in** → a popup opens (no full-page redirect); select the test
+   account; the page shows the signed-in name.
+3. **Check API permission** → silent token, or a consent popup on first use;
+   the success message appears. No token is displayed or logged.
+4. DevTools → Application: `localStorage` and cookies hold no MSAL
+   account/token entries. `sessionStorage` may briefly hold MSAL
+   *interaction* state during a popup (MSAL's default temporary cache);
+   it must not hold access, ID or refresh tokens afterwards.
+5. Reload the page → signed out (tokens were memory-only).
+6. Negative: close the sign-in popup early, and separately block popups for
+   the origin → an error message, no signed-in name, and a later
+   **Sign in** works without reloading.
+7. **Sign out** → logout popup; the name clears. Repeat with popups blocked:
+   "Microsoft sign-out failed" appears and the in-memory account is cleared
+   (**Check API permission** now asks you to sign in). PR #42 remounts the authenticated studio and clears the displayed account on logout; browser verification remains required.
+8. Record pass/fail per step in Issue #62 without screenshots of tokens,
+   account IDs or other secrets.
+
+## Safety defaults
+
+- `ENABLE_PROJECT_ROUTES=false` in Azure
+- `ENABLE_PAID_FAL_WORKER=false`
+- No FAL credentials in frontend or CI
+- Do not use the API application ID for `VITE_ENTRA_SPA_CLIENT_ID`
+- No Azure deployment or paid FAL job is performed by frontend CI
+
+---
+
+# Mock creative-studio workflow (development only)
+
+The React/Vite frontend now contains an offline studio UI, a responsive session dashboard, deterministic 300-second/five-scene storyboard placeholders, job lifecycle simulator, status indicators, and disabled preview/download affordances.
+
+## Local checks
+
+```sh
+cd frontend
+npm ci
+npm test
+npm run lint
+npm run build
+npm run dev
+```
+
+The simulation requires no backend, login, FAL credentials, Azure resources, storage or paid calls. Enter 1–2,000 characters and select **Create mock job**; select **Advance simulation** to move from queued through planning, rendering, assembling and completed. A simulated completion **does not** create a video or downloadable artifact; play and download are intentionally disabled. State exists only in browser memory and resets on reload.
+
+Existing Entra local authentication stays separate from the simulation. The production prompt/status/download integration must wait for Design Management acceptance of the backend contract and worker/artifact path, plus authorization decisions for scoped user access. Never replace security validation with mock job data. Do not put access tokens in logs, page markup, environment variables served to the browser or demo state.
+
+Scope: isolated frontend development PR only. No CI deployment, Azure/IAM/finance changes, Copilot dispatch, automatic merge, or paid rendering.
+
+
+**Integration note:** PR #42 carries the security foundation popup auth implementation from merged PR #46. Account-switch detection uses the MSAL account `homeAccountId`, and the authenticated studio is remounted when this identity changes. Browser switch/logout race testing and live Entra remain separate gates.
