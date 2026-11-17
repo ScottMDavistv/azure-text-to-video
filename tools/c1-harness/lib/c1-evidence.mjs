@@ -51,7 +51,7 @@ export const ROWS = [
 
 const RESULT_RE = /^C1 RESULT case=(consent-denial|cancelled-logout) state=(not_observed|succeeded|failed|unrecognized) code=([a-z0-9_]{1,64}) aadsts=(none|AADSTS\d{5,6}|unrecognized)$/
 const OBS_RE = /^C1 OBSERVATION case=cancelled-logout ui_signed_in=(true|false) msal_account_present=(true|false) failure_message_shown=(true|false) server_signout_confirmed=(true|false)$/
-const HOST_RE = /(?:Blocked unauthorized HTTP origin|Unexpected request host|Blocked unauthorized WebSocket host|Unauthorized WebSocket host|Authorization header to unauthorized host) ([a-z0-9.-]{1,253})/gi
+const HOST_RE = /(?:Blocked unauthorized HTTP origin|Unexpected request origin|Blocked unauthorized WebSocket origin|Unauthorized WebSocket origin|Authorization header to unauthorized origin|Unexpected request host|Blocked unauthorized WebSocket host) ((?:[a-z][a-z0-9+.-]*:\/\/)?[a-z0-9.:-]{1,253})/gi
 const CRED_MARK = /Credential-like|Authorization header to unauthorized/
 const EGRESS_MARK = /Unexpected request host|Blocked unauthorized|Unauthorized WebSocket/
 const INCOMPLETE_RE = /^INCOMPLETE: [A-Za-z0-9 ;,.()'-]{1,160}$/
@@ -330,11 +330,11 @@ export function renderReviewPackage({ evidence, meta }) {
   L.push('# Independent security review request — C1 Entra validation session', '')
   L.push('You are an independent security reviewer. You did not write the harness or run this session. Do not approve or merge anything; report findings and a verdict only.', '')
   L.push('## Scope', '')
-  L.push('- Authentication implementation: PR #46 at `' + (meta.AUTH_SHA ?? 'unknown') + '` (not modified by the harness).')
+  L.push('- Protected-main baseline containing certified PR #46 auth at `' + (meta.AUTH_SHA ?? 'unknown') + '` (not modified by the harness).')
   L.push('- Approved Playwright suite: PR #60 at `' + (meta.PW_SHA ?? 'unknown') + '` (executed unmodified from a detached clean worktree).')
   L.push('- Harness: `tools/c1-harness/` at `' + (meta.HARNESS_SHA ?? 'unknown') + '` (draft PR; must itself be independently reviewed).', '')
   L.push('## Reviewer checklist', '')
-  L.push('1. Confirm `git diff --name-only <auth> <playwright>` lists only the six approved test files, and `git diff --name-only <playwright> <harness>` lists only `tools/c1-harness/**`.')
+  L.push('1. Confirm `git diff --name-only <auth> <playwright>` matches the pinned explicit changed-file allowlist, and `git diff --name-only <playwright> <harness>` lists only `tools/c1-harness/**`.')
   L.push('2. Confirm the evidence SHAs match the PR heads you are reviewing and that rows marked PASS correspond to executed tests (no SKIPPED row is counted as PASS).')
   L.push('3. Re-run the offline suites yourself from a clean checkout; compare with R2–R5.')
   L.push('4. Review `tools/c1-harness/supplemental/c1-supervised.spec.mjs` helpers for equivalence with the approved suite\'s LIVE egress/storage checks.')
