@@ -13,7 +13,14 @@ param identityName string = 'id-textvideo-worker-dev'
 @description('Existing Azure Container Registry.')
 param registryName string = 'acrtextvideo1794671698'
 
-@description('Immutable image reference containing the worker code.')
+// The deployment gate validates exact ACR repository and audited sha256 digest.
+// Never supply a mutable tag; future images require independent review.
+@description('ACR worker image pinned to a verified OCI manifest @sha256 digest; Git SHA tags are forbidden.')
+@minLength(122)
+@maxLength(122)
+@allowed([
+  'acrtextvideo1794671698.azurecr.io/textvideo-worker@sha256:219ebbe03d9b1356a4091912b4955c1987ba8a0131a4e084953ab3796b5f0646'
+])
 param workerImage string
 
 @description('Azure Storage account.')
