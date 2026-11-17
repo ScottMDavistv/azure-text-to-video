@@ -23,6 +23,25 @@ function allowedRequest(url) {
   return allowedLocalOrigins.has(url.origin) || (url.protocol === 'https:' && allowedHosts.has(url.hostname) && !['localhost', '127.0.0.1'].includes(url.hostname))
 }
 
+
+// Evidence contains only a commit identifier, browser version, timestamps and
+// test status. Do not print request URLs, JWTs, cookies or browser storage.
+let evidenceBrowser = 'unknown'
+test.beforeAll(async ({ browser }) => {
+  evidenceBrowser = browser.version()
+  console.log('C1 BEGIN sha=' + sha + ' dirty=' + (process.env.C1_MUTATION_MODE === '1') +
+    ' browser=' + evidenceBrowser + ' utc=' + new Date().toISOString())
+})
+test.afterEach(async ({}, info) => {
+  console.log('C1 TEST outcome=' + info.status + ' sha=' + sha +
+    ' browser=' + evidenceBrowser + ' utc=' + new Date().toISOString() +
+    ' title=' + info.title.replace(/[^a-z0-9 -]/gi, '_'))
+})
+test.afterAll(async () => {
+  console.log('C1 END sha=' + sha + ' browser=' + evidenceBrowser +
+    ' utc=' + new Date().toISOString())
+})
+
 function assertSourceInvariants() {
   // Offline structural checks are intentionally narrow; a real login remains required.
   expect(authSource).toMatch(/cacheLocation:\s*['"]memoryStorage['"]/)
