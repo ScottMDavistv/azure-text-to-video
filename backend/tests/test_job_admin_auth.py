@@ -84,3 +84,22 @@ def test_valid_authorization(monkeypatch):
     assert authorize_job_admin(
         f"Bearer {TOKEN}"
     ) is True
+
+
+@pytest.mark.parametrize("value", ["Bearer caf\\u00e9", "Bearer \\u2603",
+                                    "Bearer \\U0001f512", "Bearer \\x00"])
+def test_nonascii_admin_bearer_rejected_without_500(monkeypatch, value):
+    monkeypatch.setenv("ENABLE_JOB_ADMIN_ENDPOINTS", "true")
+    monkeypatch.setenv("JOB_ADMIN_TOKEN", TOKEN)
+    with pytest.raises(HTTPException) as exc:
+        authorize_job_admin(value)
+    assert exc.value.status_code == 401
+    assert exc.value.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_nonascii_admin_bearer_still_default_disabled(monkeypatch):
+    monkeypatch.delenv("ENABLE_JOB_ADMIN_ENDPOINTS", raising=False)
+    monkeypatch.setenv("JOB_ADMIN_TOKEN", TOKEN)
+    with pytest.raises(HTTPException) as exc:
+        authorize_job_admin("Bearer caf\\u00e9")
+    assert exc.value.status_code == 503
