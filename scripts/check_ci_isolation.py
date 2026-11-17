@@ -263,7 +263,7 @@ def examine(path, doc, raw=""):
                                                   not re.fullmatch(r"[0-9a-f]{40}", ref)) \
                         or "repository" in opts:
                     problems.append(where + ": privileged/base-context job checks out untrusted ref")
-        if privileged and inherited_context:
+        if inherited_context:
             # workflow_run executes as main with main's environments; it must never
             # consume the triggering (possibly PR) run's code, refs or artifacts,
             # including via env/shell indirection that checkout-ref checks cannot see.
@@ -274,10 +274,10 @@ def examine(path, doc, raw=""):
                    for e in expressions({"job": job, "env": doc.get("env"),
                                          "defaults": doc.get("defaults")})):
                 problems.append(where + ": privileged base-context job reads workflow_run payload")
-            if any(str(st.get("uses", "")).startswith("./")
+            if any(str(st.get("uses", "")).strip().startswith(("./", ".\\", "$/"))
                    for st in steps if isinstance(st, dict)):
                 problems.append(where + ": privileged base-context/callee local action forbidden")
-            if call and not any(re.fullmatch(
+            if privileged and call and not any(re.fullmatch(
                     r"""github\.event_name\s*==\s*(['"])workflow_dispatch\1""", p)
                     for p in (condition_terms(cond) or [])):
                 problems.append(where + ": privileged reusable callee requires positive workflow_dispatch guard")
