@@ -229,13 +229,17 @@ def test_private_download_pins_blob_etag_and_exact_size(
          patch.object(routes, "get_video_resource", return_value=resource):
         response = routes.project_video_download(PID, JID,
                                                  authorization="Bearer signed")
-    output = []
+    import asyncio
+    async def consume():
+        result = []
+        async for part in response.body_iterator:
+            result.append(part)
+        return b"".join(result)
     if expected_error:
         with pytest.raises(RuntimeError):
-            output.extend(response.body_iterator)
+            asyncio.run(consume())
     else:
-        output.extend(response.body_iterator)
-        assert b"".join(output) == b"abcde"
+        assert asyncio.run(consume()) == b"abcde"
     from azure.core import MatchConditions
     assert blob.download_blob.call_args.kwargs == {
         "max_concurrency": 1, "etag": '"expected-etag"',
