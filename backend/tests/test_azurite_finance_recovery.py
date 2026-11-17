@@ -9,6 +9,7 @@ from finance_controls import PARTITION, FinanceDenied, reserve
 from finance_recovery import (
     settle_unique_receipt, inspect_reservation,
     request_unsubmitted_release, approve_unsubmitted_release,
+    receipt_key, provider_request_key,
 )
 from project_access import Actor
 
@@ -233,3 +234,92 @@ def test_ambiguous_non_submission_must_never_release(table):
             verify_never_submitted=lambda job, evidence: False,
         )
     assert row(table, "global:fal")["reservedCents"] == 70
+
+
+def test_same_provider_request_different_receipts_cannot_charge_two_jobs(table):
+    project, first, second = uid(), uid(), uid()
+    seed(table, project)
+    reserve(table, project, first, 100)
+    reserve(table, project, second, 100)
+    request_id = "same-request-two-receipts"
+    settle_unique_receipt(
+        table, job_id=first, actual_cents=70,
+        provider_request_id=request_id, receipt_id="receipt-A",
+        provider_receipt=evidence(first, request_id, "receipt-A", 70),
+        verify_provider_receipt=receipt_ok)
+    with pytest.raises(FinanceDenied):
+        settle_unique_receipt(
+            table, job_id=second, actual_cents=80,
+            provider_request_id=request_id, receipt_id="receipt-B",
+            provider_receipt=evidence(second, request_id, "receipt-B", 80),
+            verify_provider_receipt=receipt_ok)
+    assert row(table, "global:fal")["spentCents"] == 70
+    assert row(table, "global:fal")["reservedCents"] == 100
+    assert row(table, "project:" + project)["spentCents"] == 70
+    assert inspect_reservation(table, second)["state"] == "reserved"
+    assert row(table, provider_request_key("fal", request_id))["jobId"] == first
+
+
+def test_concurrent_same_request_distinct_receipts_one_winner(table):
+    project, first, second = uid(), uid(), uid()
+    seed(table, project)
+    reserve(table, project, first, 100)
+    reserve(table, project, second, 100)
+    def submit(job_and_receipt):
+        job, receipt = job_and_receipt
+        try:
+            settle_unique_receipt(
+                table, job_id=job, actual_cents=40,
+                provider_request_id="same-request-race", receipt_id=receipt,
+                provider_receipt=evidence(job, "same-request-race", receipt, 40),
+                verify_provider_receipt=receipt_ok)
+            return True
+        except FinanceDenied:
+            return False
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(submit, [(first, "race-a"), (second, "race-b")]))
+    assert sum(results) == 1
+    assert row(table, "global:fal")["spentCents"] == 40
+    assert row(table, "global:fal")["reservedCents"] == 100
+    assert row(table, "project:" + project)["spentCents"] == 40
+    assert sum(inspect_reservation(table, job)["state"] == "settled"
+               for job in (first, second)) == 1
+
+
+@pytest.mark.parametrize("second_receipt", ["receipt-a", "RECEIPT-A"])
+def test_case_variant_receipt_cannot_settle_other_job(table, second_receipt):
+    project, first, second = uid(), uid(), uid()
+    seed(table, project)
+    reserve(table, project, first, 100)
+    reserve(table, project, second, 100)
+    settle_unique_receipt(
+        table, job_id=first, actual_cents=35,
+        provider_request_id="request-first", receipt_id="Receipt-A",
+        provider_receipt=evidence(first, "request-first", "Receipt-A", 35),
+        verify_provider_receipt=receipt_ok)
+    with pytest.raises(FinanceDenied):
+        settle_unique_receipt(
+            table, job_id=second, actual_cents=40,
+            provider_request_id="request-second", receipt_id=second_receipt,
+            provider_receipt=evidence(second, "request-second", second_receipt, 40),
+            verify_provider_receipt=receipt_ok)
+    assert inspect_reservation(table, second)["state"] == "reserved"
+    assert row(table, "global:fal")["spentCents"] == 35
+    assert row(table, "global:fal")["reservedCents"] == 100
+
+
+@pytest.mark.parametrize("invalid_receipt", ["Receipt-A ", " Receipt-A",
+                                             "Receipt-A\\u200b", "Receipt-A\\x00"])
+def test_noncanonical_receipts_rejected_without_budget_movement(table, invalid_receipt):
+    project, job = uid(), uid()
+    seed(table, project)
+    reserve(table, project, job, 60)
+    with pytest.raises(FinanceDenied):
+        settle_unique_receipt(
+            table, job_id=job, actual_cents=25,
+            provider_request_id="request-one", receipt_id=invalid_receipt,
+            provider_receipt=evidence(job, "request-one", invalid_receipt, 25),
+            verify_provider_receipt=receipt_ok)
+    assert row(table, "global:fal")["spentCents"] == 0
+    assert row(table, "global:fal")["reservedCents"] == 60
+    assert inspect_reservation(table, job)["state"] == "reserved"
