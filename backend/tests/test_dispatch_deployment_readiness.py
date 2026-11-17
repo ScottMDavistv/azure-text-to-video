@@ -47,7 +47,8 @@ def test_action_group_must_be_full_resource_id():
 
 
 @pytest.mark.parametrize("needle", [
-    "param activateReconciliation bool = false",\n    "if (activateReconciliation)",
+    "param activateReconciliation bool = false",
+    "if (activateReconciliation)",
     "secrets: []",
     "replicaRetryLimit: 0",
     "parallelism: 1",
