@@ -8,15 +8,12 @@ import {
 const tenantId = '773e9051-c546-4b75-9432-90f4f8242660'
 const apiClientId = 'a5a09b74-aead-455f-9de7-9b844c8a8465'
 const localhostRedirect = 'http://localhost:5173'
-const codespacesRedirect =
-  'https://turbo-halibut-g4pq966pxp5vf9wxw-5173.app.github.dev'
 
 /** Only use origins explicitly registered with the Entra SPA. */
 export function getRedirectUri(origin: string): string {
   if (origin === localhostRedirect || origin === 'http://127.0.0.1:5173') {
     return localhostRedirect
   }
-  if (origin === codespacesRedirect) return codespacesRedirect
   throw new Error('Unregistered frontend origin; check the Entra SPA redirect URI')
 }
 
@@ -43,7 +40,7 @@ export async function initializeAuth(): Promise<PublicClientApplication> {
         postLogoutRedirectUri: getRedirectUri(window.location.origin),
         navigateToLoginRequestUrl: false,
       },
-      cache: { cacheLocation: 'sessionStorage', storeAuthStateInCookie: false },
+      cache: { cacheLocation: 'memoryStorage', storeAuthStateInCookie: false },
     })
     initialization = (async () => {
       await client.initialize()
