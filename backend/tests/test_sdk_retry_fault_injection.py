@@ -18,6 +18,9 @@ from finance_controls import (
     reserve, scope_key,
 )
 from finance_recovery import settle_unique_receipt
+from provider_submission_ledger import (
+    claim_intent, create_intent, record_provider_request_id,
+)
 
 pytestmark = pytest.mark.skipif(
     os.getenv("AZURITE_TABLE_TEST") != "1", reason="Requires local Azurite opt-in")
@@ -65,6 +68,13 @@ def tables():
         svc.close()
 
 
+def submitted(subs, job, request_id):
+    """Durable submitted intent via the real ledger API (L-2 binding)."""
+    create_intent(subs, job)
+    claim_intent(subs, job)
+    record_provider_request_id(subs, job, request_id)
+
+
 def seed(table, project):
     for key in ("global:fal", scope_key(project)):
         table.create_entity({
@@ -102,6 +112,8 @@ def test_settle_applied_batch_sdk_resend_not_reported_as_retryable(tables):
     project, job = str(uuid.uuid4()), str(uuid.uuid4())
     seed(plain, project)
     reserve(plain, project, job, 50)
+    # Durable intent lives in its own partition, read via the fault-free client.
+    submitted(plain, job, "request-" + job)
     receipt = {"job_id": job, "amount_cents": 35, "receipt_id": "settle-" + job}
     ok = lambda j, req, rid, a, r: (
         r["job_id"] == j and r["amount_cents"] == a
@@ -113,7 +125,7 @@ def test_settle_applied_batch_sdk_resend_not_reported_as_retryable(tables):
     try:
         try:
             settle_unique_receipt(
-                faulty, job_id=job, actual_cents=35,
+                faulty, submission_table=plain, job_id=job, actual_cents=35,
                 provider_request_id="request-" + job,
                 receipt_id=receipt["receipt_id"],
                 provider_receipt=receipt, verify_provider_receipt=ok,
