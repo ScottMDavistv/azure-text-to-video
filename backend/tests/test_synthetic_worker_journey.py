@@ -16,6 +16,7 @@ def owned_job():
 
 @pytest.fixture
 def config(monkeypatch):
+    monkeypatch.setenv("AZURE_SYNTHETIC_JOBS_QUEUE", "textvideo-synthetic-only")
     monkeypatch.setenv("ENABLE_AUTHENTICATED_VIDEO_JOBS", "true")
     monkeypatch.setenv("ENABLE_PROJECT_ROUTES", "true")
     monkeypatch.setenv("ENABLE_SYNTHETIC_VIDEO_DISPATCH", "true")
@@ -107,3 +108,13 @@ def test_worker_rejects_legacy_paid_provider_environment(config, monkeypatch):
     monkeypatch.setenv("VIDEO_PROVIDER", "fal")
     with pytest.raises(SyntheticRenderError):
         synthetic.require_synthetic_readiness()
+
+
+def test_worker_rejects_shared_or_missing_synthetic_queue(config, monkeypatch):
+    from job_queue import QUEUE_NAME
+    for value in ("", QUEUE_NAME, "Invalid_Queue"):
+        monkeypatch.setenv("AZURE_SYNTHETIC_JOBS_QUEUE", value)
+        with patch.object(synthetic, "consume_one") as worker, \
+             pytest.raises(SyntheticRenderError):
+            synthetic.run_once()
+        worker.assert_not_called()
