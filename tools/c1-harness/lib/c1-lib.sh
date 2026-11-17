@@ -576,7 +576,9 @@ c1_gh_visibility() {
 c1_watchdog_loop() {
   local root=$1 s=$2 lpid=$3 lstart=$4
   trap 'exit 0' TERM
-  while [[ "$(c1_proc_start "$lpid")" == "$lstart" ]]; do sleep 1; done
+  # A SIGKILLed launcher can linger as an unreaped zombie with the same start
+  # time; zombie (Z) or dead (X) counts as gone.
+  while [[ "$(c1_proc_start "$lpid")" == "$lstart" && ! "$(c1_proc_stat_field "$lpid" 1)" =~ ^[ZX]$ ]]; do sleep 1; done
   c1_cleanup_session "$root" "$s"
 }
 
