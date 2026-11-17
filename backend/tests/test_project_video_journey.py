@@ -245,3 +245,55 @@ def test_private_download_pins_blob_etag_and_exact_size(
         "max_concurrency": 1, "etag": '"expected-etag"',
         "match_condition": MatchConditions.IfNotModified,
     }
+
+
+def test_real_rs256_signed_token_through_project_status_route(enabled, monkeypatch):
+    """C42-07: exercise real JWT verification, not a mocked verifier."""
+    from datetime import datetime, timedelta, timezone
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from fastapi.testclient import TestClient
+    import jwt
+    from main import app
+
+    tenant = "773e9051-c546-4b75-9432-90f4f8242660"
+    app_id = "a5a09b74-aead-455f-9de7-9b844c8a8465"
+    issuer = f"https://login.microsoftonline.com/{tenant}/v2.0"
+    monkeypatch.setenv("PROJECT_OIDC_ISSUER", issuer)
+    monkeypatch.setenv("PROJECT_OIDC_JWKS_URL",
+                       f"https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys")
+    monkeypatch.setenv("PROJECT_OIDC_AUDIENCE", f"api://{app_id}")
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwks = MagicMock()
+    jwks.get_signing_key_from_jwt.return_value = MagicMock(key=key.public_key())
+    table = MagicMock()
+    def get_entity(*, partition_key, row_key):
+        if partition_key == "project-oidc-users":
+            return {"active": True, "userId": UID}
+        assert partition_key == "video" and row_key == JID
+        return record()
+    table.get_entity.side_effect = get_entity
+    now = datetime.now(timezone.utc)
+    claims = {
+        "iss": issuer, "aud": f"api://{app_id}", "tid": tenant,
+        "sub": "c42-signed-route", "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(hours=1)).timestamp()),
+        "scp": "access_as_user",
+    }
+    def sign(payload):
+        return jwt.encode(payload, key, algorithm="RS256",
+                          headers={"kid": "c42-test"})
+    with patch("project_oidc.jwt.PyJWKClient", return_value=jwks), \
+         patch.object(routes, "get_jobs_table_client", return_value=table), \
+         patch.object(routes, "require_project_role"), \
+         TestClient(app) as client:
+        url = f"/projects/{PID}/jobs/{JID}"
+        good = client.get(url, headers={"Authorization": "Bearer " + sign(claims)})
+        assert good.status_code == 200
+        assert good.json()["job_id"] == JID
+        denied = client.get(url, headers={"Authorization": "Bearer " +
+                           sign({**claims, "scp": "access_as_user_extra"})})
+        assert denied.status_code == 403
+        forged = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        bad = jwt.encode(claims, forged, algorithm="RS256",
+                         headers={"kid": "c42-test"})
+        assert client.get(url, headers={"Authorization": "Bearer " + bad}).status_code == 401
