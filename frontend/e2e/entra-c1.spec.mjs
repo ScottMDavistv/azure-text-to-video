@@ -140,6 +140,7 @@ test('M-1/M-4/M-5: configured auth runtime is tenant-scoped, memory-only, correc
   expect(config.scopes).toEqual([scope])
   expect(config.unexpectedOriginRejected).toBe(true)
   await assertMemoryOnly(page, context)
+  await page.waitForTimeout(250) // permit post-mount egress mutations to surface
   expect(audit.problems).toEqual([])
 })
 
@@ -182,6 +183,80 @@ test('M-1/M-2: attempted login sends correct tenant, PKCE, registered URI, clien
   await expect(page.getByRole('button', { name: 'Sign in with Microsoft' })).toBeEnabled({ timeout: 15000 })
   await expect(page.getByText(/^Signed in:/)).toHaveCount(0)
   await assertMemoryOnly(page, context)
+  expect(audit.problems).toEqual([])
+})
+
+
+// Browser-level mutation checks do not rely on the static source regexes.
+test('M2 browser: loopback-origin redirect remains canonical localhost', async ({ page, context }) => {
+  test.skip(live || unconfigured, 'Offline synthetic SPA only')
+  const audit = await observeContext(context)
+  await page.goto('http://127.0.0.1:5173')
+  await assertBuild(page)
+  const actual = await page.evaluate(async () => {
+    const { initializeAuth } = await import('/src/entraAuth.ts')
+    return (await initializeAuth()).getConfiguration().auth.redirectUri
+  })
+  expect(actual).toBe('http://localhost:5173')
+  expect(audit.problems).toEqual([])
+})
+
+test('M4 browser: interaction-required token recovery invokes popup, never redirect', async ({ page, context }) => {
+  test.skip(live || unconfigured, 'Offline synthetic SPA only')
+  const audit = await observeContext(context)
+  await page.goto('/')
+  const calls = await page.evaluate(async () => {
+    const { initializeAuth, acquireApiToken } = await import('/src/entraAuth.ts')
+    const { InteractionRequiredAuthError } = await import('@azure/msal-browser')
+    const auth = await initializeAuth()
+    const account = { homeAccountId: 'synthetic-account', username: 'synthetic@example.invalid' }
+    const original = {
+      getActiveAccount: auth.getActiveAccount, acquireTokenSilent: auth.acquireTokenSilent,
+      acquireTokenPopup: auth.acquireTokenPopup, acquireTokenRedirect: auth.acquireTokenRedirect,
+      loginRedirect: auth.loginRedirect,
+    }
+    const counts = { popup: 0, redirect: 0, result: false }
+    try {
+      auth.getActiveAccount = () => account
+      auth.acquireTokenSilent = async () => { throw new InteractionRequiredAuthError('interaction_required') }
+      auth.acquireTokenPopup = async () => { counts.popup++; return { accessToken: 'synthetic-non-token' } }
+      auth.acquireTokenRedirect = async () => { counts.redirect++ }
+      auth.loginRedirect = async () => { counts.redirect++ }
+      const result = await acquireApiToken()
+      counts.result = result?.accessToken === 'synthetic-non-token'
+      return counts
+    } finally {
+      for (const [key, method] of Object.entries(original)) auth[key] = method
+    }
+  })
+  expect(calls).toEqual({ popup: 1, redirect: 0, result: true })
+  expect(audit.problems).toEqual([])
+})
+
+test('M5 browser: signOut invokes MSAL logoutPopup for the selected account', async ({ page, context }) => {
+  test.skip(live || unconfigured, 'Offline synthetic SPA only')
+  const audit = await observeContext(context)
+  await page.goto('/')
+  const calls = await page.evaluate(async () => {
+    const { initializeAuth, signOut } = await import('/src/entraAuth.ts')
+    const auth = await initializeAuth()
+    const account = { homeAccountId: 'synthetic-account', username: 'synthetic@example.invalid' }
+    const original = { getActiveAccount: auth.getActiveAccount, logoutPopup: auth.logoutPopup }
+    let count = 0
+    let correctAccount = false
+    try {
+      auth.getActiveAccount = () => account
+      auth.logoutPopup = async request => {
+        count++
+        correctAccount = request?.account?.homeAccountId === account.homeAccountId
+      }
+      await signOut()
+      return { count, correctAccount }
+    } finally {
+      for (const [key, method] of Object.entries(original)) auth[key] = method
+    }
+  })
+  expect(calls).toEqual({ count: 1, correctAccount: true })
   expect(audit.problems).toEqual([])
 })
 
