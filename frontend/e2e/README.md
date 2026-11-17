@@ -1,28 +1,40 @@
-# C1 Microsoft Entra Playwright validation
+# C1 — Microsoft Entra localhost Playwright validation
 
-Development-only browser suite for PR #46. No CI workflow, paid actions, IAM modifications, FAL, Azure deployment, or automatic Claude API execution.
+Development-only tests stacked on PR #46, tracked in PR #60. Nothing in this suite authorizes Azure deployment, IAM changes, paid FAL, merging, or billable GitHub Actions/Claude dispatch.
 
-## Offline tests
+## Execution on a trusted development machine
 
-From frontend:
-```sh
+From the repository's `frontend/` directory:
+
+```bash
 npm ci
-npm install --no-save @playwright/test
+# Temporary local test dependency only. Pin in the lockfile before promoting to required CI.
+npm install --no-save --ignore-scripts @playwright/test@1.65.1
 npx playwright install chromium
+node e2e/c1-mutation-check.mjs
 npx playwright test --config=playwright.config.mjs
-```
-Leave `VITE_ENTRA_SPA_CLIENT_ID` unset in `.env.local` for the unconfigured-SPA test. The Playwright package is intentionally not committed to the existing npm lockfile or CI: a separately authorized, pinned-lockfile change is necessary before making it mandatory CI.
-
-## Live, supervised browser checks
-
-Confirm correct Entra **SPA** public client ID and register `http://localhost:5173` under SPA redirect URIs. Set `VITE_ENTRA_SPA_CLIENT_ID` in the ignored `frontend/.env.local`; never enter credentials or tokens there.
-
-```sh
-C1_LIVE=1 C1_SPA_CONFIGURED=1 npx playwright test --config=playwright.config.mjs --headed --workers=1
+C1_UNCONFIGURED=1 npx playwright test --config=playwright.config.mjs
 ```
 
-Complete the real Microsoft login popup and consent, resume the Playwright inspector at each pause. For the cancellation test, cancel the popup before resuming. Record browser/version, date, tested commit, sanitized errors and each checklist result. Actual consent denial and cancelled logout still require separate supervised verification; mark them INCOMPLETE if not exercised. In-memory MSAL cache prevents reuse of saved authentication state.
+Offline runs inject a synthetic public SPA client ID (`00000000-0000-4000-8000-000000000000`) into a fresh Vite server, intercept external requests, and never sign in to Microsoft. The unconfigured case runs separately. **Passing these tests is not a C1 live PASS.**
 
-The suite returns *only boolean token-audience/scope assertions*, not tokens or full claims. Traces, videos and screenshots are disabled, and console redaction guards are best-effort only. Do not attach HAR/network traces, full auth responses, cookies, access tokens, or credential-bearing evidence.
+### Supervised live Entra session
 
-Passing offline tests is **not C1 certification**. When all live evidence exists, request an independent Claude review of the complete C1 checklist and tested SHA. Claude must return PASS / FAIL / INCOMPLETE for each line, explain limitations, and explicitly recommend C1 closure or continued hold. A Claude review has not been automatically invoked by this suite. PR #46 remains draft and unmerged.
+Verify your Microsoft Entra SPA application ID, tenant and registered redirect `http://localhost:5173` (SPA type). Set only the public client ID, not a secret:
+
+```bash
+C1_LIVE=1 VITE_ENTRA_SPA_CLIENT_ID=<your-public-spa-client-id> \
+  npx playwright test --config=playwright.config.mjs --headed --workers=1
+```
+
+A fresh web server is mandatory in all modes; a running server on port 5173 must be shut down first. The Playwright config supplies `VITE_C1_SHA`, and tests verify the browser received the checkout SHA. Browser reports do not record bearer tokens. `page.pause()` requires operator interaction; manually complete login/logout or cancel the correct popup and resume. Tests are intentionally not enabled in GitHub Actions.
+
+The live test checks tenant, token audience/scope, issuer, expiration, active MSAL account, memory-only storage, silent token retrieval, verified logout/empty MSAL cache, and denial of unsafe egress. The cancelled-login test requires `user_cancelled` specifically. **Still separately test consent denial and cancelled logout** with a supervised test account; document the outcome without tokens or screenshots showing credentials. A successful suite is not a complete C1 matrix until all consent/cancellation requirements have evidence.
+
+## Security evidence and independent review
+
+Record exact checkout SHA, browser/version, UTC time, test commands, each C1 result, and relevant sanitized MSAL error codes. Do **not** share credentials, bearer tokens, cookies, request URLs containing OAuth parameters, decoded JWT claims, HAR files, console dumps, traces, screenshots of Microsoft sign-in, or auth storage state.
+
+The source mutation runner performs seven intentionally defective source transformations **in memory**, verifies that each violates a static constraint, and never changes repository files. It is a useful regression guard but **not a substitute for Playwright runtime mutation testing**. Reviewers should independently repeat browser mutation tests on a temporary checkout before certifying suite readiness.
+
+Current independent Claude verdict on original suite at `d32ec67`: REQUEST CHANGES. Retest and independently review the new exact head before changing this verdict. PR #46's C1 gate and review Thread 1 remain open; C2, C3 and #51 still apply. Never self-approve or automatically merge.
