@@ -103,3 +103,24 @@ For the PR #46 pilot, the outgoing Claude request remains subject to explicit ow
 ### Testing and activation boundaries
 
 Offline tests simulate correct and wrong bases, wrong origin, stale target, forged provenance, failed or stale CI, unintegrated changes, and non-draft/closed targets. They **do not** prove that a live GitHub adapter handles race conditions or authenticates branch-creation events. Before enabling automatic detection or base-only correction, add read-only GitHub adapter tests, protected-main/ruleset tests, least-privilege verification, and independent security review; no paid Actions or Claude automation may be introduced without separate approval and billing verification.
+
+
+## Standard CI gate, corrective task and unified approval queue — owner authorization 2026-11-17
+
+### Strict ancestry CI gate — staged, not active
+
+`scripts/approval_relay_ci_gate.py` performs fail-closed verification of coding PR identity, target exact-head SHA, true merge-base ancestry, the expected base, draft status, owner-approved assignment and trusted creation-origin attestation. Missing or unverified provenance is a failure; PR titles, comments, labels and agent-supplied JSON do not constitute authentic proof.
+
+A proposed *non-executable* GitHub Actions workflow is stored at `docs/relay-workflow-proposals/copilot-remediation-ancestry.yml`, **not** under `.github/workflows`. To turn it into a genuinely required check, future separately approved implementation must retrieve a trusted owner-approved task ledger and GitHub ancestry metadata using read-only API permissions, pin external action SHAs, guard against untrusted pull-request code and races, independently security-review the adapter, confirm no metered GitHub Actions usage, activate only within existing manual workflow-approval controls, and add the passing job's exact check name to the protected branch ruleset without removing any existing required check. Until those conditions are met, **the new mandatory check is not enforced by GitHub**. Never claim the offline unit tests alone protect PR merges.
+
+### Failed alignment → corrective coding task record, NOT dispatch
+
+`scripts/approval_relay_inbox.py` builds a deterministic, deduplicatable branch-correction issue body from a failure, linked to the coding PR, target PR, and exact head. A future authenticated publisher must search for the immutable dedupe marker and atomically handle concurrency to avoid repeated issues. Publication is an issue write, **not** a new coding-agent assignment; the owner must approve the outgoing assignment separately. Do not allow issue content to trigger Copilot dispatch under an existing controller or automation: pending tasks must remain excluded from dispatch allowlists.
+
+The PR #63 test case was manually recorded at GitHub Issue #64, not by an active publisher; it is a blocked pending task and cannot activate any coding session.
+
+### Unified decision-only approval queue
+
+One inbox groups `branch_correction`, `remediation`, `claude_review`, and `security_merge` decisions. Each item is deduplicated by repository, kind, PR, exact head and linked issue, is `pending_owner_approval`, and has `dispatch_enabled=false` until authenticated owner attestation. Security remediation takes priority over ordinary work; at most two live agents. A newly changed SHA invalidates old review/merge approvals. An approving action must be one-time, scoped to the full frozen request digest, signed/authenticated with actor ID, expiry and nonce; no textual GitHub comment can grant it. Merge decisions remain distinct from dispatch approvals and require protected-main checks and independent reviewer gates.
+
+The offline queue implementation does not persist or continuously poll anything. Before activation, provision a trusted store, concurrency-safe idempotency, immutable audit trail and read-only source ingestion, then independently review authentication and billing. No automatic Claude dispatch, paid Actions, or Azure deployment is approved.
