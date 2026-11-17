@@ -8,12 +8,14 @@ From the repository's `frontend/` directory:
 
 ```bash
 npm ci
-# Temporary local test dependency only. Pin in the lockfile before promoting to required CI.
+# Exact-version, no-save test runner; never use --package-lock=false (lockfile drift).
 npm install --no-save --ignore-scripts @playwright/test@1.65.1
+node e2e/c1-lockfile-check.mjs        # installed tree must equal package-lock.json
 npx playwright install chromium
-node e2e/c1-mutation-check.mjs
 npx playwright test --config=playwright.config.mjs
 C1_UNCONFIGURED=1 npx playwright test --config=playwright.config.mjs
+node e2e/c1-mutation-check.mjs        # 7 static mutations + 7 anti-vacuity coverage decoys
+node e2e/run-browser-mutations.mjs    # baseline gate + 7 browser mutations, zero-delivery sink
 ```
 
 Offline runs inject a synthetic public SPA client ID (`00000000-0000-4000-8000-000000000000`) into a fresh Vite server, intercept external requests, and never sign in to Microsoft. The unconfigured case runs separately. **Passing these tests is not a C1 live PASS.**
@@ -27,7 +29,7 @@ C1_LIVE=1 VITE_ENTRA_SPA_CLIENT_ID=<your-public-spa-client-id> \
   npx playwright test --config=playwright.config.mjs --headed --workers=1
 ```
 
-A fresh web server is mandatory in all modes; a running server on port 5173 must be shut down first. The runner rejects modified tracked files AND untracked files in a normal test run. Commit or remove local changes before evidence collection. For temporary OFFLINE browser mutation builds only, set `C1_MUTATION_MODE=1`; this overrides the clean-tree rule, explicitly invalidates live certification, and is rejected in `C1_LIVE` mode. The Playwright config supplies `VITE_C1_SHA`, and tests verify the browser received the checkout SHA. Browser reports do not record bearer tokens. `page.pause()` requires operator interaction; manually complete login/logout or cancel the correct popup and resume. Tests are intentionally not enabled in GitHub Actions.
+A fresh web server is mandatory in all modes; a running server on port 5173 must be shut down first. The runner rejects modified tracked files AND untracked files in a normal test run. Commit or remove local changes before evidence collection. For temporary OFFLINE browser mutation builds only, set `C1_MUTATION_MODE=1`; this overrides the clean-tree rule, explicitly invalidates live certification, and is rejected in `C1_LIVE` mode. The Playwright config supplies `VITE_C1_SHA`, and tests verify the browser received the checkout SHA. Browser reports do not record bearer tokens. `page.pause()` requires operator interaction; manually complete login/logout or cancel the correct popup and resume. Frontend Quality Gates runs the offline suite, unconfigured suite, both mutation runners and the lockfile check at the exact PR head (read-only token, no secrets); live mode is never run in GitHub Actions.
 
 The live test checks tenant, token audience/scope, issuer, expiration, active MSAL account, memory-only storage, silent token retrieval, verified logout/empty MSAL cache, and denial of unsafe egress. The cancelled-login test uses a real button click and records the sanitized `user_cancelled` code from an instrumented MSAL instance. Unauthorized external requests are blocked by a browser-context route **before** network delivery, including popups. The approved Microsoft sign-in host allowlist should be rechecked against real Entra redirects during supervised validation. **Still separately test consent denial and cancelled logout** with a supervised test account; document the outcome without tokens or screenshots showing credentials. A successful suite is not a complete C1 matrix until all consent/cancellation requirements have evidence.
 
@@ -56,3 +58,14 @@ If using `C1_MUTATION_MODE=1`, test runs are development-only and are never acce
 Claude's independent browser re-review found 6 pass / 1 fail / 3 skipped on the offline baseline. B-1 was a bare `@azure/msal-browser` specifier inside `page.evaluate`, which the browser could not resolve. The M4 test now obtains the optimized dependency URL from Vite's transformed `/src/entraAuth.ts` and imports the same module instance, preserving `InteractionRequiredAuthError instanceof` identity. It requires the synthetic fallback to invoke 1 popup and 0 redirects. The evidence `dirty=` marker now reflects actual `git status`, not just `C1_MUTATION_MODE`.
 
 **Not yet independently verified at the new exact head:** clean 0-fail offline baseline and M4 mutant fail at the popup/redirect assertion with static checks disabled. Claude must rerun both, and confirm that the optimized MSAL module resolution works with the actual Vite version. The independent review request is on PR #60 and Issue #61. Live C1 remains INCOMPLETE.
+
+## Alignment with PR #46 `6b62c05` and consolidation of PR #71 (`52659bc`)
+
+PR #46 moved the MSAL configuration and popup flows into `src/entraAuthCore.ts`; `src/entraAuth.ts` now only injects the real `PublicClientApplication` and `InteractionRequiredAuthError`. This branch merges that certified head and PR #71, and retargets every check:
+
+- `c1-source-policy.mjs` inspects `entraAuth.ts`, `entraAuthCore.ts` and `App.tsx`, and **fails closed** if MSAL runtime imports, `PublicClientApplication` or popup/redirect flow calls appear in any other `src` file, or if the wrapper stops delegating to the core. Seven coverage decoys in `c1-mutation-check.mjs` prove it cannot pass vacuously.
+- `c1-mutations.mjs` is the single definition of M1–M7 (anchors in `entraAuthCore.ts`/`App.tsx`, exactly-once anchor, received-value proofs), shared by the static and browser runners.
+- `run-browser-mutations.mjs` first requires the unmutated browser-only baseline to pass, verifies static checks are disabled, and for M6 asserts zero HTTP/WebSocket deliveries to a local sink.
+- From PR #71: the exact-host HTTPS `login.microsoft.com` allowlist entry and its spoofed-host regression test; the lockfile-respecting CI install. Added here: remote Microsoft hosts are restricted to the default HTTPS port (PR #71 review F-4), diagnostics record `scheme://host:port` (F-3), and `c1-lockfile-check.mjs` enforces F-1 in CI.
+
+**Not independently reviewed yet.** The implementing session must not certify these changes. Live C1 remains INCOMPLETE and requires renewed owner authorization naming the new SHAs. PR #46 SSO-logout issue #76 is tracked separately.
