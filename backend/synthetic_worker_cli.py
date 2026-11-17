@@ -8,6 +8,7 @@ import sys
 from uuid import UUID
 
 from consumer import consume_one
+from job_queue import get_synthetic_queue_client, synthetic_queue_name
 from project_models import validate_id
 from storage import get_jobs_table_client, upload_rendered_video
 from synthetic_job_renderer import assert_offline, render_scene_plan, SyntheticRenderError
@@ -15,6 +16,10 @@ from worker import process_synthetic_job
 
 def require_synthetic_readiness():
     assert_offline()
+    try:
+        synthetic_queue_name()
+    except ValueError:
+        raise SyntheticRenderError('Dedicated synthetic queue configuration required') from None
     for flag in ("ENABLE_AUTHENTICATED_VIDEO_JOBS", "ENABLE_PROJECT_ROUTES",
                  "ENABLE_SYNTHETIC_VIDEO_DISPATCH"):
         if os.getenv(flag, "").strip().lower() != "true":
@@ -42,7 +47,7 @@ def run_once(*, queue_client=None, renderer=render_scene_plan,
     return consume_one(
         processor=lambda job_id: process_owned_synthetic_job(
             job_id, renderer=renderer, artifact_writer=artifact_writer),
-        queue_client=queue_client,
+        queue_client=queue_client if queue_client is not None else get_synthetic_queue_client(),
     )
 
 def main(argv=None):
