@@ -146,3 +146,44 @@ def test_private_video_not_exposed_before_completed_even_to_owner(enabled, monke
             routes.project_video_metadata(PID, JID, authorization="Bearer signed")
     assert e.value.status_code == 409
     video.assert_not_called()
+
+def test_revoked_membership_denies_status_queue_and_blob(enabled, monkeypatch):
+    monkeypatch.setenv("ENABLE_VIDEO_DOWNLOADS", "true")
+    monkeypatch.setenv("ENABLE_SYNTHETIC_VIDEO_DISPATCH", "true")
+    table = MagicMock()
+    table.get_entity.return_value = record()
+    with patch.object(routes, "get_jobs_table_client", return_value=table), \
+         patch.object(routes, "verify_project_token", return_value=ACTOR), \
+         patch.object(routes, "require_project_role", side_effect=AccessDenied()), \
+         patch.object(routes, "get_video_resource") as video, \
+         patch("jobs.transition_job") as transition:
+        for call in (
+            lambda: routes.read_project_job(PID, JID, authorization="Bearer signed"),
+            lambda: routes.queue_project_job(PID, JID, authorization="Bearer signed"),
+            lambda: routes.project_video_download(PID, JID, authorization="Bearer signed"),
+        ):
+            with pytest.raises(HTTPException) as error:
+                call()
+            assert error.value.status_code == 403
+    video.assert_not_called()
+    transition.assert_not_called()
+
+def test_noncanonical_or_cross_project_row_not_accessible(enabled):
+    table = MagicMock()
+    table.get_entity.return_value = record(project=OTHER)
+    with patch.object(routes, "require_project_role"), \
+         pytest.raises(HTTPException) as error:
+        routes.authorized_job(table, PID, JID, ACTOR)
+    assert error.value.status_code == 404
+
+def test_forged_or_insufficient_scope_token_is_rejected(enabled):
+    from project_oidc import ProjectIdentityError, ProjectScopeDenied
+    table = MagicMock()
+    with patch.object(routes, "verify_project_token", side_effect=ProjectIdentityError()):
+        with pytest.raises(HTTPException) as error:
+            routes.verified_actor(table, "Bearer forged")
+    assert error.value.status_code == 401
+    with patch.object(routes, "verify_project_token", side_effect=ProjectScopeDenied()):
+        with pytest.raises(HTTPException) as error:
+            routes.verified_actor(table, "Bearer no-scope")
+    assert error.value.status_code == 403
