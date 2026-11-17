@@ -536,3 +536,44 @@ jobs:
             )
             findings = yaml_scan(self, {"action.yml": document})
             self.assertTrue(any("local action forbidden" in p for p in findings), (action, findings))
+
+    def test_n1c_to_n1f_indirect_base_context_event_relays_denied(self):
+        cases = (
+            ("workflow_run", "github.event['workflow_run'].head_branch"),
+            ("workflow_run", "github['event']['workflow_run']['head_branch']"),
+            ("workflow_run", "toJSON(github.event)"),
+            ("workflow_run", "fromJSON(toJSON(github.event)).workflow_run.head_branch"),
+            ("issues", "github.event.issue.title"),
+        )
+        for trigger, expression in cases:
+            with self.subTest(trigger=trigger, expression=expression):
+                doc = (
+                    "on: " + trigger + "\n"
+                    "permissions: {contents: read}\n"
+                    "jobs:\n"
+                    "  a:\n"
+                    "    runs-on: ubuntu-latest\n"
+                    "    outputs:\n"
+                    "      v: " + E + expression + " }}\n"
+                    "    steps: []\n"
+                    "  deploy:\n"
+                    "    needs: a\n"
+                    "    runs-on: ubuntu-latest\n"
+                    "    environment: dev-deployment\n"
+                    "    permissions: {contents: read, id-token: write}\n"
+                    "    if: github.ref == 'refs/heads/main'\n"
+                    "    steps:\n"
+                    "      - run: 'echo " + E + "needs.a.outputs.v }}'\n"
+                )
+                findings = yaml_scan(self, {"indirect.yml": doc})
+                self.assertTrue(
+                    any("base-context job reads workflow_run payload" in p for p in findings),
+                    (expression, findings))
+
+    def test_n1_control_existing_main_context_workflows_pass(self):
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML required for real-tree scanner check")
+        findings = checker.scan(ROOT)
+        self.assertEqual(findings, [])
