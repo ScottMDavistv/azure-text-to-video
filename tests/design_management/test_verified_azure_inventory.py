@@ -25,7 +25,7 @@ def archive(payload=INVENTORY):
 
 def fixture(*, run_overrides=None, job_success=True, artifact=None):
     run = {"id": 55, "conclusion": "success", "head_branch": "main",
-           "event": "schedule", "path": ".github/workflows/azure-readonly-operations.yml@main",
+           "event": "schedule", "path": ".github/workflows/azure-readonly-operations.yml",
            "repository": {"full_name": "ScottMDavistv/azure-text-to-video"},
            "created_at": "2026-11-17T11:00:00Z", "head_sha": "a" * 40}
     run.update(run_overrides or {})
@@ -55,7 +55,8 @@ class VerifiedHandoffTests(unittest.TestCase):
     def test_invalid_sources_fail_closed(self):
         for overrides in (
             {"head_branch": "feature/unsafe"}, {"conclusion": "failure"},
-            {"event": "pull_request"}, {"path": ".github/workflows/other.yml@main"},
+            {"event": "pull_request"}, {"path": ".github/workflows/other.yml"},
+            {"path": ".github/workflows/azure-readonly-operations.yml@main"},
             {"repository": {"full_name": "attacker/fork"}},
             {"created_at": "2026-11-15T01:00:00Z"},
             {"created_at": "2026-11-18T01:00:00Z"},
