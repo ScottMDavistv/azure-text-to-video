@@ -17,6 +17,12 @@ const allowedHosts = new Set([
   'logincdn.msftauth.net', 'secure.aadcdn.microsoftonline-p.com',
 ])
 
+const allowedLocalOrigins = new Set(['http://localhost:5173', 'http://127.0.0.1:5173'])
+const allowedHmrOrigins = new Set(['ws://localhost:5173', 'ws://127.0.0.1:5173'])
+function allowedRequest(url) {
+  return allowedLocalOrigins.has(url.origin) || (url.protocol === 'https:' && allowedHosts.has(url.hostname) && !['localhost', '127.0.0.1'].includes(url.hostname))
+}
+
 function assertSourceInvariants() {
   // Offline structural checks are intentionally narrow; a real login remains required.
   expect(authSource).toMatch(/cacheLocation:\s*['"]memoryStorage['"]/)
@@ -46,24 +52,33 @@ async function observeContext(context) {
     page.on('pageerror', error => {
       if (credentialPattern.test(error.message)) problems.push('Credential-like browser page error')
     })
+    page.on('websocket', socket => {
+      const url = new URL(socket.url())
+      if (!allowedHmrOrigins.has(url.origin)) problems.push('Unauthorized WebSocket host ' + url.hostname)
+    })
   }
   for (const page of context.pages()) listen(page)
   context.on('page', listen)
   context.on('request', request => {
     const url = new URL(request.url())
     requestHosts.add(url.hostname)
-    if (!allowedHosts.has(url.hostname) || (!['localhost', '127.0.0.1'].includes(url.hostname) && url.protocol !== 'https:')) {
-      problems.push('Unexpected external request host or protocol')
+    if (!allowedRequest(url)) problems.push('Unexpected request host ' + url.hostname)
+    if (!allowedRequest(url) && request.headers().authorization) problems.push('Authorization header to unauthorized host ' + url.hostname)
+  })
+  await context.routeWebSocket(/.*/, async route => {
+    const url = new URL(route.url())
+    if (allowedHmrOrigins.has(url.origin)) {
+      await route.connectToServer()
+    } else {
+      problems.push('Blocked unauthorized WebSocket host ' + url.hostname)
+      route.close()
     }
   })
-  // Install the deny route BEFORE navigation. Monitor popups and block actual
-  // unauthorized egress instead of observing it after delivery.
   await context.route('**/*', async route => {
     const url = new URL(route.request().url())
-    const local = ['localhost', '127.0.0.1'].includes(url.hostname)
-    const authorizedMicrosoft = allowedHosts.has(url.hostname) && url.protocol === 'https:'
-    if (!local && (!live || !authorizedMicrosoft)) {
-      if (live) problems.push('Blocked unauthorized egress')
+    const local = allowedLocalOrigins.has(url.origin)
+    if ((!live && !local) || (live && !allowedRequest(url))) {
+      problems.push('Blocked unauthorized HTTP origin ' + url.hostname)
       await route.abort('blockedbyclient')
     } else {
       await route.continue()
@@ -73,22 +88,31 @@ async function observeContext(context) {
 }
 
 async function assertBuild(page) {
-  const servedSha = await page.evaluate(async () => (await import('/src/c1BuildInfo.ts')).c1BuildSha)
-  expect(servedSha).toBe(sha)
+  const served = await page.evaluate(async () => {
+    const { c1BuildSha, c1BuildDirty } = await import('/src/c1BuildInfo.ts')
+    return { sha: c1BuildSha, dirty: c1BuildDirty }
+  })
+  expect(served.sha).toBe(sha)
+  expect(served.dirty).toBe(process.env.C1_MUTATION_MODE === '1')
 }
 
-async function assertMemoryOnly(page) {
-  const result = await page.evaluate(() => {
+async function assertMemoryOnly(page, context) {
+  const result = await page.evaluate(async () => {
     const local = Object.entries(localStorage)
     const session = Object.entries(sessionStorage)
     const jwt = /eyJ[A-Za-z0-9_-]{20,}\./
+    const forbidden = /token|secret|bearer/i
+    const allowedSessionKeys = new Set(['msal.interaction.status', 'msal.interaction.inProgress'])
     return {
       localEmpty: local.length === 0,
-      sessionSafe: session.every(([key, value]) => key.startsWith('msal.interaction.') && !jwt.test(value)),
+      sessionSafe: session.every(([key, value]) => allowedSessionKeys.has(key) && value.length < 128 && !forbidden.test(value) && !jwt.test(value)),
       domSafe: !jwt.test(document.body.innerText),
+      indexedDbEmpty: (await indexedDB.databases()).length === 0,
     }
   })
-  expect(result).toEqual({ localEmpty: true, sessionSafe: true, domSafe: true })
+  const localCookies = await context.cookies(['http://localhost:5173', 'http://127.0.0.1:5173'])
+  expect(localCookies).toEqual([])
+  expect(result).toEqual({ localEmpty: true, sessionSafe: true, domSafe: true, indexedDbEmpty: true })
 }
 
 test('M-1/M-4/M-5: configured auth runtime is tenant-scoped, memory-only, correctly redirected, no unauthorized egress', async ({ page, context }) => {
@@ -115,7 +139,7 @@ test('M-1/M-4/M-5: configured auth runtime is tenant-scoped, memory-only, correc
   expect(config.cookie).toBe(false)
   expect(config.scopes).toEqual([scope])
   expect(config.unexpectedOriginRejected).toBe(true)
-  await assertMemoryOnly(page)
+  await assertMemoryOnly(page, context)
   expect(audit.problems).toEqual([])
 })
 
@@ -157,7 +181,7 @@ test('M-1/M-2: attempted login sends correct tenant, PKCE, registered URI, clien
   for (const popup of context.pages().filter(p => p !== page)) await popup.close().catch(() => {})
   await expect(page.getByRole('button', { name: 'Sign in with Microsoft' })).toBeEnabled({ timeout: 15000 })
   await expect(page.getByText(/^Signed in:/)).toHaveCount(0)
-  await assertMemoryOnly(page)
+  await assertMemoryOnly(page, context)
   expect(audit.problems).toEqual([])
 })
 
@@ -171,7 +195,7 @@ test('M-1: missing SPA configuration is fail-closed', async ({ page, context }) 
   expect(audit.problems).toEqual([])
 })
 
-test('M-2/M-3: guarded auth functions reject unsafe source-level fallbacks', async () => {
+test('Static source invariants (not runtime evidence)', async () => {
   assertSourceInvariants()
 })
 
@@ -201,7 +225,7 @@ test('LIVE: popup login, validated claims, silent acquisition and confirmed cach
       ok: [expectedAudience, 'api://' + expectedAudience].includes(claims.aud) &&
         claims.tid === expectedTenant &&
         String(claims.scp || '').split(' ').includes('access_as_user') &&
-        [undefined, client].includes(claims.azp ?? claims.appid) &&
+        (claims.azp ?? claims.appid) === client &&
         Number(claims.exp) > Math.floor(Date.now() / 1000) &&
         [1, 2].includes(Number(claims.ver)) &&
         (claims.iss === 'https://sts.windows.net/' + expectedTenant + '/' ||
@@ -218,7 +242,7 @@ test('LIVE: popup login, validated claims, silent acquisition and confirmed cach
   await page.getByRole('button', { name: 'Check API permission' }).click()
   await expect(page.getByRole('status').first()).toContainText('Delegated API permission acquired')
   expect(popups.length).toBe(beforeRepeat)
-  await assertMemoryOnly(page)
+  await assertMemoryOnly(page, context)
   await page.getByRole('button', { name: 'Sign out' }).click()
   await page.pause() // operator completes Microsoft logout popup, then resumes
   await expect(page.getByRole('button', { name: 'Sign in with Microsoft' })).toBeVisible()
@@ -232,9 +256,9 @@ test('LIVE: popup login, validated claims, silent acquisition and confirmed cach
   expect(signedOut).toEqual({ activeEmpty: true, allEmpty: true, rejectsToken: true })
   await page.reload()
   await expect(page.getByText(/^Signed in:/)).toHaveCount(0)
-  await assertMemoryOnly(page)
+  await assertMemoryOnly(page, context)
   expect(audit.problems).toEqual([])
-  console.log('C1 LIVE supervised assertion complete: sha=' + sha + ' browser=' + browser.browserType().name() + ' utc=' + new Date().toISOString())
+  console.log('C1 LIVE supervised assertion complete: sha=' + sha + ' browser=' + browser.version() + ' utc=' + new Date().toISOString())
 })
 
 test('LIVE: deliberately cancelled popup returns MSAL user_cancelled, not a generic failure', async ({ page, context }) => {
@@ -264,6 +288,6 @@ test('LIVE: deliberately cancelled popup returns MSAL user_cancelled, not a gene
   await expect.poll(() => page.evaluate(() => window.__c1CancelCode)).toBe('user_cancelled')
   expect(popupObserved).toBe(true)
   await expect(page.getByText(/^Signed in:/)).toHaveCount(0)
-  await assertMemoryOnly(page)
+  await assertMemoryOnly(page, context)
   expect(audit.problems).toEqual([])
 })
