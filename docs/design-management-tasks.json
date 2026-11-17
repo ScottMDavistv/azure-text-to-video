@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "policy": "approved-development-only",
   "tasks": [
     {
@@ -15,7 +15,8 @@
         "API contract published with example JSON and auth requirements",
         "Negative-path authentication and error tests pass",
         "Provider enablement remains disabled by default"
-      ]
+      ],
+      "dispatch_order": 5
     },
     {
       "id": "synthetic-orchestrator",
@@ -33,7 +34,8 @@
         "Worker lifecycle can assemble five simulated scenes totaling 300 seconds",
         "Crash/retry paths do not duplicate execution or produce inconsistent artifacts",
         "No paid provider calls"
-      ]
+      ],
+      "dispatch_order": 10
     },
     {
       "id": "frontend-video-journey",
@@ -51,7 +53,8 @@
         "Job progress and recoverable errors are shown",
         "Completed synthetic MP4 is playable and downloadable",
         "API tokens are not displayed or logged"
-      ]
+      ],
+      "dispatch_order": 20
     },
     {
       "id": "azure-reader-monitoring",
@@ -66,7 +69,8 @@
         "Document exact Reader scope and OIDC trust restrictions",
         "Offline collector tests pass and no secrets are collected",
         "Actual Azure setup remains explicitly gated on owner authorization"
-      ]
+      ],
+      "dispatch_order": 90
     },
     {
       "id": "synthetic-300s-integration",
@@ -86,7 +90,10 @@
         "MP4 is downloadable, has both audio and video and is 300 seconds ±0.6 seconds",
         "Negative-path tests cover failures, retries and authorization",
         "No paid FAL/LLM/provider calls and artifacts/CI evidence retained"
-      ]
+      ],
+      "dispatch_order": 30
     }
-  ]
+  ],
+  "controller": "design-management",
+  "dispatch_policy": "synthetic-first; all four lanes share one approved manifest, owner acceptance required"
 }

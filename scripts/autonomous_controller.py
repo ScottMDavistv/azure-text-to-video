@@ -23,6 +23,11 @@ from design_agent_coordination import (
 API = "https://api.github.com"
 COPILOT_BOT = "copilot-swe-agent[bot]"
 MAX_CONCURRENT = 2
+# GitHub's REST issue assignee login is "Copilot", while historical cloud
+# agent records and previews may use copilot-swe-agent variants.
+COPILOT_IDENTITIES = frozenset((
+    "copilot", "copilot[bot]", "copilot-swe-agent", "copilot-swe-agent[bot]",
+))
 DECISION_MARKER = "design-management-decision:"
 REQUIRED_CHECKS = {"Backend Python Tests", "Security Checks"}
 
@@ -76,18 +81,34 @@ def authorized_context():
         return repo, False
     return repo, True
 
+def is_copilot_identity(actor):
+    """Recognize both observed Copilot REST bot logins and legacy aliases."""
+    return (actor or {}).get("login", "").casefold() in COPILOT_IDENTITIES
+
+
+def assigned_to_copilot(item):
+    return any(is_copilot_identity(user) for user in (item.get("assignees") or []))
+
+
 def active_slots(issues, prs):
-    """Conservative upper bound; may double-count PRs linked to assigned issues."""
-    bot_assigned = sum(1 for issue in issues
-                       if issue.get("state") == "open"
-                       and not issue.get("pull_request")
-                       and any((u.get("login") or "").lower() in
-                               ("copilot-swe-agent[bot]", "copilot-swe-agent")
-                               for u in issue.get("assignees", [])))
-    bot_prs = sum(1 for pr in prs if pr.get("state") == "open" and
-                  (pr.get("user") or {}).get("login", "").lower() in
-                  ("copilot-swe-agent[bot]", "copilot-swe-agent"))
+    """Conservative upper bound: an assigned issue and related open PR each use a slot.
+
+    Deliberately double-count when ownership is ambiguous; never dispatch over
+    the two-agent cap just because GitHub has multiple bot representations.
+    """
+    bot_assigned = sum(
+        1 for issue in issues
+        if issue.get("state") == "open"
+        and not issue.get("pull_request")
+        and assigned_to_copilot(issue)
+    )
+    bot_prs = sum(
+        1 for pr in prs
+        if pr.get("state") == "open"
+        and (is_copilot_identity(pr.get("user")) or assigned_to_copilot(pr))
+    )
     return bot_assigned + bot_prs
+
 
 def dispatch_plan(tasks, indexed, *, slots):
     """No issue modification. Only existing approved, unblocked issues qualify."""
@@ -104,8 +125,8 @@ def dispatch_plan(tasks, indexed, *, slots):
             issue = indexed[entry["id"]]
             if issue.get("state") != "open" or issue.get("pull_request"):
                 continue
-            if any((x.get("login") or "").lower() in ("copilot-swe-agent[bot]", "copilot-swe-agent")
-                   for x in issue.get("assignees", [])):
+            if assigned_to_copilot(issue):
+                # Never assign the same issue twice, including "Copilot" REST bot.
                 continue
             # Explicitly exclude IAM, deployment and other security-sensitive work
             # even when someone labels a task non-sensitive.
@@ -115,7 +136,9 @@ def dispatch_plan(tasks, indexed, *, slots):
             if task["sensitive"] is not False or task["approval"] != "approved-development":
                 continue
             candidates.append((task["priority"], issue["number"], task))
-    candidates.sort(key=lambda x: ({"P0": 0, "P1": 1, "P2": 2}[x[0]], x[1]))
+    # The centrally approved manifest decides workstream ordering, not issue creation time.
+    candidates.sort(key=lambda x: ({"P0": 0, "P1": 1, "P2": 2}[x[0]],
+                                   x[2].get("dispatch_order", 1000), x[1]))
     return candidates[:max(0, MAX_CONCURRENT - slots)]
 
 def dispatch(repo, read_token, copilot_token, *, live=False):

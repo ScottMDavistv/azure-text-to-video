@@ -15,6 +15,63 @@ class ControllerTests(unittest.TestCase):
         issues = [{"state":"open","assignees":[{"login":"copilot-swe-agent[bot]"}]}]
         prs = [{"state":"open","user":{"login":"copilot-swe-agent[bot]"}}]
         self.assertEqual(controller.active_slots(issues, prs), 2)
+    def test_real_github_copilot_bot_counts_toward_two_agent_cap(self):
+        # GitHub REST issue #25 uses login=Copilot, type=Bot, not just
+        # copilot-swe-agent[bot]. The agent PR can also be owned by a user.
+        issues = [{"number": 25, "state": "open",
+                   "assignees": [{"login": "Copilot", "type": "Bot"},
+                                 {"login": "ScottMDavistv", "type": "User"}]}]
+        prs = [{"number": 26, "state": "open",
+                "user": {"login": "ScottMDavistv"},
+                "assignees": [{"login": "Copilot", "type": "Bot"}]}]
+        self.assertEqual(controller.active_slots(issues, prs), 2)
+        self.assertEqual(controller.active_slots(issues + [
+            {"number": 18, "state": "open", "assignees": [{"login": "Copilot"}]}
+        ], prs), 3)
+        self.assertTrue(controller.is_copilot_identity({"login": "copilot[bot]"}))
+        self.assertTrue(controller.is_copilot_identity({"login": "copilot-swe-agent[bot]"}))
+        self.assertFalse(controller.is_copilot_identity({"login": "ScottMDavistv"}))
+
+    def test_existing_copilot_assignment_is_not_dispatched_again(self):
+        import json
+        tasks = json.loads(controller.MANIFEST.read_text())["tasks"]
+        index = {
+            "video-job-api-contract": {
+                "number": 21, "state": "closed", "state_reason": "completed",
+                "body": "<!-- design-agent-task:video-job-api-contract -->\n"
+                        "<!-- design-agent-accepted:video-job-api-contract -->",
+            },
+            "synthetic-orchestrator": {
+                "number": 25, "state": "open",
+                "assignees": [{"login": "Copilot", "type": "Bot"}],
+                "body": "<!-- design-agent-task:synthetic-orchestrator -->",
+            },
+            "frontend-video-journey": {
+                "number": 31, "state": "open", "assignees": [],
+                "body": "<!-- design-agent-task:frontend-video-journey -->",
+            },
+        }
+        plan = controller.dispatch_plan(tasks, index, slots=1)
+        self.assertEqual([task["id"] for _, _, task in plan],
+                         ["frontend-video-journey"])
+        self.assertEqual(controller.dispatch_plan(tasks, index, slots=2), [])
+
+    def test_central_manifest_orders_synthetic_before_frontend_regardless_of_issue_number(self):
+        import json
+        tasks = json.loads(controller.MANIFEST.read_text())["tasks"]
+        accepted = {"number": 21, "state": "closed", "state_reason": "completed",
+                    "body": "<!-- design-agent-task:video-job-api-contract -->\\n"
+                            "<!-- design-agent-accepted:video-job-api-contract -->"}
+        index = {
+            "video-job-api-contract": accepted,
+            "frontend-video-journey": {"number": 30, "state": "open", "assignees": []},
+            "synthetic-orchestrator": {"number": 40, "state": "open", "assignees": []},
+        }
+        plan = controller.dispatch_plan(tasks, index, slots=0)
+        self.assertEqual([item[2]["id"] for item in plan],
+                         ["synthetic-orchestrator", "frontend-video-journey"])
+        self.assertEqual(controller.dispatch_plan(tasks, index, slots=2), [])
+
     def test_missing_token_fails_before_dispatch(self):
         with patch.object(controller, "pages", side_effect=[
             [{"state":"open","number":10,"body":"<!-- design-agent-task:video-job-api-contract -->","assignees":[]}],
