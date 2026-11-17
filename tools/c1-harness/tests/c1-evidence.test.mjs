@@ -230,31 +230,26 @@ const block = (src, start) => {
   return null
 }
 
-test('replicated allowlists and storage checks are identical to the approved suite', () => {
-  const approved = approvedSpec()
-  for (const start of ['const allowedHosts = new Set([', 'const allowedLocalOrigins', 'const allowedHmrOrigins', 'function allowedRequest(url)', 'async function assertMemoryOnly(page, context)']) {
-    const a = start.startsWith('const') ? approved.split('\n').find(l => l.startsWith(start)) : block(approved, start)
-    const b = start.startsWith('const') ? supSpec.split('\n').find(l => l.startsWith(start)) : block(supSpec, start)
-    if (start === 'const allowedHosts = new Set([') {
-      const grab = src => src.slice(src.indexOf(start), src.indexOf('])', src.indexOf(start)))
-      assert.equal(grab(supSpec), grab(approved), start)
-    } else assert.equal(b, a, start)
-  }
-})
-
-test('replicated egress guard matches the approved LIVE branch (route aborts every non-allowlisted request)', () => {
-  const approved = approvedSpec()
-  const norm = s => s.replace(/\s+/g, ' ')
-  for (const frag of [
-    "page.on('console'", "page.on('pageerror'", "page.on('websocket'", 'context.routeWebSocket(/.*/',
-    "problems.push('Authorization header to unauthorized host ' + url.hostname)",
-    "await route.abort('blockedbyclient')", 'const credentialPattern = /Bearer\\s+[\\w.-]{24,}|eyJ[A-Za-z0-9_-]{20,}\\.|client_secret\\s*[:=]/i',
-  ]) {
-    assert.ok(norm(approved).includes(norm(frag)), 'approved has ' + frag)
-    assert.ok(norm(supSpec).includes(norm(frag)), 'supplemental has ' + frag)
-  }
-  // LIVE semantics: approved aborts when (live && !allowedRequest(url)); supplemental is live-only.
-  assert.match(supSpec, /if \(!allowedRequest\(url\)\) \{\s*problems\.push\('Blocked unauthorized HTTP origin ' \+ url\.hostname\)\s*await route\.abort\('blockedbyclient'\)/)
+test('L-5: supplemental network guard matches exact pinned PR60 shared guard', () => {
+  const top = execFileSync('git', ['-C', here, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim()
+  const approved = execFileSync('git', ['-C', top, 'show', SHA + ':frontend/e2e/c1-guards.mjs'], { encoding: 'utf8' })
+    .replace(/^export /gm, '')
+  const between = (src, first, last) => src.slice(src.indexOf(first), src.indexOf(last)).trim()
+  const start = 'const allowedHosts = new Set(['
+  const end = 'async function assertBuild(page)'
+  assert.ok(approved.includes(start) && supSpec.includes(start) && approved.includes(end) && supSpec.includes(end))
+  assert.equal(between(supSpec, start, end), between(approved, start, end))
+  // Exact-host semantics and failing closed on unauthorized LIVE traffic are mandatory.
+  assert.match(supSpec, /url\.port === ''/)
+  assert.match(supSpec, /live && !allowedRequest\(url\)/)
+  assert.match(supSpec, /Blocked unauthorized HTTP origin/)
+  assert.match(supSpec, /Blocked unauthorized WebSocket origin/)
+  assert.match(supSpec, /const live = true/)
+  const mem = 'async function assertMemoryOnly(page, context)'
+  assert.equal(supSpec.slice(supSpec.indexOf(mem), supSpec.indexOf('// --- end replicated helpers')).trim(),
+    approved.slice(approved.indexOf(mem)).trim())
+  assert.match(supSpec, /expect\(served\.sha\)\.toBe\(sha\)/)
+  assert.match(supSpec, /expect\(served\.dirty\)\.toBe\(false\)/)
 })
 
 // ---- remediation regressions (M-1, M-4, L-2, L-5) ------------------------------
