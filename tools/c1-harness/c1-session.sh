@@ -324,7 +324,8 @@ Test 2: a sign-in popup opens; CLOSE it without signing in, then Resume.'; then
   [[ "$cv" == PASS* ]] || { verdict=FAIL; sed -i 's/^\*\*Harness summary: [A-Z ]*\.\*\*/**Harness summary: FAIL.**/' "$ev" "$rp"; }
   printf '\nC1 harness summary: %s\nEvidence:        %s\nReview package:  %s\n' "$verdict" "$ev" "$rp"
   printf 'Paste the review package into a SEPARATE Claude session for independent security review.\n'
-  [[ "$cv" == PASS* ]]
+  # Exit status: non-zero on FAIL or failed cleanup; INCOMPLETE/READY exit 0.
+  [[ "$cv" == PASS* && "$verdict" != FAIL ]]
 }
 
 main() {
