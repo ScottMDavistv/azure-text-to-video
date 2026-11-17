@@ -77,8 +77,9 @@ def may_queue_auto_merge(pr, files, *, enabled, required_checks, protected_main_
         return (False, "incorrect base")
     if pr.get("head", {}).get("repo", {}).get("full_name") != pr.get("base", {}).get("repo", {}).get("full_name"):
         return (False, "cross-repository head")
-    author = (pr.get("user") or {}).get("login", "").lower()
-    if author not in ("copilot-swe-agent[bot]", "copilot-swe-agent"):
+    user = pr.get("user") or {}
+    author = user.get("login", "").lower()
+    if user.get("type") != "Bot" or author != "copilot-swe-agent[bot]":
         return (False, "not Copilot-authored")
     result = classify(files)
     if result["risk"] != "low":
