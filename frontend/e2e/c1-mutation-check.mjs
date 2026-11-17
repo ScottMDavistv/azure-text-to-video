@@ -1,40 +1,41 @@
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+// Static source-level mutation regression. Run IN ADDITION to the Playwright
+// browser suite and run-browser-mutations.mjs, never in place of them.
 import assert from 'node:assert/strict'
-const auth = readFileSync(fileURLToPath(new URL('../src/entraAuth.ts', import.meta.url)), 'utf8')
-const app = readFileSync(fileURLToPath(new URL('../src/App.tsx', import.meta.url)), 'utf8')
+import { loadSources, sourceViolations, coverageViolations, AUTH_WRAPPER, AUTH_CORE, APP } from './c1-source-policy.mjs'
+import { mutations, applyMutation } from './c1-mutations.mjs'
 
-// Static source-level mutation regression: run additionally to the Playwright
-// browser suite, NOT in place of real or synthetic browser authentication.
-function violations(a, ui) {
-  const findings = []
-  if (!/cacheLocation:\s*['"]memoryStorage['"]/.test(a)) findings.push('persistent MSAL cache')
-  if (!/redirectUri:\s*getRedirectUri\s*\(\s*window\.location\.origin\s*\)/.test(a)) findings.push('redirect allowlist bypass')
-  if (/\/(?:common|organizations)\b/i.test(a) || !/login\.microsoftonline\.com\/\$\{tenantId\}/.test(a)) findings.push('non-tenant authority')
-  if (/acquireTokenRedirect\s*\(/.test(a) || !/acquireTokenPopup\s*\(/.test(a)) findings.push('redirect token fallback')
-  if (!/logoutPopup\s*\(/.test(a)) findings.push('missing logoutPopup')
-  if (/\bfetch\s*\(\s*['"]https?:\/\//.test(ui)) findings.push('unexpected external UI fetch')
-  if (/\b(?:localStorage|sessionStorage)\s*(?:\.|\[)/.test(a + '\n' + ui)) findings.push('direct browser credential storage')
-  return findings
-}
-assert.deepEqual(violations(auth, app), [], 'Baseline must satisfy all static auth constraints')
-const changes = [
-  ['M1', a => a.replace("cacheLocation: 'memoryStorage'", "cacheLocation: 'localStorage'"), null],
-  ['M2', a => a.replace('redirectUri: getRedirectUri(window.location.origin)', 'redirectUri: window.location.origin'), null],
-  ['M3', a => a.replace('https://login.microsoftonline.com/\${tenantId}', 'https://login.microsoftonline.com/common'), null],
-  ['M4', a => a.replace('auth.acquireTokenPopup(', 'auth.acquireTokenRedirect('), null],
-  ['M5', a => a.replace('await auth.logoutPopup(', 'await Promise.resolve('), null],
-  ['M6', null, ui => ui.replace('export default function App() {', "export default function App() {\n  fetch('https://unauthorized-fal.invalid/');")],
-  ['M7', a => a.replace('export async function signIn(): Promise<void> {', "export async function signIn(): Promise<void> {\n  sessionStorage.setItem('token', 'Bearer eyJplaceholder');"), null],
-]
+const files = loadSources()
+assert.deepEqual(sourceViolations(files), [], 'Baseline must satisfy all static auth constraints')
+assert.equal(mutations.length, 7, 'exactly seven C1 security mutations are required')
+
 let detected = 0
-for (const [id, mutateAuth, mutateUI] of changes) {
-  const aa = mutateAuth ? mutateAuth(auth) : auth
-  const uu = mutateUI ? mutateUI(app) : app
-  assert.ok(aa !== auth || uu !== app, id + ': mutation failed to apply')
-  const errors = violations(aa, uu)
-  assert.ok(errors.length > 0, id + ': mutated source escaped security assertions')
+for (const m of mutations) {
+  const target = m.file.replace(/^src\//, '')
+  assert.ok(typeof files[target] === 'string', m.id + ': mutation target is not an inspected source')
+  const mutated = { ...files, [target]: applyMutation(files[target], m) }
+  const errors = sourceViolations(mutated)
+  assert.ok(errors.some(e => e.startsWith(m.id + ' ')), m.id + ': mutated source escaped its own ' + m.id + ' assertion: ' + JSON.stringify(errors))
   detected++
-  console.log(id + ': DETECTED (' + errors.join(', ') + ')')
+  console.log(m.id + ': DETECTED (' + errors.join(', ') + ')')
 }
-console.log('C1 SOURCE MUTATION REGRESSION: ' + detected + '/7 detected. Browser-level mutation proof is a separate gate.')
+
+// Anti-vacuity decoys: the policy must fail closed when the code it inspects is
+// no longer the code that performs authentication.
+const decoys = [
+  ['C-a auth flow moved to an uninspected file', f => ({ ...f, 'authBypass.ts': "import { PublicClientApplication } from '@azure/msal-browser'\nexport const c = new PublicClientApplication({ auth: { clientId: 'x' } })\nexport const go = () => c.loginPopup()\n" })],
+  ['C-b runtime MSAL import masked by a preceding type import', f => ({ ...f, 'helper.ts': "import type { FC } from 'react'\nimport { PublicClientApplication } from '@azure/msal-browser'\nexport type X = FC\nexport const P = PublicClientApplication\n" })],
+  ['C-c App bypasses the wrapper', f => ({ ...f, [APP]: f[APP].replace("from './entraAuth'", "from './entraAuthCore'") })],
+  ['C-d wrapper builds its own MSAL configuration', f => ({ ...f, [AUTH_WRAPPER]: f[AUTH_WRAPPER].replace('createClient: (config) => new PublicClientApplication(config)', "createClient: () => new PublicClientApplication({ auth: { clientId: 'x' } })") })],
+  ['C-e core imports MSAL runtime values', f => ({ ...f, [AUTH_CORE]: f[AUTH_CORE].replace('import type {', 'import {') })],
+  ['C-f interaction detection unbound from MSAL class', f => ({ ...f, [AUTH_WRAPPER]: f[AUTH_WRAPPER].replace('error instanceof InteractionRequiredAuthError', 'Boolean(error)') })],
+  ['C-g core file missing', f => { const g = { ...f }; delete g[AUTH_CORE]; return g }],
+]
+for (const [name, change] of decoys) {
+  const changed = change(files)
+  assert.notDeepEqual(changed, files, name + ': decoy did not apply')
+  const errors = coverageViolations(changed)
+  assert.ok(errors.length > 0, name + ': coverage policy passed vacuously')
+  console.log(name + ': REJECTED (' + errors.join(', ') + ')')
+}
+console.log('C1 SOURCE MUTATION REGRESSION: ' + detected + '/7 detected; ' + decoys.length + '/' + decoys.length +
+  ' coverage decoys rejected. Browser-level mutation proof is a separate gate.')
