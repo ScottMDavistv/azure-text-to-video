@@ -25,9 +25,10 @@ function assertSourceInvariants() {
   expect(authSource).toMatch(/logoutPopup\s*\(/)
   expect(authSource).toMatch(/acquireTokenPopup\s*\(/)
   expect(authSource).not.toMatch(/acquireTokenRedirect\s*\(|loginRedirect\s*\(|logoutRedirect\s*\(/)
-  expect(authSource).toMatch(/getRedirectUri\s*\(\s*window\.location\.origin\s*\)/)
+  expect(authSource).toMatch(/redirectUri:\s*getRedirectUri\s*\(\s*window\.location\.origin\s*\)/)
   expect(authSource).not.toMatch(/\bauthority:\s*[^\n]*\/common\b/i)
   expect(authSource).not.toMatch(/\bauthority:\s*[^\n]*\/organizations\b/i)
+  expect(appSource).not.toMatch(/\bfetch\s*\(\s*['"]https?:\/\//)
   // No explicit browser storage reads/writes in auth application code.
   for (const source of [authSource, appSource]) {
     expect(source).not.toMatch(/\b(?:localStorage|sessionStorage)\s*(?:\.|\[)/)
