@@ -24,3 +24,8 @@ def test_provider_request_row_scoped_only_to_provider_and_request():
 def test_provider_request_rejects_ambiguous_identity(bad):
     with pytest.raises(FinanceDenied):
         provider_request_key("fal", bad)
+
+
+@pytest.mark.parametrize("variant", ["REQUEST-1", "Request-1", "ＲＥＱＵＥＳＴ-１"])
+def test_provider_request_case_and_nfkc_variants_share_guard_row(variant):
+    assert provider_request_key("fal", "request-1") == provider_request_key("fal", variant)
