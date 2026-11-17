@@ -19,7 +19,7 @@
 | #41 | Private no-cache, no-sniff bounded MP4 delivery | `project_video_download` uses existing `get_video_resource` size guard and streaming cap |
 | #41 | Disabled-by-default user API and downloads | `ENABLE_AUTHENTICATED_VIDEO_JOBS`, `ENABLE_PROJECT_ROUTES`, `ENABLE_VIDEO_DOWNLOADS`, `ENABLE_SYNTHETIC_VIDEO_DISPATCH` all default off |
 | #42 | Provider-free 300s synthetic FFmpeg and bounded worker seam | `synthetic_job_renderer.py`, `synthetic_worker_cli.py`, offline real MP4 acceptance tests |
-| #46 | MSAL token handling improvements, OIDC/financial/security hardening | **Ported only the identical `frontend/src/entraAuth.ts` security hardening** (memory-only MSAL cache and removal of the hard-coded Codespaces redirect) from PR #46. The remainder of #46 (financial, OIDC, controller) stays independent and unmerged |
+| #46 | MSAL token handling improvements, OIDC/financial/security hardening | **Partial overlap only:** #42 retains redirect-based login/logout and token acquisition; current PR #46 uses popup flows. These files are NOT identical. An independent conflict/behavior review is required before merging either PR. |
 
 ## Deliberate exclusions and unresolved security gates
 
@@ -34,4 +34,4 @@
 
 ## Direct PR #46 overlap check
 
-Source PR #46 changes `frontend/src/entraAuth.ts`, while #42 also needs it for authenticated browser requests. The project API route code in #42 does **not** replace or weaken #46's finance/admin auth, provider receipt identity or Copilot author verification changes; those other modules are not copied or activated. For the shared file, #42 now contains the exact PR #46 contents. A later merge of #46 needs normal conflict resolution against this identical change and full CI. The rest of #46 requires independent security review and remains draft.
+Source PR #46 changes `frontend/src/entraAuth.ts`, while #42 also needs it for authenticated browser requests. The project API route code in #42 does **not** replace or weaken #46's finance/admin auth, provider receipt identity or Copilot author verification changes; those other modules are not copied or activated. The shared file is NOT identical: #42 uses redirect flows and #46 uses popup flows. Do not assume compatibility. Select a single reviewed user interaction model and rerun authentication/session tests and full CI before any integration. The rest of #46 requires independent security review and remains draft.
