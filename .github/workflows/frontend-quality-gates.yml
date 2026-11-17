@@ -52,6 +52,20 @@ jobs:
             echo 'No frontend test script found; add npm test before merging frontend feature work.'
             exit 1
           fi
+      - name: Run unattended offline C1 Playwright security and synthetic Entra UI tests
+        working-directory: frontend
+        timeout-minutes: 8
+        env:
+          C1_LIVE: '0'
+          C1_UNCONFIGURED: '0'
+          C1_MUTATION_MODE: '0'
+        run: |
+          # No Microsoft account, Entra access, Azure/FAL, or workflow secrets.
+          # Reuses the existing read-only, non-deploying frontend CI job.
+          npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund @playwright/test@1.65.1
+          npx playwright install chromium
+          npx playwright test --config=playwright.config.mjs --workers=1
+
       - name: Lint frontend
         working-directory: frontend
         run: npm run lint
