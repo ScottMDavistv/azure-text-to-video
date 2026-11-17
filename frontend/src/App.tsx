@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   acquireApiToken, getSignedInAccount, initializeAuth,
   isAuthConfigured, signIn, signOut,
@@ -17,6 +17,8 @@ export default function App() {
   const configured = isAuthConfigured()
   const [accountName, setAccountName] = useState<string | null>(null)
   const [accountIdentity, setAccountIdentity] = useState<string | null>(null)
+  const authTransition = useRef(false)
+  const authEpoch = useRef(0)
   const [authMessage, setAuthMessage] = useState(
     configured ? 'Entra local sign-in is available; backend authorization is not verified.' :
       'Entra frontend registration is required for sign-in. Demo mode is offline.',
@@ -35,15 +37,16 @@ export default function App() {
     let alive = true
     let checking = false
     async function syncIdentity() {
-      if (checking) return
+      if (checking || authTransition.current) return
       checking = true
+      const epoch = authEpoch.current
       try {
         const account = await getSignedInAccount()
-        if (!alive) return
+        if (!alive || authTransition.current || epoch !== authEpoch.current) return
         setAccountIdentity(account?.homeAccountId ?? null)
         setAccountName(account?.name ?? account?.username ?? null)
       } catch {
-        if (alive) {
+        if (alive && !authTransition.current && epoch === authEpoch.current) {
           setAccountIdentity(null)
           setAccountName(null)
         }
@@ -72,6 +75,8 @@ export default function App() {
     } finally { setBusy(false) }
   }
   async function login() {
+    authTransition.current = true
+    authEpoch.current += 1
     setBusy(true)
     try {
       await signIn()
@@ -80,16 +85,18 @@ export default function App() {
       setAccountName(account?.name ?? account?.username ?? null)
     } catch {
       setAuthMessage('Microsoft sign-in failed. Check the Entra registration.')
-    } finally { setBusy(false) }
+    } finally { authTransition.current = false; setBusy(false) }
   }
   async function logout() {
+    authTransition.current = true
+    authEpoch.current += 1
     // Unmount SecureStudio and revoke any owned Blob URL before MSAL popup.
     setAccountIdentity(null)
     setAccountName(null)
     setBusy(true)
     try { await signOut() }
     catch { setAuthMessage('Microsoft sign-out failed. Session content cleared.') }
-    finally { setBusy(false) }
+    finally { authTransition.current = false; setBusy(false) }
   }
   function submitDemo(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
