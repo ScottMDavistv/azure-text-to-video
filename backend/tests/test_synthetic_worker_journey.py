@@ -78,3 +78,21 @@ def test_worker_container_preserves_safe_default():
     assert 'CMD ["python", "worker_runtime.py", "--check"]' in source
     assert "ffmpeg" in source
     assert "synthetic_worker_cli.py --once" not in source
+
+def test_worker_dockerfile_continuations_are_valid():
+    from pathlib import Path
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile.worker")
+    lines = dockerfile.read_text().splitlines()
+    # A Dockerfile instruction continued by two literal backslashes instead
+    # creates an invalid instruction on its following line.
+    assert not any(line.rstrip().endswith("\\\\") for line in lines)
+    instructions = {"FROM", "ENV", "WORKDIR", "COPY", "RUN", "CMD"}
+    continued = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not continued:
+            assert stripped.split()[0].upper() in instructions
+        continued = line.endswith("\\")
+    assert not continued
