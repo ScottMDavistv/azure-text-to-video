@@ -10,11 +10,16 @@ import { fileURLToPath } from 'node:url'
 import {
   assertSanitized, parseMeta, parsePhases, summarizeReport, evaluate,
   renderEvidence, renderReviewPackage, scanArtifacts, OFFLINE_EXPECTED,
+  filterLines, summaryLines,
 } from '../lib/c1-evidence.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const SHA = '6b45d0acad10065cb825c12c4544cabdad3441d7'
-const AUTH = '73fe6d2a8aeeef97d34ba23c83fcce5e63f649cc'
+// L-5: the approved SHAs come from the harness library (single source of truth),
+// never from a separate copy in this test.
+const libText = readFileSync(join(here, '../lib/c1-lib.sh'), 'utf8')
+const pinned = name => (libText.match(new RegExp('^' + name + "='([0-9a-f]{40})'$", 'm')) || [])[1]
+const SHA = pinned('C1_PW_SHA_APPROVED')
+const AUTH = pinned('C1_AUTH_SHA_APPROVED')
 
 const spec = (title, status, extra = {}) => ({
   title,
@@ -31,10 +36,14 @@ const offlineAllPass = () => report([
 const meta = {
   AUTH_SHA: AUTH, PW_SHA: SHA, HARNESS_SHA: 'a'.repeat(40), HARNESS_CLEAN: 'true',
   CHECKOUT_VERIFIED: 'PASS', LOCALHOST: 'PASS', CHECKS: 'harness_clean', MODE: 'supervised',
+  PLAYWRIGHT_VERSION: '1.65.1', EXPECTED_PLAYWRIGHT_VERSION: '1.65.1',
+  BROWSER_VERSION: '159.0.8154.6', EXPECTED_BROWSER_VERSION: '159.0.8154.6',
+  BROWSER_HEADED_VERSION: '159.0.8154.6', EXPECTED_HEADED_BROWSER_VERSION: '159.0.8154.6',
+  PORT_PRIVATE: 'verified-probe-user-repo', ATTEST_NO_PRIOR_CONSENT: 'yes', ATTEST_CONSENT_PROMPT_CANCELLED: 'yes',
 }
 const ran = rc => ({ state: 'ran', start: '2026-11-17T00:00:00Z', end: '2026-11-17T00:01:00Z', rc: String(rc) })
 const allPhases = () => ({
-  'static-mutation': ran(0), offline: ran(0), unconfigured: ran(0),
+  'static-mutation': ran(0), 'browser-mutation': ran(0), offline: ran(0), unconfigured: ran(0),
   'consent-denial': ran(0), live: ran(0), 'cancelled-logout': ran(0),
 })
 const allReports = () => ({
@@ -107,9 +116,9 @@ test('blocked hostnames and markers are extracted from errors without retaining 
 })
 
 test('offline-only session is INCOMPLETE, never READY', () => {
-  const phases = { 'static-mutation': ran(0), offline: ran(0), unconfigured: ran(0),
+  const phases = { 'static-mutation': ran(0), 'browser-mutation': ran(0), offline: ran(0), unconfigured: ran(0),
     'consent-denial': { state: 'skipped' }, live: { state: 'skipped' }, 'cancelled-logout': { state: 'skipped' } }
-  const r = evaluate({ meta, phases, reports: { offline: allReports().offline, unconfigured: allReports().unconfigured }, artifactHits: 0 })
+  const r = evaluate({ meta: { ...meta, MODE: 'offline-only', PORT_PRIVATE: 'not-started' }, phases, reports: { offline: allReports().offline, unconfigured: allReports().unconfigured }, artifactHits: 0 })
   assert.equal(r.overall, 'INCOMPLETE')
   assert.equal(r.rows.find(x => x.id === 'R3').verdict, 'PASS')
   assert.equal(r.credential, 'INCOMPLETE'); assert.equal(r.egress, 'INCOMPLETE')
@@ -194,10 +203,9 @@ test('supplemental spec prints only sanitized RESULT/OBSERVATION lines', () => {
 })
 
 function approvedSpec() {
-  try {
-    const top = execFileSync('git', ['-C', here, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim()
-    return execFileSync('git', ['-C', top, 'show', SHA + ':frontend/e2e/entra-c1.spec.mjs'], { encoding: 'utf8' })
-  } catch { return null }
+  // L-5: FAIL (not skip) when the pinned approved suite cannot be read.
+  const top = execFileSync('git', ['-C', here, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim()
+  return execFileSync('git', ['-C', top, 'show', SHA + ':frontend/e2e/entra-c1.spec.mjs'], { encoding: 'utf8' })
 }
 const block = (src, start) => {
   const i = src.indexOf(start)
@@ -210,7 +218,7 @@ const block = (src, start) => {
   return null
 }
 
-test('replicated allowlists and storage checks are identical to the approved suite', { skip: !approvedSpec() && 'approved SHA not in local history' }, () => {
+test('replicated allowlists and storage checks are identical to the approved suite', () => {
   const approved = approvedSpec()
   for (const start of ['const allowedHosts = new Set([', 'const allowedLocalOrigins', 'const allowedHmrOrigins', 'function allowedRequest(url)', 'async function assertMemoryOnly(page, context)']) {
     const a = start.startsWith('const') ? approved.split('\n').find(l => l.startsWith(start)) : block(approved, start)
@@ -222,7 +230,7 @@ test('replicated allowlists and storage checks are identical to the approved sui
   }
 })
 
-test('replicated egress guard matches the approved LIVE branch (route aborts every non-allowlisted request)', { skip: !approvedSpec() && 'approved SHA not in local history' }, () => {
+test('replicated egress guard matches the approved LIVE branch (route aborts every non-allowlisted request)', () => {
   const approved = approvedSpec()
   const norm = s => s.replace(/\s+/g, ' ')
   for (const frag of [
@@ -235,4 +243,87 @@ test('replicated egress guard matches the approved LIVE branch (route aborts eve
   }
   // LIVE semantics: approved aborts when (live && !allowedRequest(url)); supplemental is live-only.
   assert.match(supSpec, /if \(!allowedRequest\(url\)\) \{\s*problems\.push\('Blocked unauthorized HTTP origin ' \+ url\.hostname\)\s*await route\.abort\('blockedbyclient'\)/)
+})
+
+// ---- remediation regressions (M-1, M-4, L-2, L-5) ------------------------------
+test('L-5: equivalence SHAs are read from c1-lib.sh pins', () => {
+  assert.match(SHA, /^[0-9a-f]{40}$/); assert.match(AUTH, /^[0-9a-f]{40}$/)
+  assert.doesNotMatch(readFileSync(join(here, 'c1-evidence.test.mjs'), 'utf8'), /const SHA = '[0-9a-f]{40}'/)
+})
+
+const ready = over => evaluate({ meta, phases: allPhases(), reports: allReports(), artifactHits: 0, ...over })
+const row = (r, id) => r.rows.find(x => x.id === id)
+
+test('M-1a: an unlisted approved test FAILING (offline or live) makes the session FAIL', () => {
+  for (const ph of ['offline', 'live']) {
+    const reports = allReports()
+    reports[ph] = [...reports[ph], ...summarizeReport(report([spec('C1 exact-host regression: Microsoft login host is HTTPS-only', 'failed')]))]
+    const r = evaluate({ meta, phases: { ...allPhases(), [ph]: ran(1) }, reports, artifactHits: 0 })
+    assert.equal(row(r, 'R12').verdict, 'FAIL', ph); assert.equal(r.overall, 'FAIL', ph)
+  }
+})
+
+test('M-1b: a ran phase with non-zero exit makes the session FAIL even if listed tests passed', () => {
+  const r = evaluate({ meta, phases: { ...allPhases(), unconfigured: ran(2) }, reports: allReports(), artifactHits: 0 })
+  assert.equal(row(r, 'R12').verdict, 'FAIL'); assert.equal(r.overall, 'FAIL')
+})
+
+test('M-1c: unverified or failed port privacy can never be READY', () => {
+  for (const PORT_PRIVATE of ['not-started', 'failed', undefined]) {
+    const r = ready({ meta: { ...meta, PORT_PRIVATE } })
+    assert.equal(row(r, 'R11').verdict, 'FAIL', String(PORT_PRIVATE)); assert.equal(r.overall, 'FAIL')
+  }
+  assert.equal(parseMeta('PORT_PRIVATE=operator-confirmed').PORT_PRIVATE, undefined) // legacy value is rejected
+  assert.equal(row(ready({}), 'R11').verdict, 'PASS')
+})
+
+test('M-1d: browser or Playwright version mismatch FAILS the toolchain row', () => {
+  for (const m of [
+    { BROWSER_VERSION: '153.0.8010.12' }, { BROWSER_HEADED_VERSION: '153.0.8010.12' },
+    { PLAYWRIGHT_VERSION: '1.64.0' }, { EXPECTED_BROWSER_VERSION: undefined }, { BROWSER_HEADED_VERSION: 'unknown' },
+  ]) {
+    const r = ready({ meta: { ...meta, ...m } })
+    assert.equal(row(r, 'R10').verdict, 'FAIL', JSON.stringify(m)); assert.equal(r.overall, 'FAIL')
+  }
+})
+
+test('M-1: a complete, consistent supervised session is READY (and only then)', () => {
+  assert.equal(ready({}).overall, 'READY FOR INDEPENDENT REVIEW')
+})
+
+test('M-4: R8 needs access_denied + AADSTS65004 + both attestations; otherwise INCOMPLETE, never PASS', () => {
+  const withResult = line => { const r = allReports(); r['consent-denial'] = summarizeReport(report([spec('SUPERVISED consent denial: x', 'passed', { stdout: [line] })])); return r }
+  const ok = 'C1 RESULT case=consent-denial state=failed code=access_denied aadsts=AADSTS65004'
+  assert.equal(row(ready({ reports: withResult(ok) }), 'R8').verdict, 'PASS')
+  assert.equal(row(ready({ reports: withResult('C1 RESULT case=consent-denial state=failed code=access_denied aadsts=none') }), 'R8').verdict, 'INCOMPLETE')
+  assert.equal(row(ready({ reports: withResult('C1 RESULT case=consent-denial state=failed code=interaction_required aadsts=AADSTS65004') }), 'R8').verdict, 'INCOMPLETE')
+  for (const a of [{ ATTEST_NO_PRIOR_CONSENT: 'no' }, { ATTEST_CONSENT_PROMPT_CANCELLED: 'no' }, { ATTEST_NO_PRIOR_CONSENT: 'not-asked' }, { ATTEST_CONSENT_PROMPT_CANCELLED: undefined }]) {
+    const r = ready({ meta: { ...meta, ...a }, reports: withResult(ok) })
+    assert.equal(row(r, 'R8').verdict, 'INCOMPLETE', JSON.stringify(a)); assert.notEqual(r.overall, 'READY FOR INDEPENDENT REVIEW')
+  }
+})
+
+test('M-4: supplemental spec no longer accepts a missing AADSTS code', () => {
+  assert.doesNotMatch(supSpec, /\['AADSTS65004', 'none'\]/)
+  assert.match(supSpec, /expect\(outcome\.aadsts\)\.toBe\('AADSTS65004'\)/)
+  assert.match(supSpec, /INCOMPLETE: access_denied without AADSTS65004/)
+})
+
+test('L-2: terminal filter withholds identities, tokens, URLs and GUIDs; keeps safe lines', () => {
+  const raw = [
+    '\u001b[32m  1 passed\u001b[0m', '1) <span>Signed in: alice.tester@contoso.example</span>',
+    'Error: AADSTS50076 Trace ID: 773e9051-c546-4b75-9432-90f4f8242660', 'token eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.x',
+    'navigated to https://login.microsoftonline.com/x/oauth2/v2.0/authorize?client_id=1', 'M1: DETECTED (persistent MSAL cache)',
+  ].join('\n')
+  const out = filterLines(raw)
+  assert.ok(out.includes('  1 passed')); assert.ok(out.includes('M1: DETECTED (persistent MSAL cache)'))
+  assert.ok(!out.join('\n').match(/alice|eyJ|773e9051|oauth2/))
+  assert.ok(out.some(l => l === '(line withheld by sanitizer)'))
+})
+
+test('L-2: per-test summary lines are sanitized and title-allowlisted', () => {
+  const lines = summaryLines(report([spec('M2 browser: loopback-origin redirect', 'passed'), spec('bad <alice@contoso.example>', 'failed')]))
+  assert.ok(lines.some(l => /PASS\s+M2 browser/.test(l)))
+  assert.ok(lines.some(l => /FAIL\s+unprintable-title/.test(l)))
+  assert.ok(!lines.join('\n').includes('alice'))
 })

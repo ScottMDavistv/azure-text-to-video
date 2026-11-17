@@ -155,8 +155,12 @@ test('SUPERVISED consent denial: declined consent fails closed with sanitized MS
   test.skip(outcome.state === 'succeeded', 'INCOMPLETE: sign-in succeeded; no consent prompt was declined')
   test.skip(outcome.state === 'not_observed', 'INCOMPLETE: no sign-in outcome observed before resume')
   test.skip(outcome.code === 'user_cancelled', 'INCOMPLETE: popup was closed instead of declining consent')
+  // M-4: access_denied alone is not evidence of a declined consent (other
+  // Microsoft-page denials surface the same way). Without AADSTS65004 the row
+  // is INCOMPLETE; with a different AADSTS code it FAILS.
+  test.skip(outcome.code === 'access_denied' && outcome.aadsts === 'none', 'INCOMPLETE: access_denied without AADSTS65004 is not consent-denial evidence')
   expect(outcome.code).toBe('access_denied')
-  expect(['AADSTS65004', 'none']).toContain(outcome.aadsts)
+  expect(outcome.aadsts).toBe('AADSTS65004')
   await expect(page.getByText(/^Signed in:/)).toHaveCount(0)
   await expect(page.getByRole('status').first()).toContainText('sign-in failed')
   expect(await msalState(page)).toEqual({ accounts: 0, active: false })

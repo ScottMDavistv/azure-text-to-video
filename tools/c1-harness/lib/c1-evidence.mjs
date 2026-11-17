@@ -11,6 +11,7 @@ import { pathToFileURL } from 'node:url'
 
 export const PHASES = {
   'static-mutation': { label: 'Static source mutation regression', live: false },
+  'browser-mutation': { label: 'Browser-level security mutation regression', live: false },
   offline: { label: 'Offline synthetic Playwright suite', live: false },
   unconfigured: { label: 'Unconfigured fail-closed suite', live: false },
   'consent-denial': { label: 'Supervised consent denial (harness supplemental)', live: true },
@@ -30,14 +31,18 @@ export const OFFLINE_EXPECTED = [
 
 export const ROWS = [
   { id: 'R1', label: 'Clean exact-head checkout verification', kind: 'meta' },
-  { id: 'R2', label: 'Static source mutation regression (7/7)', kind: 'exit', phase: 'static-mutation' },
+  { id: 'R2', label: 'Static source mutation regression (all mutations detected)', kind: 'exit', phase: 'static-mutation' },
+  { id: 'R2B', label: 'Browser-level security mutation regression (all mutations detected)', kind: 'exit', phase: 'browser-mutation' },
   { id: 'R3', label: 'Offline synthetic suite (all 7 executed tests)', kind: 'all', phase: 'offline', expect: OFFLINE_EXPECTED },
   { id: 'R4', label: 'Unconfigured SPA is fail-closed', kind: 'test', phase: 'unconfigured', title: 'M-1: missing SPA configuration is fail-closed' },
   { id: 'R5', label: 'Localhost routing and canonical localhost redirect', kind: 'redirect', phase: 'offline', title: 'M2 browser: loopback-origin redirect' },
   { id: 'R6', label: 'Live sign-in, initial consent, claims, silent token, verified logout', kind: 'test', phase: 'live', title: 'LIVE: popup login, validated claims' },
   { id: 'R7', label: 'Cancelled login returns user_cancelled', kind: 'test', phase: 'live', title: 'LIVE: deliberately cancelled popup', passCode: 'user_cancelled' },
-  { id: 'R8', label: 'Consent denial fails closed', kind: 'test', phase: 'consent-denial', title: 'SUPERVISED consent denial' },
+  { id: 'R8', label: 'Consent denial fails closed (access_denied + AADSTS65004 + operator attestations)', kind: 'consent', phase: 'consent-denial', title: 'SUPERVISED consent denial' },
   { id: 'R9', label: 'Cancelled logout leaves a consistent, fail-closed local state', kind: 'test', phase: 'cancelled-logout', title: 'SUPERVISED cancelled logout' },
+  { id: 'R10', label: 'Toolchain: exact Playwright and the browser build it expects (headless and headed)', kind: 'toolchain' },
+  { id: 'R11', label: 'Private desktop: Codespaces port privacy technically verified (decoy probe)', kind: 'privacy' },
+  { id: 'R12', label: 'Every executed test and phase succeeded (no unlisted failures)', kind: 'integrity' },
 ]
 
 const RESULT_RE = /^C1 RESULT case=(consent-denial|cancelled-logout) state=(not_observed|succeeded|failed|unrecognized) code=([a-z0-9_]{1,64}) aadsts=(none|AADSTS\d{5,6}|unrecognized)$/
@@ -73,7 +78,10 @@ export function parseMeta(text) {
     CHECKS: /^[a-z0-9_,-]{0,400}$/, PLAYWRIGHT_VERSION: /^[0-9.]{1,20}$/, BROWSER_VERSION: /^[0-9.]{1,32}$/,
     NODE_VERSION: /^v[0-9.]{1,20}$/, SESSION_START: /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/, SESSION_END: /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/,
     MODE: /^(supervised|offline-only)$/, CODESPACES: /^(true|false)$/,
-    PORT_PRIVATE: /^(verified-gh|operator-confirmed|not-started)$/, LOCALHOST: /^(PASS|FAIL)$/,
+    PORT_PRIVATE: /^(verified-probe-gh|verified-probe-user-repo|failed|not-started)$/, LOCALHOST: /^(PASS|FAIL)$/,
+    EXPECTED_PLAYWRIGHT_VERSION: /^[0-9.]{1,20}$/, EXPECTED_BROWSER_VERSION: /^[0-9.]{1,32}$/,
+    EXPECTED_HEADED_BROWSER_VERSION: /^[0-9.]{1,32}$/, BROWSER_HEADED_VERSION: /^([0-9.]{1,32}|not-launched|unknown)$/,
+    ATTEST_NO_PRIOR_CONSENT: /^(yes|no|not-asked)$/, ATTEST_CONSENT_PROMPT_CANCELLED: /^(yes|no|not-asked)$/,
   }
   const meta = {}
   for (const line of text.split('\n')) {
@@ -187,6 +195,25 @@ export function evaluate({ meta, phases, reports, artifactHits }) {
     if (row.kind === 'meta') {
       verdict = meta.CHECKOUT_VERIFIED === 'PASS' && meta.HARNESS_CLEAN === 'true' ? 'PASS' : 'FAIL'
       detail = (meta.CHECKS || '').replace(/,/g, ', ')
+    } else if (row.kind === 'toolchain') {
+      const pwOk = Boolean(meta.PLAYWRIGHT_VERSION) && meta.PLAYWRIGHT_VERSION === meta.EXPECTED_PLAYWRIGHT_VERSION
+      const bOk = Boolean(meta.BROWSER_VERSION) && meta.BROWSER_VERSION === meta.EXPECTED_BROWSER_VERSION
+      const headedRequired = meta.MODE !== 'offline-only'
+      const hOk = !headedRequired || (Boolean(meta.BROWSER_HEADED_VERSION) && meta.BROWSER_HEADED_VERSION === meta.EXPECTED_HEADED_BROWSER_VERSION)
+      verdict = pwOk && bOk && hOk ? 'PASS' : 'FAIL'
+      detail = 'playwright ' + (meta.PLAYWRIGHT_VERSION ?? 'unknown') + ' (expected ' + (meta.EXPECTED_PLAYWRIGHT_VERSION ?? 'unknown') + '); headless ' +
+        (meta.BROWSER_VERSION ?? 'unknown') + ' (expected ' + (meta.EXPECTED_BROWSER_VERSION ?? 'unknown') + ')' +
+        (headedRequired ? '; headed ' + (meta.BROWSER_HEADED_VERSION ?? 'unknown') + ' (expected ' + (meta.EXPECTED_HEADED_BROWSER_VERSION ?? 'unknown') + ')' : '')
+    } else if (row.kind === 'privacy') {
+      if (meta.MODE !== 'supervised') { verdict = 'INCOMPLETE'; detail = 'desktop not started (offline-only)' }
+      else if (/^verified-probe-(gh|user-repo)$/.test(meta.PORT_PRIVATE || '')) { verdict = 'PASS'; detail = meta.PORT_PRIVATE }
+      else { verdict = 'FAIL'; detail = 'privacy not verified: ' + (meta.PORT_PRIVATE ?? 'unknown') }
+    } else if (row.kind === 'integrity') {
+      const failedTests = allTests.filter(t => t.verdict === 'FAIL')
+      const badPhases = Object.entries(phases).filter(([, p]) => p.state === 'ran' && p.rc !== '0')
+      verdict = failedTests.length || badPhases.length ? 'FAIL' : 'PASS'
+      detail = failedTests.length + ' failed test(s); ' + badPhases.length + ' phase(s) with non-zero exit' +
+        (badPhases.length ? ' (' + badPhases.map(([id]) => id).join(', ') + ')' : '')
     } else if (row.kind === 'exit') {
       const pd = phaseDetail(row.phase)
       if (pd) ({ verdict, detail } = pd)
@@ -208,6 +235,16 @@ export function evaluate({ meta, phases, reports, artifactHits }) {
         else if (t.verdict === 'SKIPPED') { verdict = 'INCOMPLETE'; detail = 'unexpectedly skipped' }
         else { verdict = t.verdict; detail = t.reason; code = t.code ? t.code + (t.aadsts ? ' / ' + t.aadsts : '') : null }
         if (row.kind === 'redirect' && verdict === 'PASS' && meta.LOCALHOST !== 'PASS') { verdict = 'FAIL'; detail = 'localhost preflight failed' }
+        if (row.kind === 'consent' && verdict === 'PASS') {
+          // M-4: only complete evidence passes; anything less is INCOMPLETE, never accepted.
+          const missing = []
+          if (t.code !== 'access_denied') missing.push('MSAL access_denied not evidenced')
+          if (t.aadsts !== 'AADSTS65004') missing.push('AADSTS65004 not evidenced')
+          if (meta.ATTEST_NO_PRIOR_CONSENT !== 'yes') missing.push('no-prior-consent attestation missing')
+          if (meta.ATTEST_CONSENT_PROMPT_CANCELLED !== 'yes') missing.push('consent-prompt attestation missing')
+          if (missing.length) { verdict = 'INCOMPLETE'; detail = missing.join('; ') }
+          else detail = 'operator attested: no prior consent; consent prompt shown and cancelled'
+        }
         if (row.passCode && verdict === 'PASS') code = row.passCode + ' (asserted)'
       }
     }
@@ -272,7 +309,8 @@ export function renderEvidence({ meta, phases, result, generated }) {
   L.push('## Not covered by this evidence', '')
   L.push('- No tokens, claims, cookies, URLs, UPNs, HAR files, traces, screenshots or console dumps were retained. Raw Playwright reports were read in memory and deleted with the session.')
   L.push('- INCOMPLETE rows require another supervised session; they are not failures of the application.')
-  L.push('- Browser mutation proof (README "Independent browser mutation sequence") is a separate reviewer task.')
+  L.push('- R2B reflects the approved browser-mutation runner at the pinned Playwright SHA; if that SHA has no runner, R2B is INCOMPLETE.')
+  L.push('- R8 relies on two operator attestations (no prior consent; consent prompt shown and cancelled) in addition to the sanitized MSAL code and AADSTS65004.')
   return L.join('\n') + '\n'
 }
 
@@ -290,7 +328,7 @@ export function renderReviewPackage({ evidence, meta }) {
   L.push('2. Confirm the evidence SHAs match the PR heads you are reviewing and that rows marked PASS correspond to executed tests (no SKIPPED row is counted as PASS).')
   L.push('3. Re-run the offline suites yourself from a clean checkout; compare with R2–R5.')
   L.push('4. Review `tools/c1-harness/supplemental/c1-supervised.spec.mjs` helpers for equivalence with the approved suite\'s LIVE egress/storage checks.')
-  L.push('5. Check network exposure: only `127.0.0.1:6080` (noVNC) listened during the session, port privacy method recorded above, VNC on a 0600 Unix socket, X server with no TCP/abstract listeners.')
+  L.push('5. Check network exposure: only `127.0.0.1:6080` (noVNC) listened during the session; R11 shows Codespaces port privacy was proven by the decoy probe (unauthenticated probe denied, authenticated probe reached it) before the desktop was served; VNC on a 0600 Unix socket; X server with no TCP/abstract listeners.')
   L.push('6. Check credential confidentiality and cleanup verdicts below; treat any FAIL or INCOMPLETE as blocking C1 PASS.')
   L.push('7. Decide: C1 PASS / C1 INCOMPLETE / REQUEST CHANGES, with reasons. Do not self-certify on behalf of the implementing agent.', '')
   L.push('Evidence SHA-256 (of the section below, for transcription checks only): `' + digest + '`', '')
@@ -298,8 +336,45 @@ export function renderReviewPackage({ evidence, meta }) {
   return L.join('\n')
 }
 
+/** Is a terminal line safe to show? (same rules as the evidence sanitizer) */
+export function safeLine(line) {
+  try { assertSanitized(line); return true } catch { return false }
+}
+
+/** Sanitized terminal view of raw phase output (L-2): unsafe lines are withheld. */
+export function filterLines(text, max = 40) {
+  // eslint-disable-next-line no-control-regex
+  const lines = text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').split('\n').map(l => l.replace(/\s+$/, '')).filter(Boolean)
+  const out = []
+  for (const l of lines.slice(-max)) {
+    const shown = safeLine(l) ? l.slice(0, 300) : '(line withheld by sanitizer)'
+    if (!(shown.startsWith('(line withheld') && out[out.length - 1] === shown)) out.push(shown)
+  }
+  return out
+}
+
+/** One sanitized line per executed test of a raw Playwright JSON report. */
+export function summaryLines(report) {
+  const tests = summarizeReport(report)
+  const out = tests.filter(t => t.verdict !== 'SKIPPED').map(t => '  ' + t.verdict.padEnd(10) + t.title)
+  const n = v => tests.filter(t => t.verdict === v).length
+  out.push('  ' + n('PASS') + ' pass, ' + n('FAIL') + ' fail, ' + n('INCOMPLETE') + ' incomplete, ' + n('SKIPPED') + ' skipped by design')
+  return out.map(l => (safeLine(l) ? l : '  (line withheld by sanitizer)'))
+}
+
 function main(argv) {
   const args = Object.fromEntries(argv.map(a => a.match(/^--([a-z-]+)=(.*)$/)).filter(Boolean).map(m => [m[1], m[2]]))
+  if (args.filter) {
+    const text = existsSync(args.filter) ? readFileSync(args.filter, 'utf8') : ''
+    for (const l of filterLines(text, Number(args.max) || 40)) process.stdout.write('[c1]   | ' + l + '\n')
+    return
+  }
+  if (args.summarize) {
+    let report = null
+    try { report = JSON.parse(readFileSync(args.summarize, 'utf8')) } catch { process.stdout.write('[c1]   (report unreadable)\n'); return }
+    for (const l of summaryLines(report)) process.stdout.write('[c1] ' + l + '\n')
+    return
+  }
   const session = args.session
   const out = args.out
   if (!session || !out) throw new Error('usage: c1-evidence.mjs --session=DIR --out=DIR')
