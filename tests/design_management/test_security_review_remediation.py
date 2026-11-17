@@ -81,5 +81,63 @@ class SecurityRemediationTests(unittest.TestCase):
         self.assertFalse(mod.can_dispatch_coder(**dict(ok, active_agents=None)))
 
 
+class SecurityFirstRoutingTests(unittest.TestCase):
+    def test_security_remediation_before_ordinary(self):
+        tasks = [
+            {"id": "feature", "priority_class": "ordinary", "state": "queued"},
+            {"id": "minor", "priority_class": "other-security", "state": "queued",
+             "independent_reviewer": True, "distinct_coder": True},
+            {"id": "critical", "priority_class": "critical-security", "state": "queued",
+             "independent_reviewer": True, "distinct_coder": True},
+        ]
+        result = mod.next_assignable(
+            tasks, active_agents=1, capacity_verified=True, security_gates_verified=True,
+            included_credits_verified=True, paid_overages_enabled=False)
+        self.assertEqual(result, {"action": "would-dispatch-security", "task_id": "critical"})
+
+    def test_blocked_security_prevents_ordinary_dispatch(self):
+        tasks = [{"id": "security", "priority_class": "high-security", "state": "blocked"},
+                 {"id": "feature", "priority_class": "ordinary", "state": "queued"}]
+        result = mod.next_assignable(
+            tasks, active_agents=0, capacity_verified=True, security_gates_verified=True,
+            included_credits_verified=True, paid_overages_enabled=False)
+        self.assertEqual(result["action"], "hold")
+
+    def test_fails_closed_if_agents_or_credit_unknown(self):
+        tasks = [{"id": "feature", "priority_class": "ordinary", "state": "queued"}]
+        for agents in (None, 2, 3):
+            result = mod.next_assignable(
+                tasks, active_agents=agents, capacity_verified=True,
+                security_gates_verified=True, included_credits_verified=True,
+                paid_overages_enabled=False)
+            self.assertEqual(result["action"], "hold")
+        result = mod.next_assignable(
+            tasks, active_agents=0, capacity_verified=True,
+            security_gates_verified=True, included_credits_verified=False,
+            paid_overages_enabled=False)
+        self.assertEqual(result["action"], "hold")
+
+    def test_reviewer_coder_separation_required(self):
+        tasks = [{"id": "security", "priority_class": "other-security", "state": "queued",
+                  "independent_reviewer": True, "distinct_coder": False}]
+        result = mod.next_assignable(
+            tasks, active_agents=1, capacity_verified=True,
+            security_gates_verified=True, included_credits_verified=True,
+            paid_overages_enabled=False)
+        self.assertEqual(result["action"], "hold")
+
+    def test_only_owner_decisions_notify(self):
+        for event in ({"reason": "ci-green", "requires_owner_decision": True},
+                      {"reason": "repair-attempts-exhausted", "requires_owner_decision": False},
+                      {"reason": "new-commit", "requires_owner_decision": False}):
+            self.assertFalse(mod.should_notify_owner(event))
+        self.assertTrue(mod.should_notify_owner(
+            {"reason": "security-sensitive-merge", "requires_owner_decision": True}))
+
+    def test_untrusted_priorities_fail_closed(self):
+        with self.assertRaises(ValueError):
+            mod.ordered_queue([{"id": "x", "priority_class": "unknown"}])
+
+
 if __name__ == "__main__":
     unittest.main()
