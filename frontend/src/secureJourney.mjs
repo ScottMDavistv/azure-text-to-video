@@ -73,7 +73,11 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch })
       const type = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase()
       if (type !== 'video/mp4') throw new VideoApiError(502, 'Unexpected video format.')
       const blob = await response.blob()
-      if (!blob.size || blob.size > 100 * 1024 * 1024) {
+      const claimed = response.headers.get('content-length')
+      if (claimed !== null && (!/^[0-9]+$/.test(claimed) || Number(claimed) !== video)) {
+        throw new VideoApiError(502, 'Video response size conflicts with authorized metadata.')
+      }
+      if (!blob.size || blob.size > 100 * 1024 * 1024 || blob.size !== video) {
         throw new VideoApiError(502, 'Video size is invalid.')
       }
       return blob
@@ -104,9 +108,9 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch })
     },
     async metadata(projectId, jobId) {
       const data = await request(path(projectId, jobId) + '/video/metadata')
-      if (data?.job_id !== jobId || data?.available !== true ||
+      if (data?.job_id !== jobId || data?.status !== 'completed' || data?.available !== true ||
           data?.content_type !== 'video/mp4' ||
-          typeof data.size_bytes !== 'number' || data.size_bytes <= 0 ||
+          !Number.isSafeInteger(data.size_bytes) || data.size_bytes <= 0 ||
           data.size_bytes > 100 * 1024 * 1024 ||
           data.download_endpoint !== path(projectId, jobId) + '/video') {
         throw new VideoApiError(502, 'Untrusted video metadata.')
@@ -114,8 +118,8 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch })
       return data
     },
     async download(projectId, jobId) {
-      await this.metadata(projectId, jobId)
-      return request(path(projectId, jobId) + '/video', { video: true })
+      const metadata = await this.metadata(projectId, jobId)
+      return request(path(projectId, jobId) + '/video', { video: metadata.size_bytes })
     },
   }
 }
