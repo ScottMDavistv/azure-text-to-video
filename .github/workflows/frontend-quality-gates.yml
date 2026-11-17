@@ -2,9 +2,6 @@ name: Frontend Quality Gates
 
 on:
   pull_request:
-    paths:
-      - 'frontend/**'
-      - '.github/workflows/frontend-quality-gates.yml'
   push:
     branches: [main]
     paths:
