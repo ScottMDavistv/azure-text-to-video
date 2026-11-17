@@ -105,10 +105,22 @@ def read_project_job(project_id: UUID, job_id: UUID,
         raise HTTPException(503, "Project job storage unavailable") from None
 
 def synthetic_dispatch_enabled():
-    return (os.getenv("ENABLE_SYNTHETIC_VIDEO_DISPATCH", "").lower() == "true"
-            and os.getenv("VIDEO_RENDER_PROVIDER", "disabled").lower() == "disabled"
-            and os.getenv("ENABLE_PAID_FAL_WORKER", "false").lower() != "true"
-            and os.getenv("ENABLE_LIVE_VIDEO_RENDERING", "false").lower() != "true")
+    # A queued job must never enter a paid/live worker configuration, regardless
+    # of which common affirmative environment spelling was used.
+    unsafe = {"1", "true", "yes"}
+    if os.getenv("ENABLE_SYNTHETIC_VIDEO_DISPATCH", "").strip().lower() != "true":
+        return False
+    if os.getenv("VIDEO_RENDER_PROVIDER", "disabled").strip().lower() != "disabled":
+        return False
+    if os.getenv("VIDEO_PROVIDER", "disabled").strip().lower() != "disabled":
+        return False
+    return all(
+        os.getenv(name, "false").strip().lower() not in unsafe
+        for name in (
+            "ENABLE_PAID_FAL_WORKER", "ENABLE_LIVE_VIDEO_RENDERING",
+            "ENABLE_WORKER_CONSUMPTION", "ALLOW_UNAUTHENTICATED_DEV",
+        )
+    )
 
 @router.post("/{project_id}/jobs/{job_id}/queue")
 def queue_project_job(project_id: UUID, job_id: UUID,
