@@ -12,6 +12,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 
 API = "https://api.github.com"
 START = "<!-- design-management-report:start -->"
@@ -217,7 +218,7 @@ def main():
         try:
             data["azure"], data["azure_evidence"] = load(repo, token)
         except (NoVerifiedInventory, ValueError, KeyError, OSError,
-                urllib.error.URLError, json.JSONDecodeError):
+                urllib.error.URLError, json.JSONDecodeError, zipfile.BadZipFile, TypeError):
             print("Azure inventory NOT VERIFIED: no authenticated fresh Reader evidence")
     report = render_report(data, now)
     execution = report_execution_signature()
