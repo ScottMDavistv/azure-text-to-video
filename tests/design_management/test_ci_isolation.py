@@ -409,3 +409,74 @@ class AdversarialIsolationTests(unittest.TestCase):
             folder.mkdir(parents=True)
             os.symlink("/etc/hostname", folder / "x.yml")
             self.assertTrue(any("regular file" in p for p in checker.scan(root)))
+
+    
+class IndependentFindingRegressions(unittest.TestCase):
+    """F1/F2 file-based regression probes; PyYAML is mandatory in security CI."""
+
+    def test_f1_workflow_level_env_and_defaults(self):
+        common = {"on": {"workflow_run": {"workflows": ["CI"]}},
+                  "permissions": {"contents": "read"},
+                  "jobs": {"deploy": {
+                      "runs-on": "ubuntu-latest", "environment": "dev-deployment",
+                      "if": "github.ref == 'refs/heads/main'", "steps": []}}}
+        for field in ("env", "defaults"):
+            obj = copy.deepcopy(common)
+            obj[field] = {"TOKEN": E + "github.event.workflow_run.head_sha }}"}
+            self.assertTrue(any("workflow_run payload" in p for p in
+                                checker.examine(".github/workflows/sample.yml", obj)), field)
+
+    def test_f1_privileged_reusable_callee_artifact_and_local_action(self):
+        for used in ("dawidd6/action-download-artifact@" + "a"*40,
+                     "actions/download-artifact@v4",
+                     "./.github/actions/run-untrusted"):
+            obj = {"on": {"workflow_call": ""}, "permissions": {"contents": "read"},
+                   "jobs": {"deploy": {
+                       "runs-on": "ubuntu-latest", "environment": "dev-deployment",
+                       "if": "github.ref == 'refs/heads/main' && github.event_name != 'pull_request'",
+                       "steps": [{"uses": used, "with": {
+                           "run-id": E + "github.event.workflow_run.id }}"}}]}}}
+            findings = checker.examine(".github/workflows/callee.yml", obj)
+            self.assertTrue(any("workflow_dispatch guard" in p for p in findings), used)
+            if "download-artifact" in used:
+                self.assertTrue(any("downloads artifacts" in p for p in findings), used)
+            else:
+                self.assertTrue(any("local action forbidden" in p for p in findings), used)
+
+    def test_f2_embedded_closing_delimiter_secret_and_event_text(self):
+        suffix = "format('{0}', '}}') && "
+        secret = E + suffix + "secrets.DM_AUTO_MERGE_USER_TOKEN }}"
+        event = E + suffix + "github.event.pull_request.title }}"
+        obj = copy.deepcopy(BASE)
+        obj["env"] = {"TOKEN": secret}
+        self.assertTrue(any("untrusted secret context" in p for p in
+                            checker.examine(".github/workflows/probe.yml", obj)))
+        obj = copy.deepcopy(BASE)
+        obj["jobs"]["checks"]["steps"].append({"run": "echo " + event})
+        self.assertTrue(any("untrusted event text" in p for p in
+                            checker.examine(".github/workflows/probe.yml", obj)))
+        self.assertEqual(list(checker.extract_expressions(E + "format('}}') }}")),
+                         [(" format('}}') ", False)])
+
+    def test_f2_malformed_expression_denied(self):
+        obj = copy.deepcopy(BASE)
+        obj["env"] = {"X": E + "format('unclosed }}"}
+        self.assertTrue(any("malformed GitHub expression" in p for p in
+                            checker.examine(".github/workflows/probe.yml", obj)))
+
+    def test_f1_f2_through_strict_yaml_scan(self):
+        document = """on: workflow_run
+permissions: {contents: read}
+env:
+  SHA: ${{ github.event.workflow_run.head_sha }}
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev-deployment
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: dawidd6/action-download-artifact@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"""
+        findings = yaml_scan(self, {"sample.yml": document})
+        self.assertTrue(any("workflow_run payload" in p for p in findings))
+        self.assertTrue(any("downloads artifacts" in p for p in findings))
