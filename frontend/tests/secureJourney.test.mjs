@@ -174,3 +174,40 @@ test('rejects missing MP4 length before buffering', async () => {
   await assert.rejects(api.download(PROJECT, JOB), { status: 502 })
   assert.equal(buffered, false)
 })
+
+
+test('aborted operation never sends a request after token acquisition', async () => {
+  const controller = new AbortController()
+  let network = false
+  const api = createVideoApi({
+    tokenProvider: async () => {
+      controller.abort()
+      return 'signed-token'
+    },
+    fetcher: async () => { network = true; throw new Error('unexpected fetch') },
+  })
+  await assert.rejects(api.submit(PROJECT, 'Morning', controller.signal),
+    { name: 'AbortError' })
+  assert.equal(network, false)
+})
+
+test('cancellation signal is passed into queue and metadata/download requests', async () => {
+  const controller = new AbortController()
+  const calls = []
+  const metadata = {
+    job_id: JOB, available: true, status: 'completed', content_type: 'video/mp4',
+    size_bytes: 3, download_endpoint: '/projects/' + PROJECT + '/jobs/' + JOB + '/video',
+  }
+  const api = createVideoApi({
+    tokenProvider: async () => 'signed-token',
+    fetcher: createFetch([
+      { json: { job_id: JOB, status: 'queued', dispatched: true } },
+      { json: metadata },
+      { blob: new Blob(['mp4'], { type: 'video/mp4' }) },
+    ], calls),
+  })
+  await api.queue(PROJECT, JOB, controller.signal)
+  await api.download(PROJECT, JOB, controller.signal)
+  assert.equal(calls.length, 3)
+  assert.ok(calls.every(call => call.init.signal === controller.signal))
+})
