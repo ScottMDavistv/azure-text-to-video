@@ -7,14 +7,22 @@ import { join, resolve } from 'node:path'
 if (process.env.C1_LIVE === '1') throw new Error('Never mutate a live Entra session')
 const frontend = process.cwd()
 const repo = resolve(frontend, '..')
+// PR #46 (6b62c05): MSAL config/flows live in src/entraAuthCore.ts; real MSAL
+// wiring (InteractionRequiredAuthError predicate) lives in src/entraAuth.ts.
+const core = 'src/entraAuthCore.ts'
 const mutations = [
-  { id: 'M1', file: 'src/entraAuth.ts', before: "cacheLocation: 'memoryStorage'", after: "cacheLocation: 'localStorage'", grep: 'configured auth runtime is tenant-scoped', proof: /localStorage/ },
-  { id: 'M2', file: 'src/entraAuth.ts', before: 'redirectUri: getRedirectUri(window.location.origin)', after: 'redirectUri: window.location.origin', grep: 'M2 browser:', proof: /127\.0\.0\.1/ },
-  { id: 'M3', file: 'src/entraAuth.ts', before: 'https://login.microsoftonline.com/$'+'{tenantId}', after: 'https://login.microsoftonline.com/common', grep: 'configured auth runtime is tenant-scoped', proof: /common/ },
-  { id: 'M4', file: 'src/entraAuth.ts', before: 'auth.acquireTokenPopup(', after: 'auth.acquireTokenRedirect(', grep: 'M4 browser:', proof: /["']?redirect["']?:\s*1/ },
-  { id: 'M5', file: 'src/entraAuth.ts', before: 'await auth.logoutPopup(', after: 'await Promise.resolve(', grep: 'M5 browser:', proof: /["']?count["']?:\s*0/ },
+  { id: 'M1', file: core, before: "cacheLocation: 'memoryStorage'", after: "cacheLocation: 'localStorage'", grep: 'configured auth runtime is tenant-scoped', proof: /localStorage/ },
+  { id: 'M2', file: core, before: 'const redirectUri = getRedirectUri(origin)', after: 'const redirectUri = origin', grep: 'M2 browser:', proof: /127\.0\.0\.1/ },
+  { id: 'M3', file: core, before: 'https://login.microsoftonline.com/$'+'{tenantId}', after: 'https://login.microsoftonline.com/common', grep: 'configured auth runtime is tenant-scoped', proof: /common/ },
+  { id: 'M4', file: core, before: 'auth.acquireTokenPopup(', after: 'auth.acquireTokenRedirect(', grep: 'M4 browser:', proof: /["']?redirect["']?:\s*1/ },
+  { id: 'M5', file: core, before: 'await auth.logoutPopup(', after: 'await Promise.resolve(', grep: 'M5 browser:', proof: /["']?count["']?:\s*0/ },
   { id: 'M6', file: 'src/App.tsx', before: 'export default function App() {', after: "export default function App() {\n  fetch('https://unauthorized-fal.invalid/');", grep: 'M5 browser:', proof: /unauthorized-fal\.invalid/ },
-  { id: 'M7', file: 'src/entraAuth.ts', before: 'export async function signIn(): Promise<void> {', after: "export async function signIn(): Promise<void> {\n  sessionStorage.setItem('token', 'Bearer eyJsynthetic-only');", grep: 'attempted login sends correct tenant', proof: /sessionSafe/ },
+  { id: 'M7', file: core, before: '  async function signIn(): Promise<void> {', after: "  async function signIn(): Promise<void> {\n    sessionStorage.setItem('token', 'Bearer eyJsynthetic-only')", grep: 'attempted login sends correct tenant', proof: /sessionSafe/ },
+  { id: 'M8', file: core, before: 'storeAuthStateInCookie: false', after: 'storeAuthStateInCookie: true', grep: 'configured auth runtime is tenant-scoped', proof: /Received:\s*true/ },
+  { id: 'M9', file: core, before: 'if (options.isInteractionRequired(error)) {', after: 'if (true) {', grep: 'M9 browser:', proof: /["']?popup["']?:\s*1/ },
+  { id: 'M10', file: 'src/entraAuth.ts', before: 'isInteractionRequired: (error) => error instanceof InteractionRequiredAuthError,', after: 'isInteractionRequired: () => true,', grep: 'M9 browser:', proof: /["']?popup["']?:\s*1/ },
+  { id: 'M11', file: core, before: '        await auth.clearCache({ account: account ?? undefined })', after: '        void account', grep: 'M10 browser:', proof: /["']?cacheCleared["']?:\s*false/ },
+  { id: 'M12', file: core, before: '      auth.setActiveAccount(null)\n      try {', after: '      try {', grep: 'M10 browser:', proof: /["']?activeCleared["']?:\s*false/ },
 ]
 const nodeModules = join(frontend, 'node_modules')
 for (const m of mutations) {
@@ -56,4 +64,4 @@ for (const m of mutations) {
     rmSync(temporary, { recursive: true, force: true })
   }
 }
-console.log('C1 BROWSER MUTATIONS: 7/7 detected; no real auth or paid provider.')
+console.log('C1 BROWSER MUTATIONS: ' + mutations.length + '/' + mutations.length + ' detected; no real auth or paid provider.')
