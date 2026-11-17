@@ -59,12 +59,16 @@ jobs:
           C1_LIVE: '0'
           C1_UNCONFIGURED: '0'
           C1_MUTATION_MODE: '0'
+          C1_PR_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           # No Microsoft account, Entra access, Azure/FAL, or workflow secrets.
           # Reuses the existing read-only, non-deploying frontend CI job.
+          git checkout --detach "$C1_PR_HEAD"
           npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund @playwright/test@1.65.1
           npx playwright install chromium
           npx playwright test --config=playwright.config.mjs --workers=1
+          node e2e/run-browser-mutations.mjs
+          git checkout --detach "$GITHUB_SHA"
 
       - name: Lint frontend
         working-directory: frontend
