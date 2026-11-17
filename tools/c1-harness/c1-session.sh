@@ -48,6 +48,8 @@ scrub_env() {
 
 check() { CHECKS+=("$1"); }
 
+# N-1: every check aborts on failure. (An `A && check B` list is exempt from
+# errexit, so a failed verification would silently continue.)
 preflight() {
   local t major
   for t in git node npm sha256sum setsid realpath awk getent mktemp curl python3 od; do
@@ -55,11 +57,11 @@ preflight() {
   done
   major=$(node -p 'process.versions.node.split(".")[0]')
   (( major >= 20 )) || { c1_err "Node.js >= 20 required (found $(node --version))"; return 1; }
-  c1_verify_harness_clean "$REPO" "$HARNESS_REL" && check harness_clean
+  c1_verify_harness_clean "$REPO" "$HARNESS_REL" || return 1; check harness_clean
   c1_fetch_commit "$REPO" "$AUTH" && c1_fetch_commit "$REPO" "$PW" || { c1_err 'cannot obtain approved commits'; return 1; }
-  c1_verify_commits "$REPO" "$AUTH" "$PW" "$C1_AUTH_TO_PW_FILES" && check auth_ancestor_and_approved_diff
-  c1_prepare_worktree "$REPO" "$PW" "$WT" && check exact_head_clean_worktree
-  c1_check_localhost && check localhost_loopback_only
+  c1_verify_commits "$REPO" "$AUTH" "$PW" "$C1_AUTH_TO_PW_FILES" || return 1; check auth_ancestor_and_approved_diff
+  c1_prepare_worktree "$REPO" "$PW" "$WT" || return 1; check exact_head_clean_worktree
+  c1_check_localhost || return 1; check localhost_loopback_only
   c1_port_free "$C1_APP_PORT" || { c1_err "port $C1_APP_PORT in use; stop the existing dev server (fresh server is mandatory)"; return 1; }
   c1_port_free "$C1_NOVNC_PORT" || { c1_err "port $C1_NOVNC_PORT in use; run: c1-session.sh cleanup"; return 1; }
   check ports_free
@@ -67,10 +69,10 @@ preflight() {
 
 install_deps() {
   mkdir -p "$CACHE"
-  c1_install_apt_packages
+  c1_install_apt_packages || return 1
   command -v ss >/dev/null || { c1_err 'ss (iproute2) is required for listener verification'; return 1; }
-  c1_install_node_deps "$FE" "$CACHE"
-  c1_verify_clean_tree "$WT" "$PW" && check clean_after_dependency_install
+  c1_install_node_deps "$FE" "$CACHE" || return 1
+  c1_verify_clean_tree "$WT" "$PW" || return 1; check clean_after_dependency_install
 }
 
 # Cleanup runs on EVERY exit path and is verified; a failed cleanup is never hidden.
@@ -181,9 +183,10 @@ start_private_desktop() {
   BASE=$(c1_codespace_base "$C1_NOVNC_PORT") || { c1_err 'CODESPACE_NAME / forwarding domain unavailable'; return 1; }
   [[ -n "${GITHUB_TOKEN:-}" ]] || { c1_err 'GITHUB_TOKEN is not available in this Codespace terminal'; return 1; }
   HDR="$S/probe-token.hdr"
-  c1_write_header_file "$HDR" X-Github-Token "$GITHUB_TOKEN"
-  c1_write_header_file "$S/api-token.hdr" Authorization "token $GITHUB_TOKEN"
-  c1_start_display_vnc "$S" "$pass"
+  # Called as `if ! start_private_desktop` (errexit is OFF in here): every step is checked explicitly.
+  c1_write_header_file "$HDR" X-Github-Token "$GITHUB_TOKEN" || return 1
+  c1_write_header_file "$S/api-token.hdr" Authorization "token $GITHUB_TOKEN" || return 1
+  c1_start_display_vnc "$S" "$pass" || return 1
   c1_log "verifying Codespaces port $C1_NOVNC_PORT privacy with a decoy (no desktop behind it yet)"
   if command -v gh >/dev/null 2>&1 && [[ -n "${CODESPACE_NAME:-}" ]]; then
     gh codespace ports visibility "$C1_NOVNC_PORT:private" -c "$CODESPACE_NAME" >/dev/null 2>&1 || true
@@ -198,8 +201,8 @@ start_private_desktop() {
     owner=$(c1_repo_owner_type "${GITHUB_REPOSITORY:-}" "$S/api-token.hdr" || true)
     [[ "$owner" == User ]] || { c1_err "cannot exclude organization-wide port visibility (repository owner type '${owner:-unknown}', gh read-back unavailable)"; PORT_PRIVATE=failed; return 1; }
   fi
-  WS=$(c1_start_websockify "$S" "$C1_NOVNC_PORT")
-  WSST=$(c1_proc_start "$WS")
+  WS=$(c1_start_websockify "$S" "$C1_NOVNC_PORT") || { PORT_PRIVATE=failed; return 1; }
+  WSST=$(c1_proc_start "$WS"); [[ -n "$WSST" ]] || { PORT_PRIVATE=failed; return 1; }
   if ! c1_verify_private_novnc "$BASE" "$HDR"; then
     c1_err "noVNC privacy re-check failed ($C1_PRIVACY_STATE)"
     c1_signal_owned TERM "$WS" "$S" "$WSST"; PORT_PRIVATE=failed; return 1
@@ -207,7 +210,7 @@ start_private_desktop() {
   if [[ "$vis" == private ]]; then PORT_PRIVATE=verified-probe-gh; else PORT_PRIVATE=verified-probe-user-repo; fi
   # shellcheck disable=SC2016
   c1_spawn "$S" privacy-monitor bash -c 'source "$1"; c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6"' \
-    _ "$LIB" "$S" "$BASE" "$HDR" "$WS" "$WSST" >/dev/null
+    _ "$LIB" "$S" "$BASE" "$HDR" "$WS" "$WSST" >/dev/null || { c1_signal_owned TERM "$WS" "$S" "$WSST"; PORT_PRIVATE=failed; return 1; }
 }
 
 session() {
@@ -229,8 +232,8 @@ session() {
     stale)  c1_warn 'recovering from an interrupted session'; c1_cleanup_all "$ROOT" ;;
   esac
   local start; start=$(c1_utc)
-  preflight
-  install_deps
+  preflight || { c1_err 'preflight failed; nothing was started'; return 1; }
+  install_deps || { c1_err 'dependency installation or post-install verification failed'; return 1; }
   S=$(c1_session_new "$ROOT")
   export C1_HARNESS_SESSION=$S TMPDIR="$S/tmp"
   trap on_exit EXIT
@@ -330,7 +333,7 @@ main() {
   [[ "${2:-}" == --offline-only ]] && offline=1
   case $sub in
     run) session "$offline" ;;
-    preflight) scrub_env; preflight; install_deps; c1_log "preflight PASS: ${CHECKS[*]}" ;;
+    preflight) scrub_env; preflight || return 1; install_deps || return 1; c1_log "preflight PASS: ${CHECKS[*]}" ;;
     cleanup) c1_cleanup_all "$ROOT"; c1_port_free "$C1_NOVNC_PORT" && c1_log 'no harness sessions remain' ;;
     purge) c1_cleanup_all "$ROOT"
            if [[ -e "$WT" ]]; then git -C "$REPO" worktree remove --force "$WT" 2>/dev/null || c1_safe_rm "$WT" "$CACHE"; fi

@@ -19,6 +19,10 @@ export const PHASES = {
   'cancelled-logout': { label: 'Supervised cancelled logout (harness supplemental)', live: true },
 }
 
+// N-1: R1 passes only if every mandatory preflight check actually ran and passed.
+export const REQUIRED_CHECKS = ['harness_clean', 'auth_ancestor_and_approved_diff', 'exact_head_clean_worktree',
+  'localhost_loopback_only', 'ports_free', 'clean_after_dependency_install']
+
 export const OFFLINE_EXPECTED = [
   'M-1/M-4/M-5: configured auth runtime',
   'M-1/M-2: attempted login sends correct tenant',
@@ -193,8 +197,10 @@ export function evaluate({ meta, phases, reports, artifactHits }) {
     let detail = ''
     let code = null
     if (row.kind === 'meta') {
-      verdict = meta.CHECKOUT_VERIFIED === 'PASS' && meta.HARNESS_CLEAN === 'true' ? 'PASS' : 'FAIL'
-      detail = (meta.CHECKS || '').replace(/,/g, ', ')
+      const have = new Set((meta.CHECKS || '').split(',').filter(Boolean))
+      const missing = REQUIRED_CHECKS.filter(c => !have.has(c))
+      verdict = meta.CHECKOUT_VERIFIED === 'PASS' && meta.HARNESS_CLEAN === 'true' && !missing.length ? 'PASS' : 'FAIL'
+      detail = (meta.CHECKS || '').replace(/,/g, ', ') + (missing.length ? '; MISSING: ' + missing.join(', ') : '')
     } else if (row.kind === 'toolchain') {
       const pwOk = Boolean(meta.PLAYWRIGHT_VERSION) && meta.PLAYWRIGHT_VERSION === meta.EXPECTED_PLAYWRIGHT_VERSION
       const bOk = Boolean(meta.BROWSER_VERSION) && meta.BROWSER_VERSION === meta.EXPECTED_BROWSER_VERSION
