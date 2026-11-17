@@ -44,7 +44,7 @@ try {
   ])
   if (exitCode !== 0 || !stdout.includes('data-result="PASS"') || stdout.includes('data-result="FAIL"')) {
     throw new Error('Chromium session-race test failed (exit=' + exitCode + '): ' +
-      stdout.match(/<pre id="race-result"[\\s\\S]*?<\\/pre>/)?.[0]?.slice(0,1600) +
+      stdout.slice(Math.max(0, stdout.indexOf('race-result') - 50), stdout.indexOf('race-result') + 1600) +
       '\\n' + stderr.slice(-1000))
   }
   console.log('PASS: headless Chromium account-switch, stale request, revoked URL, logout race')
