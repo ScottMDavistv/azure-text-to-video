@@ -34,7 +34,7 @@ function assertSourceInvariants() {
   }
 }
 
-function observeContext(context) {
+async function observeContext(context) {
   const problems = []
   const requestHosts = new Set()
   const credentialPattern = /Bearer\s+[\w.-]{24,}|eyJ[A-Za-z0-9_-]{20,}\.|client_secret\s*[:=]/i
@@ -58,7 +58,7 @@ function observeContext(context) {
   })
   // Synthetic/offline mode NEVER allows an outbound request, including Microsoft endpoints.
   if (!live) {
-    context.route('**/*', async route => {
+    await context.route('**/*', async route => {
       const url = new URL(route.request().url())
       if (!['localhost', '127.0.0.1'].includes(url.hostname)) {
         await route.abort()
@@ -71,7 +71,7 @@ function observeContext(context) {
 }
 
 async function assertBuild(page) {
-  const servedSha = await page.evaluate(() => import.meta.env.VITE_C1_SHA)
+  const servedSha = await page.evaluate(async () => (await import('/src/c1BuildInfo.ts')).c1BuildSha)
   expect(servedSha).toBe(sha)
 }
 
@@ -91,7 +91,7 @@ async function assertMemoryOnly(page) {
 
 test('M-1/M-4/M-5: configured auth runtime is tenant-scoped, memory-only, correctly redirected, no unauthorized egress', async ({ page, context }) => {
   test.skip(live || unconfigured, 'Synthetic offline configuration only')
-  const audit = observeContext(context)
+  const audit = await observeContext(context)
   assertSourceInvariants()
   await page.goto('/')
   await assertBuild(page)
@@ -119,7 +119,7 @@ test('M-1/M-4/M-5: configured auth runtime is tenant-scoped, memory-only, correc
 
 test('M-1/M-2: attempted login sends correct tenant, PKCE, registered URI, client and scopes; blocked login fails closed', async ({ page, context }) => {
   test.skip(live || unconfigured, 'Synthetic offline configuration only')
-  const audit = observeContext(context)
+  const audit = await observeContext(context)
   const authorizations = []
   context.on('request', request => {
     if (request.url().includes('/oauth2/v2.0/authorize')) {
@@ -161,7 +161,7 @@ test('M-1/M-2: attempted login sends correct tenant, PKCE, registered URI, clien
 
 test('M-1: missing SPA configuration is fail-closed', async ({ page, context }) => {
   test.skip(!unconfigured || live, 'Run separately with C1_UNCONFIGURED=1')
-  const audit = observeContext(context)
+  const audit = await observeContext(context)
   await page.goto('/')
   await assertBuild(page)
   await expect(page.getByRole('button', { name: 'Sign in with Microsoft' })).toBeDisabled()
@@ -175,7 +175,7 @@ test('M-2/M-3: guarded auth functions reject unsafe source-level fallbacks', asy
 
 test('LIVE: popup login, validated claims, silent acquisition and confirmed cache-clearing logout', async ({ page, context, browser }) => {
   test.skip(!live, 'C1 live requires explicit authorized supervised account and SPA')
-  const audit = observeContext(context)
+  const audit = await observeContext(context)
   await page.goto('/')
   await assertBuild(page)
   const popups = []
@@ -194,7 +194,7 @@ test('LIVE: popup login, validated claims, silent acquisition and confirmed cach
     const claims = JSON.parse(atob(payload.padEnd(Math.ceil(payload.length / 4) * 4, '=')))
     const expectedTenant = '773e9051-c546-4b75-9432-90f4f8242660'
     const expectedAudience = 'a5a09b74-aead-455f-9de7-9b844c8a8465'
-    const client = import.meta.env.VITE_ENTRA_SPA_CLIENT_ID
+    const client = auth.getConfiguration().auth.clientId
     const authResult = {
       ok: [expectedAudience, 'api://' + expectedAudience].includes(claims.aud) &&
         claims.tid === expectedTenant &&
@@ -237,7 +237,7 @@ test('LIVE: popup login, validated claims, silent acquisition and confirmed cach
 
 test('LIVE: deliberately cancelled popup returns MSAL user_cancelled, not a generic failure', async ({ page, context }) => {
   test.skip(!live, 'C1 live cancellation is supervised')
-  const audit = observeContext(context)
+  const audit = await observeContext(context)
   await page.goto('/')
   await assertBuild(page)
   await page.evaluate(() => {
