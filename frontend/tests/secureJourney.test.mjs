@@ -73,7 +73,7 @@ test('blocks unavailable backend rather than pretending completion', async () =>
 
 test('requires metadata endpoint be same authorized project/job', async () => {
   const calls = []
-  const metadata = { job_id: JOB, available: true, content_type: 'video/mp4',
+  const metadata = { job_id: JOB, available: true, status: 'completed', content_type: 'video/mp4',
     size_bytes: 1200, download_endpoint: '/projects/' + PROJECT + '/jobs/' + JOB + '/video' }
   const api = createVideoApi({ tokenProvider: async () => 'signed-token',
     fetcher: createFetch([{ json: metadata }], calls) })
@@ -84,7 +84,7 @@ test('requires metadata endpoint be same authorized project/job', async () => {
 })
 
 test('video retrieved with authorization is verified MP4 with bounded size', async () => {
-  const metadata = { job_id: JOB, available: true, content_type: 'video/mp4', size_bytes: 3,
+  const metadata = { job_id: JOB, available: true, status: 'completed', content_type: 'video/mp4', size_bytes: 3,
     download_endpoint: '/projects/' + PROJECT + '/jobs/' + JOB + '/video' }
   const calls = []
   const api = createVideoApi({ tokenProvider: async () => 'signed-token',
@@ -97,10 +97,40 @@ test('video retrieved with authorization is verified MP4 with bounded size', asy
 })
 
 test('rejects HTML video response and excessive blob', async () => {
-  const metadata = { job_id: JOB, available: true, content_type: 'video/mp4', size_bytes: 3,
+  const metadata = { job_id: JOB, available: true, status: 'completed', content_type: 'video/mp4', size_bytes: 3,
     download_endpoint: '/projects/' + PROJECT + '/jobs/' + JOB + '/video' }
   const api = createVideoApi({ tokenProvider: async () => 'signed-token',
     fetcher: createFetch([{ json: metadata },
       { contentType: 'text/html', blob: new Blob(['bad']) }], []) })
   await assert.rejects(api.download(PROJECT, JOB), { status: 502 })
+})
+
+test('project MP4 blocks corrupted or mismatched content length', async () => {
+  const metadata = { job_id: JOB, status: 'completed', available: true,
+    content_type: 'video/mp4', size_bytes: 3,
+    download_endpoint: '/projects/' + PROJECT + '/jobs/' + JOB + '/video' }
+  for (const bad of [
+    { size: 4, claimed: '3' },
+    { size: 3, claimed: '4' },
+    { size: 3, claimed: 'garbage' },
+  ]) {
+    const fetcher = async (_url, _options) => {
+      if (!fetcher.second) { fetcher.second = true; return {
+        ok: true, json: async () => metadata,
+      } }
+      return { ok: true, headers: { get: name => name === 'content-type'
+        ? 'video/mp4' : name === 'content-length' ? bad.claimed : null },
+        blob: async () => new Blob(['x'.repeat(bad.size)], { type: 'video/mp4' }) }
+    }
+    const api = createVideoApi({ tokenProvider: async () => 'signed', fetcher })
+    await assert.rejects(api.download(PROJECT, JOB), { status: 502 })
+  }
+})
+test('rejects video metadata when job is not completed', async () => {
+  const metadata = { job_id: JOB, status: 'processing', available: true,
+    content_type: 'video/mp4', size_bytes: 3,
+    download_endpoint: '/projects/' + PROJECT + '/jobs/' + JOB + '/video' }
+  const api = createVideoApi({ tokenProvider: async () => 'signed',
+    fetcher: createFetch([{json: metadata}], []) })
+  await assert.rejects(api.metadata(PROJECT, JOB), { status: 502 })
 })
