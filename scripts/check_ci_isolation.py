@@ -270,7 +270,7 @@ def examine(path, doc, raw=""):
             if any("download-artifact" in str(st.get("uses", "")).lower()
                    for st in steps if isinstance(st, dict)):
                 problems.append(where + ": privileged base-context job downloads artifacts")
-            if any(re.search(r"\\bgithub\\.event\\.workflow_run\\b", e, re.I)
+            if any(re.search(r"\bgithub\.event\.workflow_run\b", e, re.I)
                    for e in expressions({"job": job, "env": doc.get("env"),
                                          "defaults": doc.get("defaults")})):
                 problems.append(where + ": privileged base-context job reads workflow_run payload")
@@ -278,7 +278,7 @@ def examine(path, doc, raw=""):
                    for st in steps if isinstance(st, dict)):
                 problems.append(where + ": privileged base-context/callee local action forbidden")
             if call and not any(re.fullmatch(
-                    r"""github\\.event_name\\s*==\\s*(['"])workflow_dispatch\\1""", p)
+                    r"""github\.event_name\s*==\s*(['"])workflow_dispatch\1""", p)
                     for p in (condition_terms(cond) or [])):
                 problems.append(where + ": privileged reusable callee requires positive workflow_dispatch guard")
         if path == ".github/workflows/autonomous-engineering.yml":
