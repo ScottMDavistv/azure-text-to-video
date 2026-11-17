@@ -75,7 +75,7 @@ def validate_sources(job, alert):
     for item in REQUIRED_ALERT:
         if item not in alert:
             raise ReadinessError("Missing alert safeguard: " + item)
-    if not re.search(r"param cronExpression string = '0 \\* \\* \\* \\*'", job):
+    if "param cronExpression string = '0 * * * *'" not in job:
         raise ReadinessError("Unbounded or changed default cron")
     if "@allowed([ '*/15 * * * *', '0 * * * *' ])" not in job:
         raise ReadinessError("Unrestricted cron frequency")
