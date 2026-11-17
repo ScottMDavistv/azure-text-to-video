@@ -309,7 +309,7 @@ def test_case_variant_receipt_cannot_settle_other_job(table, second_receipt):
 
 
 @pytest.mark.parametrize("invalid_receipt", ["Receipt-A ", " Receipt-A",
-                                             "Receipt-A\\u200b", "Receipt-A\\x00"])
+                                             "Receipt-A\u200b", "Receipt-A\x00"])
 def test_noncanonical_receipts_rejected_without_budget_movement(table, invalid_receipt):
     project, job = uid(), uid()
     seed(table, project)
