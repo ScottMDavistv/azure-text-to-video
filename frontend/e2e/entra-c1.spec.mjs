@@ -245,7 +245,7 @@ test('M4 browser: interaction-required token recovery invokes popup, never redir
     // transformed entraAuth.ts; a bare package import in page.evaluate
     // cannot resolve and a second module instance breaks instanceof.
     const transformed = await (await fetch('/src/entraAuth.ts')).text()
-    const msalUrl = transformed.match(/from\\s*["']([^"']*azure_msal-browser[^"']*)["']/)?.[1]
+    const msalUrl = transformed.match(/from\s*["']([^"']*azure_msal-browser[^"']*)["']/)?.[1]
     if (!msalUrl || !msalUrl.startsWith('/node_modules/.vite/deps/')) {
       throw new Error('Cannot resolve the MSAL module instance used by entraAuth')
     }
