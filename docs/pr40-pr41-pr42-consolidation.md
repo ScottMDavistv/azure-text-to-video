@@ -1,0 +1,33 @@
+# Authenticated PR consolidation: #40 + #41 → #42
+
+**Selected canonical contract:** `/projects/{project_id}/jobs` with the verified project ID in the route, plus `/{job_id}`, `/{job_id}/queue`, `/{job_id}/video/metadata` and `/{job_id}/video`. Legacy `/jobs` service bearer endpoints remain separate, unchanged, and **must never be used by the browser**.
+
+## Feature-preservation matrix
+
+| Source | Requirement | Consolidated #42 implementation |
+|---|---|---|
+| #40 | Frontend signed Microsoft Entra API token; never Vite service credentials | `SecureStudio.tsx` + `secureJourney.mjs`, per-request `acquireApiToken()` |
+| #40 | Explicit HTTPS origin, local-only HTTP exception, no redirect forwarding | `createVideoApi`, `redirect:'error'`, `credentials:'omit'`; no service token |
+| #40 | Prompt submission, queue, real status polling, recoverable errors | `SecureStudio.tsx`, server-provided job status and explicit queue retry |
+| #40 | Strict UUID, job state, private MP4 MIME, size and exact download URL | `secureJourney.mjs`; now verifies metadata state, integer size, `Content-Length` and Blob size equality |
+| #40 | Ephemeral browser video Blob URL lifecycle | `SecureStudio.tsx`, revoke on URL replacement or unmount |
+| #41 | Signed Entra JWKS, issuer/audience/tenant/scope and active mapped user | Shared `verify_project_token`, server-side `verified_actor`; no separate trust implementation |
+| #41 | Active project membership and revocation checked on every job access | `authorized_job` and `get_context` call `require_project_role` on request; never rely on browser claims |
+| #41 | Immutable server-stamped job owner/project | `create_project_job` writes `createdBy`, `projectId`; browser cannot supply either |
+| #41 | Legacy/unowned and cross-user/project denied | `authorized_job` rejects missing/mismatched fields, returns 404 |
+| #41 | Private blob never read for uncompleted job | `authorized_video` now explicitly requires `status='completed'` after ownership check |
+| #41 | Private no-cache, no-sniff bounded MP4 delivery | `project_video_download` uses existing `get_video_resource` size guard and streaming cap |
+| #41 | Disabled-by-default user API and downloads | `ENABLE_AUTHENTICATED_VIDEO_JOBS`, `ENABLE_PROJECT_ROUTES`, `ENABLE_VIDEO_DOWNLOADS`, `ENABLE_SYNTHETIC_VIDEO_DISPATCH` all default off |
+| #42 | Provider-free 300s synthetic FFmpeg and bounded worker seam | `synthetic_job_renderer.py`, `synthetic_worker_cli.py`, offline real MP4 acceptance tests |
+| #46 | MSAL token handling improvements, OIDC/financial/security hardening | **Not ported** until independently reviewed PR #46; verify future merge conflicts with `frontend/src/entraAuth.ts` and backend auth modules. No separate token cache implementation in this PR |
+
+## Deliberate exclusions and unresolved security gates
+
+- **Do not register parallel `/user/jobs` endpoints from #41** or adopt #40's direct `/jobs` service-token path; both are superseded by the project-scoped contract. Documented #41 tests are adapted to the project-scoped boundary instead of blindly ported.
+- #41's additional test for revoked membership and strict canonical project IDs must be retained through negative-path regression coverage in #42. Existing signed-token helper is the sole Entra verification boundary.
+- #40's fetch network error handling is only partially represented; any untrusted server response must remain generic and must never echo tokens or internal details.
+- No production CORS/ingress/Entra registration, project enrollment, worker launch, Azure IAM/deployment, paid FAL or automatic dispatch authorized.
+- The default Azure worker is still inspection-only. Full live Azure prompt → Queue → owned synthetic worker → private blob → authenticated browser MP4 has **not been validated**.
+- PR #46 overlaps Microsoft sign-in but remains independently draft; compatibility is required before enabling a real frontend workflow.
+
+**Decision:** Keep #40 and #41 open as draft records until this canonical #42 branch is independently reviewed and explicitly approved for merge. Do not close or merge any PR in this consolidation task.
