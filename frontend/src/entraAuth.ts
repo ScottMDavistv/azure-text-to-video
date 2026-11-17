@@ -44,7 +44,6 @@ export async function initializeAuth(): Promise<PublicClientApplication> {
     })
     initialization = (async () => {
       await client.initialize()
-      await client.handleRedirectPromise()
       return client
     })()
   }
@@ -58,13 +57,14 @@ export async function getSignedInAccount(): Promise<AccountInfo | null> {
 
 export async function signIn(): Promise<void> {
   const auth = await initializeAuth()
-  await auth.loginRedirect({ scopes: apiScopes })
+  const result = await auth.loginPopup({ scopes: apiScopes })
+  if (result.account) auth.setActiveAccount(result.account)
 }
 
 export async function signOut(): Promise<void> {
   const auth = await initializeAuth()
   const account = await getSignedInAccount()
-  await auth.logoutRedirect({ account: account ?? undefined })
+  await auth.logoutPopup({ account: account ?? undefined })
 }
 
 export async function acquireApiToken(): Promise<AuthenticationResult | null> {
@@ -75,8 +75,7 @@ export async function acquireApiToken(): Promise<AuthenticationResult | null> {
     return await auth.acquireTokenSilent({ account, scopes: apiScopes })
   } catch (error) {
     if (error instanceof InteractionRequiredAuthError) {
-      await auth.acquireTokenRedirect({ account, scopes: apiScopes })
-      return null
+      return await auth.acquireTokenPopup({ account, scopes: apiScopes })
     }
     throw error
   }
