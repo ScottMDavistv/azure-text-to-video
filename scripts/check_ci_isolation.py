@@ -270,9 +270,9 @@ def examine(path, doc, raw=""):
             if any("download-artifact" in str(st.get("uses", "")).lower()
                    for st in steps if isinstance(st, dict)):
                 problems.append(where + ": privileged base-context job downloads artifacts")
-            if any(re.search(r"\bgithub\.event\.workflow_run\b", e, re.I)
-                   for e in expressions({"job": job, "env": doc.get("env"),
-                                         "defaults": doc.get("defaults")})):
+            if any(injected_context(v) for v in all_strings({
+                    "job": job, "env": doc.get("env"),
+                    "defaults": doc.get("defaults")})):
                 problems.append(where + ": privileged base-context job reads workflow_run payload")
             if any(str(st.get("uses", "")).strip().startswith(("./", ".\\", "$/"))
                    for st in steps if isinstance(st, dict)):
