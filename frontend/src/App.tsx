@@ -16,6 +16,7 @@ const authenticatedJourneyEnabled = import.meta.env.VITE_ENABLE_AUTHENTICATED_JO
 export default function App() {
   const configured = isAuthConfigured()
   const [accountName, setAccountName] = useState<string | null>(null)
+  const [accountIdentity, setAccountIdentity] = useState<string | null>(null)
   const [authMessage, setAuthMessage] = useState(
     configured ? 'Entra local sign-in is available; backend authorization is not verified.' :
       'Entra frontend registration is required for sign-in. Demo mode is offline.',
@@ -32,16 +33,33 @@ export default function App() {
   useEffect(() => {
     if (!configured) return
     let alive = true
-    initializeAuth()
-      .then(getSignedInAccount)
-      .then((account) => {
+    let checking = false
+    async function syncIdentity() {
+      if (checking) return
+      checking = true
+      try {
+        const account = await getSignedInAccount()
+        if (!alive) return
+        setAccountIdentity(account?.homeAccountId ?? null)
+        setAccountName(account?.name ?? account?.username ?? null)
+      } catch {
         if (alive) {
-          setAccountName(account?.name ?? account?.username ?? null)
-          if (account) setAuthMessage('Signed in locally. API role and project access remain unverified.')
+          setAccountIdentity(null)
+          setAccountName(null)
         }
-      })
-      .catch(() => { if (alive) setAuthMessage('Sign-in initialization failed. Verify the SPA registration and redirect URI.') })
-    return () => { alive = false }
+      } finally { checking = false }
+    }
+    void initializeAuth().then(syncIdentity).catch(() => {
+      if (alive) setAuthMessage('Sign-in initialization failed. Verify the SPA registration and redirect URI.')
+    })
+    // Detect MSAL account changes made outside the local header controls.
+    const timer = window.setInterval(() => { void syncIdentity() }, 500)
+    window.addEventListener('focus', syncIdentity)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+      window.removeEventListener('focus', syncIdentity)
+    }
   }, [configured])
 
   async function requestToken() {
@@ -55,13 +73,23 @@ export default function App() {
   }
   async function login() {
     setBusy(true)
-    try { await signIn() }
-    catch { setAuthMessage('Microsoft sign-in failed. Check the Entra registration.'); setBusy(false) }
+    try {
+      await signIn()
+      const account = await getSignedInAccount()
+      setAccountIdentity(account?.homeAccountId ?? null)
+      setAccountName(account?.name ?? account?.username ?? null)
+    } catch {
+      setAuthMessage('Microsoft sign-in failed. Check the Entra registration.')
+    } finally { setBusy(false) }
   }
   async function logout() {
+    // Unmount SecureStudio and revoke any owned Blob URL before MSAL popup.
+    setAccountIdentity(null)
+    setAccountName(null)
     setBusy(true)
     try { await signOut() }
-    catch { setAuthMessage('Microsoft sign-out failed.'); setBusy(false) }
+    catch { setAuthMessage('Microsoft sign-out failed. Session content cleared.') }
+    finally { setBusy(false) }
   }
   function submitDemo(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -111,7 +139,7 @@ export default function App() {
         </div>
         <p className="muted" role="status">{authMessage}</p>
         {authenticatedJourneyEnabled ? <div className="mode-picker"><button className="secondary" type="button" aria-pressed={!realMode} onClick={() => setRealMode(false)}>Offline demo</button><button className="secondary" type="button" aria-pressed={realMode} onClick={() => setRealMode(true)}>Authenticated project</button></div> : null}
-        {view === 'studio' && realMode ? <SecureStudio /> : view === 'studio' ? (
+        {view === 'studio' && realMode ? <SecureStudio key={accountIdentity ?? 'signed-out'} accountIdentity={accountIdentity} /> : view === 'studio' ? (
           <div className="dashboard">
             <section className="panel" aria-labelledby="prompt-title">
               <h2 id="prompt-title">Create a video concept</h2>
