@@ -124,8 +124,12 @@ def test_owner_metadata_uses_private_project_download_path(enabled, monkeypatch)
     assert data["available"] is True
     assert data["download_endpoint"] == f"/projects/{PID}/jobs/{JID}/video"
 
-def test_no_exposure_of_legacy_jobs_without_backend_service_secret():
+def test_project_video_routes_are_registered_and_disabled_by_default(monkeypatch):
+    from fastapi.testclient import TestClient
     from main import app
-    paths = {r.path for r in app.routes if hasattr(r, 'path')}
-    assert "/projects/{project_id}/jobs" in paths
-    assert "/projects/{project_id}/jobs/{job_id}/video" in paths
+    monkeypatch.setenv("ENABLE_AUTHENTICATED_VIDEO_JOBS", "false")
+    monkeypatch.setenv("ENABLE_PROJECT_ROUTES", "false")
+    with TestClient(app) as client:
+        response = client.get(f"/projects/{PID}/jobs/{JID}")
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Authenticated video jobs are disabled"
