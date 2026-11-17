@@ -19,7 +19,7 @@
 | #41 | Private no-cache, no-sniff bounded MP4 delivery | `project_video_download` uses existing `get_video_resource` size guard and streaming cap |
 | #41 | Disabled-by-default user API and downloads | `ENABLE_AUTHENTICATED_VIDEO_JOBS`, `ENABLE_PROJECT_ROUTES`, `ENABLE_VIDEO_DOWNLOADS`, `ENABLE_SYNTHETIC_VIDEO_DISPATCH` all default off |
 | #42 | Provider-free 300s synthetic FFmpeg and bounded worker seam | `synthetic_job_renderer.py`, `synthetic_worker_cli.py`, offline real MP4 acceptance tests |
-| #46 | MSAL token handling improvements, OIDC/financial/security hardening | **Not ported** until independently reviewed PR #46; verify future merge conflicts with `frontend/src/entraAuth.ts` and backend auth modules. No separate token cache implementation in this PR |
+| #46 | MSAL token handling improvements, OIDC/financial/security hardening | **Ported only the identical `frontend/src/entraAuth.ts` security hardening** (memory-only MSAL cache and removal of the hard-coded Codespaces redirect) from PR #46. The remainder of #46 (financial, OIDC, controller) stays independent and unmerged |
 
 ## Deliberate exclusions and unresolved security gates
 
@@ -31,3 +31,7 @@
 - PR #46 overlaps Microsoft sign-in but remains independently draft; compatibility is required before enabling a real frontend workflow.
 
 **Decision:** Keep #40 and #41 open as draft records until this canonical #42 branch is independently reviewed and explicitly approved for merge. Do not close or merge any PR in this consolidation task.
+
+## Direct PR #46 overlap check
+
+Source PR #46 changes `frontend/src/entraAuth.ts`, while #42 also needs it for authenticated browser requests. The project API route code in #42 does **not** replace or weaken #46's finance/admin auth, provider receipt identity or Copilot author verification changes; those other modules are not copied or activated. For the shared file, #42 now contains the exact PR #46 contents. A later merge of #46 needs normal conflict resolution against this identical change and full CI. The rest of #46 requires independent security review and remains draft.
