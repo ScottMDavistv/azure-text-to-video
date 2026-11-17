@@ -37,7 +37,10 @@ try {
   browser.stderr.on('data', c => { stderr += c.toString() })
   const exitCode = await Promise.race([
     new Promise(resolve => browser.on('close', resolve)),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('Browser race timed out')), 60000)),
+    new Promise((_, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Browser race timed out')), 60000)
+      timeout.unref()
+    }),
   ])
   if (exitCode !== 0 || !stdout.includes('data-result="PASS"') || stdout.includes('data-result="FAIL"')) {
     throw new Error('Chromium session-race test failed (exit=' + exitCode + '): ' +
