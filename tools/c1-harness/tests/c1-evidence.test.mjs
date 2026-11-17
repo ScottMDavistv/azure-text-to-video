@@ -35,7 +35,8 @@ const offlineAllPass = () => report([
 ])
 const meta = {
   AUTH_SHA: AUTH, PW_SHA: SHA, HARNESS_SHA: 'a'.repeat(40), HARNESS_CLEAN: 'true',
-  CHECKOUT_VERIFIED: 'PASS', LOCALHOST: 'PASS', CHECKS: 'harness_clean', MODE: 'supervised',
+  CHECKOUT_VERIFIED: 'PASS', LOCALHOST: 'PASS', MODE: 'supervised',
+  CHECKS: 'harness_clean,auth_ancestor_and_approved_diff,exact_head_clean_worktree,localhost_loopback_only,ports_free,clean_after_dependency_install',
   PLAYWRIGHT_VERSION: '1.65.1', EXPECTED_PLAYWRIGHT_VERSION: '1.65.1',
   BROWSER_VERSION: '159.0.8154.6', EXPECTED_BROWSER_VERSION: '159.0.8154.6',
   BROWSER_HEADED_VERSION: '159.0.8154.6', EXPECTED_HEADED_BROWSER_VERSION: '159.0.8154.6',
@@ -326,4 +327,13 @@ test('L-2: per-test summary lines are sanitized and title-allowlisted', () => {
   assert.ok(lines.some(l => /PASS\s+M2 browser/.test(l)))
   assert.ok(lines.some(l => /FAIL\s+unprintable-title/.test(l)))
   assert.ok(!lines.join('\n').includes('alice'))
+})
+
+test('N-1: R1 FAILS when any mandatory preflight check is missing from the evidence', () => {
+  for (const drop of ['auth_ancestor_and_approved_diff', 'exact_head_clean_worktree', 'harness_clean', 'clean_after_dependency_install']) {
+    const CHECKS = meta.CHECKS.split(',').filter(c => c !== drop).join(',')
+    const r = ready({ meta: { ...meta, CHECKS } })
+    assert.equal(row(r, 'R1').verdict, 'FAIL', drop); assert.match(row(r, 'R1').detail, new RegExp('MISSING: ' + drop))
+    assert.equal(r.overall, 'FAIL')
+  }
 })

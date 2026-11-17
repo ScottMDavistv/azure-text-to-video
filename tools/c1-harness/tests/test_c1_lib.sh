@@ -410,6 +410,7 @@ supervised_requires_codespaces() {
   [[ "$out" == *'supervised mode runs only in a GitHub Codespace'* ]]
 }
 t 'supervised mode refuses to run outside a Codespace (no unverifiable privacy)' supervised_requires_codespaces
+t 'launcher never runs a verification as `cmd && check` (errexit-exempt, fail-open) (N-1)' bash -c '! grep -nE "^[^#]*&& check [a-z_]+" "$1"' _ "$HERE/../c1-session.sh"
 t 'launcher has no typed-confirmation privacy fallback' bash -c '! grep -q "Type PRIVATE" "$1" "$2"' _ "$HERE/../c1-session.sh" "$HERE/../lib/c1-lib.sh"
 
 echo '# harness diff scope'
