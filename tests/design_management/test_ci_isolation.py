@@ -171,6 +171,44 @@ class IsolationTests(unittest.TestCase):
         obj["jobs"]["checks"]["permissions"] = {"contents": "write"}
         self.assertTrue(self.evaluate(obj))
 
+    def test_scalar_and_list_push_triggers_are_untrusted(self):
+        for trigger in ("push", ["push"], ["workflow_dispatch", "push"]):
+            obj = copy.deepcopy(BASE)
+            obj["on"] = trigger
+            obj["permissions"] = {"contents": "write"}
+            self.assertTrue(checker.unsafe_push(obj), str(trigger))
+            self.assertTrue(self.evaluate(obj), str(trigger))
+            obj["permissions"] = {"contents": "read"}
+            obj["jobs"]["checks"]["steps"][0]["with"] = {}
+            self.assertTrue(self.evaluate(obj), str(trigger))
+
+    def test_inherited_workflow_env_secret_requires_main_and_environment(self):
+        obj = {"on": {"workflow_dispatch": None},
+               "permissions": {"contents": "read"},
+               "env": {"CREDENTIAL": "$" + "{{ secrets.DM_COPILOT_DISPATCH_TOKEN }}"},
+               "jobs": {"check": {"runs-on": "ubuntu-latest", "steps": []}}}
+        findings = self.evaluate(obj)
+        self.assertTrue(any("custom secret requires" in item for item in findings))
+        obj["jobs"]["check"]["environment"] = "design-management-control"
+        self.assertTrue(any("guarded on main" in item for item in self.evaluate(obj)))
+        obj["jobs"]["check"]["if"] = "github.ref == 'refs/heads/main'"
+        self.assertEqual(self.evaluate(obj), [])
+
+    def test_yaml_extension_included_in_scan(self):
+        import tempfile
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML unavailable")
+        with tempfile.TemporaryDirectory() as root:
+            folder = pathlib.Path(root) / ".github/workflows"
+            folder.mkdir(parents=True)
+            (folder / "unsafe.yaml").write_text(
+                "on: push\\npermissions:\\n  contents: write\\njobs:\\n"
+                "  bad:\\n    runs-on: ubuntu-latest\\n    steps: []\\n"
+            )
+            self.assertTrue(checker.scan(root))
+
     def test_real_workflow_tree_when_yaml_installed(self):
         try:
             import yaml
