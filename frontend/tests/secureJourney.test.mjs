@@ -13,7 +13,7 @@ function createFetch(steps, calls) {
     return {
       ok: next.ok !== false,
       status: next.status ?? 200,
-      headers: { get: name => name === 'content-type' ? (next.contentType ?? 'video/mp4') : null },
+      headers: { get: name => name === 'content-type' ? (next.contentType ?? 'video/mp4') : name === 'content-length' ? (next.contentLength ?? (next.blob ? String(next.blob.size) : null)) : null },
       json: async () => next.json,
       blob: async () => next.blob,
     }
@@ -154,4 +154,23 @@ test('rejects malicious declared MP4 size before buffering response', async () =
   const api = createVideoApi({ tokenProvider: async () => 'signed', fetcher })
   await assert.rejects(api.download(PROJECT, JOB), { status: 502 })
   assert.equal(blobRead, false)
+})
+
+test('rejects missing MP4 length before buffering', async () => {
+  const metadata = { job_id: JOB, status: 'completed', available: true,
+    content_type: 'video/mp4', size_bytes: 3,
+    download_endpoint: '/projects/' + PROJECT + '/jobs/' + JOB + '/video' }
+  let attempts = 0
+  let buffered = false
+  const fetcher = async () => {
+    if (++attempts === 1) return { ok: true, json: async () => metadata }
+    return {
+      ok: true,
+      headers: { get: name => name === 'content-type' ? 'video/mp4' : null },
+      blob: async () => { buffered = true; return new Blob(['mp4']) },
+    }
+  }
+  const api = createVideoApi({ tokenProvider: async () => 'signed', fetcher })
+  await assert.rejects(api.download(PROJECT, JOB), { status: 502 })
+  assert.equal(buffered, false)
 })
