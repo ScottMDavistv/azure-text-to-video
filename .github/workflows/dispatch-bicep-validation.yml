@@ -1,0 +1,46 @@
+name: Validate Dispatch Reconciliation Bicep
+
+on:
+  pull_request:
+    paths:
+      - 'infra/dispatch-reconcile-job.bicep'
+      - 'infra/dispatch-recovery-alerts.bicep'
+      - '.github/workflows/dispatch-bicep-validation.yml'
+      - 'scripts/validate-dispatch-reconciliation-readiness.py'
+      - 'backend/tests/test_dispatch_deployment_readiness.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch-bicep-validation:
+    name: Validate dispatch Bicep templates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Bicep CLI
+        run: |
+          curl -fL --retry 3 -o bicep https://github.com/Azure/bicep/releases/latest/download/bicep-linux-x64
+          chmod +x ./bicep
+          sudo mv ./bicep /usr/local/bin/bicep
+          bicep --version
+
+      - name: Static fail-closed release policy and negative-path tests
+        run: |
+          python scripts/validate-dispatch-reconciliation-readiness.py
+          python -m pip install 'pytest>=8,<10'
+          python -m pytest -q backend/tests/test_dispatch_deployment_readiness.py
+
+      - name: Compile scheduled reconciliation job
+        run: bicep build infra/dispatch-reconcile-job.bicep --stdout > /dev/null
+
+      - name: Compile Azure Monitor anomaly alerts
+        run: bicep build infra/dispatch-recovery-alerts.bicep --stdout > /dev/null
+
+      - name: Summarize validation only
+        run: |
+          echo 'Bicep templates compile; no Azure deployment or paid provider actions occurred.' >> "$GITHUB_STEP_SUMMARY"
