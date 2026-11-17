@@ -323,3 +323,90 @@ def test_noncanonical_receipts_rejected_without_budget_movement(table, invalid_r
     assert row(table, "global:fal")["spentCents"] == 0
     assert row(table, "global:fal")["reservedCents"] == 60
     assert inspect_reservation(table, job)["state"] == "reserved"
+
+
+def test_signed_two_admin_budget_approval_and_revocation(table, monkeypatch):
+    """Enforce real signed caller identities and atomic two-admin approval."""
+    import hashlib
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import MagicMock
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from finance_authorization import approve_increase_verified
+
+    tenant = "773e9051-c546-4b75-9432-90f4f8242660"
+    app = "a5a09b74-aead-455f-9de7-9b844c8a8465"
+    issuer = f"https://login.microsoftonline.com/{tenant}/v2.0"
+    monkeypatch.setenv("PROJECT_OIDC_ISSUER", issuer)
+    monkeypatch.setenv("PROJECT_OIDC_AUDIENCE", f"api://{app}")
+    monkeypatch.setenv("PROJECT_OIDC_JWKS_URL",
+                       f"https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys")
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    client = MagicMock()
+    client.get_signing_key_from_jwt.return_value = MagicMock(key=key.public_key())
+    def factory(_):
+        return client
+    def token(subject):
+        current = datetime.now(timezone.utc)
+        return jwt.encode({
+            "iss": issuer, "aud": f"api://{app}", "tid": tenant,
+            "sub": subject, "iat": int(current.timestamp()),
+            "exp": int((current + timedelta(minutes=30)).timestamp()),
+            "scp": "access_as_user",
+        }, key, algorithm="RS256")
+    ids = {subject: uid() for subject in ("requester", "first", "second")}
+    digests = {subject: hashlib.sha256(
+        (issuer + "|" + subject).encode("utf-8")).hexdigest()
+        for subject in ids}
+    for subject in ids:
+        table.create_entity({"PartitionKey": "project-oidc-users",
+                             "RowKey": digests[subject], "active": True,
+                             "userId": ids[subject]})
+    allowed = frozenset(digests.values())
+    project = uid()
+    seed(table, project)
+
+    def new_request():
+        request_id = uid()
+        table.create_entity({
+            "PartitionKey": PARTITION, "RowKey": "increase:" + request_id,
+            "scope": "global:fal", "requesterId": ids["requester"],
+            "proposedCents": 11000, "status": "pending",
+            "firstApproverId": "", "secondApproverId": "",
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+        })
+        return request_id
+
+    request_id = new_request()
+    assert approve_increase_verified(
+        table, request_id=request_id, access_token=token("first"),
+        allowed_admin_digests=allowed,
+        jwks_client_factory=factory) == "awaiting_second_approval"
+    with pytest.raises(FinanceDenied):
+        approve_increase_verified(
+            table, request_id=request_id, access_token=token("first"),
+            allowed_admin_digests=allowed, jwks_client_factory=factory)
+    assert approve_increase_verified(
+        table, request_id=request_id, access_token=token("second"),
+        allowed_admin_digests=allowed, jwks_client_factory=factory) == "approved"
+    assert row(table, "global:fal")["ceilingCents"] == 11000
+    with pytest.raises(FinanceDenied):
+        approve_increase_verified(
+            table, request_id=request_id, access_token=token("second"),
+            allowed_admin_digests=allowed, jwks_client_factory=factory)
+
+    revoked_request = new_request()
+    assert approve_increase_verified(
+        table, request_id=revoked_request, access_token=token("first"),
+        allowed_admin_digests=allowed,
+        jwks_client_factory=factory) == "awaiting_second_approval"
+    mapping = table.get_entity(partition_key="project-oidc-users",
+                               row_key=digests["first"])
+    mapping["active"] = False
+    table.update_entity(mapping)
+    with pytest.raises(FinanceDenied, match="revoked"):
+        approve_increase_verified(
+            table, request_id=revoked_request, access_token=token("second"),
+            allowed_admin_digests=allowed, jwks_client_factory=factory)
+    assert row(table, "increase:" + revoked_request)["status"] == "pending"
+    assert row(table, "global:fal")["ceilingCents"] == 11000
