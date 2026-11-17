@@ -106,6 +106,7 @@ jobs:
 
       - name: Build and smoke-test non-billable API container
         run: |
+          docker build --check -f backend/Dockerfile.worker backend
           docker build -t render-stage-a-ci:local backend
           docker run --rm --network none \
             -e VIDEO_PROVIDER=disabled \
