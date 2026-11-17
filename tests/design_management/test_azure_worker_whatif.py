@@ -191,6 +191,75 @@ class WorkerWhatIfTests(unittest.TestCase):
                 self.assertFalse(data["deployment_performed"])
                 self.assertFalse(data["iam_modified"])
 
+    def test_failure_stage_is_fixed_and_no_raw_azure_error_escapes(self):
+        secret = "ACCESS-TOKEN-OR-SENSITIVE-ARM-DATA"
+        cases = [
+            (0, "account-inspection"),
+            (1, "worker-resource-read"),
+            (2, "arm-whatif-preview"),
+        ]
+        for fail_index, stage in cases:
+            with self.subTest(stage=stage):
+                responses = [
+                    {"id": whatif.SUBSCRIPTION},
+                    job(),
+                    preview(),
+                ]
+                calls = []
+                def runner(argv, **kwargs):
+                    index = len(calls)
+                    calls.append(argv)
+                    if index == fail_index:
+                        return SimpleNamespace(returncode=1, stdout=secret, stderr=secret)
+                    return SimpleNamespace(returncode=0, stdout=json.dumps(responses[index]), stderr="")
+                with tempfile.TemporaryDirectory() as tmp:
+                    source = pathlib.Path(tmp) / "worker-job.bicep"
+                    source.write_text(SAFE_TEMPLATE)
+                    with self.assertRaises(whatif.Blocked) as failure:
+                        whatif.execute(runner=runner, environment=ENV, template_path=source)
+                self.assertEqual(failure.exception.stage, stage)
+                sanitized = whatif.report(blocked=str(failure.exception),
+                                          stage=failure.exception.stage)
+                self.assertEqual(sanitized["diagnostic_stage"], stage)
+                self.assertEqual(sanitized["state"], "blocked-unverified")
+                self.assertNotIn(secret, json.dumps(sanitized))
+                self.assertFalse(sanitized["deployment_performed"])
+                self.assertEqual(len(calls), fail_index + 1)
+
+    def test_unexpected_diff_is_classification_stage_only(self):
+        responses = [
+            {"id": whatif.SUBSCRIPTION},
+            job(),
+            {"changes": [{"resourceId": whatif.JOB_ID,
+                          "changeType": "Delete"}]},
+        ]
+        def runner(argv, **kwargs):
+            return SimpleNamespace(returncode=0, stdout=json.dumps(responses.pop(0)), stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            source = pathlib.Path(tmp) / "worker-job.bicep"
+            source.write_text(SAFE_TEMPLATE)
+            with self.assertRaises(whatif.Blocked) as failure:
+                whatif.execute(runner=runner, environment=ENV, template_path=source)
+        self.assertEqual(failure.exception.stage, "image-only-diff-classification")
+
+    def test_unapproved_diagnostic_stage_fails_closed(self):
+        with self.assertRaises(whatif.Blocked):
+            whatif.run_json(["az", "account", "show"], stage="../sensitive-data")
+        with self.assertRaises(ValueError):
+            whatif.report(blocked="unknown", stage="raw-stderr")
+
+    def test_diagnostic_report_artifact_contains_only_stage_and_fixed_blocker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(whatif, "EVIDENCE", pathlib.Path(tmp) / "data.json"), \
+                 patch.object(whatif, "SUMMARY", pathlib.Path(tmp) / "data.md"):
+                whatif.write_report(whatif.report(
+                    blocked="Azure operation unavailable or not permitted by current identity",
+                    stage="worker-resource-read"))
+                report = json.loads(whatif.EVIDENCE.read_text())
+                self.assertEqual(report["diagnostic_stage"], "worker-resource-read")
+                self.assertIn("worker-resource-read", whatif.SUMMARY.read_text())
+                self.assertNotIn("stderr", whatif.SUMMARY.read_text().lower())
+
     def test_workflow_main_only_manual_no_write_actions(self):
         workflow = (ROOT / ".github/workflows/azure-worker-whatif.yml").read_text()
         self.assertIn("workflow_dispatch:", workflow)

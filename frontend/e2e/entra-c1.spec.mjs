@@ -1,28 +1,43 @@
 import { test, expect } from '@playwright/test'
-import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { createServer } from 'node:http'
+import { loadSources, sourceViolations } from './c1-source-policy.mjs'
+import {
+  live, sha, checkoutDirty, allowedHmrOrigins, allowedRequest,
+  observeContext, assertBuild, assertMemoryOnly,
+} from './c1-guards.mjs'
 
-const live = process.env.C1_LIVE === '1'
 const unconfigured = process.env.C1_UNCONFIGURED === '1'
-const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
-const checkoutDirty = Boolean(execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' }).trim())
 const tenant = '773e9051-c546-4b75-9432-90f4f8242660'
 const audience = 'a5a09b74-aead-455f-9de7-9b844c8a8465'
 const scope = 'api://' + audience + '/access_as_user'
-const authSource = readFileSync(fileURLToPath(new URL('../src/entraAuth.ts', import.meta.url)), 'utf8')
-const appSource = readFileSync(fileURLToPath(new URL('../src/App.tsx', import.meta.url)), 'utf8')
-const allowedHosts = new Set([
-  'localhost', '127.0.0.1', 'login.microsoftonline.com',
-  'login.live.com', 'aadcdn.msftauth.net', 'aadcdn.msauth.net',
-  'logincdn.msftauth.net', 'secure.aadcdn.microsoftonline-p.com',
-])
 
-const allowedLocalOrigins = new Set(['http://localhost:5173', 'http://127.0.0.1:5173'])
-const allowedHmrOrigins = new Set(['ws://localhost:5173', 'ws://127.0.0.1:5173'])
-function allowedRequest(url) {
-  return allowedLocalOrigins.has(url.origin) || (url.protocol === 'https:' && allowedHosts.has(url.hostname) && !['localhost', '127.0.0.1'].includes(url.hostname))
-}
+
+test('C1 exact-host regression: Microsoft login host is HTTPS-only; spoofed hosts stay denied', () => {
+  // These are URL policy assertions only; no requests are sent to Microsoft.
+  for (const allowed of [
+    'https://login.microsoftonline.com/773e9051-c546-4b75-9432-90f4f8242660/',
+    'https://login.microsoft.com/773e9051-c546-4b75-9432-90f4f8242660/',
+  ]) {
+    expect(allowedRequest(new URL(allowed)), allowed).toBe(true)
+  }
+  for (const forbidden of [
+    'http://login.microsoft.com/',
+    'https://login.microsoft.com.evil.example/',
+    'https://notlogin.microsoft.com/',
+    'https://login.microsoft.com.attacker.invalid/',
+    'https://unapproved.example/',
+    'https://localhost:5174/',
+    'http://127.0.0.1:5174/',
+    'ws://login.microsoft.com/',
+    'wss://login.microsoft.com/',
+    'https://login.microsoft.com:8443/',
+    'https://login.microsoftonline.com:444/',
+  ]) {
+    expect(allowedRequest(new URL(forbidden)), forbidden).toBe(false)
+  }
+  expect(allowedHmrOrigins.has('wss://login.microsoft.com')).toBe(false)
+  expect(allowedHmrOrigins.has('ws://unapproved.example')).toBe(false)
+})
 
 
 // Evidence contains only a commit identifier, browser version, timestamps and
@@ -44,95 +59,10 @@ test.afterAll(async () => {
 })
 
 function assertSourceInvariants() {
-  // Offline structural checks are intentionally narrow; a real login remains required.
-  expect(authSource).toMatch(/cacheLocation:\s*['"]memoryStorage['"]/)
-  expect(authSource).toMatch(/storeAuthStateInCookie:\s*false/)
-  expect(authSource).toMatch(/loginPopup\s*\(/)
-  expect(authSource).toMatch(/logoutPopup\s*\(/)
-  expect(authSource).toMatch(/acquireTokenPopup\s*\(/)
-  expect(authSource).not.toMatch(/acquireTokenRedirect\s*\(|loginRedirect\s*\(|logoutRedirect\s*\(/)
-  expect(authSource).toMatch(/redirectUri:\s*getRedirectUri\s*\(\s*window\.location\.origin\s*\)/)
-  expect(authSource).not.toMatch(/\bauthority:\s*[^\n]*\/common\b/i)
-  expect(authSource).not.toMatch(/\bauthority:\s*[^\n]*\/organizations\b/i)
-  expect(appSource).not.toMatch(/\bfetch\s*\(\s*['"]https?:\/\//)
-  // No explicit browser storage reads/writes in auth application code.
-  for (const source of [authSource, appSource]) {
-    expect(source).not.toMatch(/\b(?:localStorage|sessionStorage)\s*(?:\.|\[)/)
-  }
-}
-
-async function observeContext(context) {
-  const problems = []
-  const requestHosts = new Set()
-  const credentialPattern = /Bearer\s+[\w.-]{24,}|eyJ[A-Za-z0-9_-]{20,}\.|client_secret\s*[:=]/i
-  const listen = page => {
-    page.on('console', message => {
-      if (credentialPattern.test(message.text())) problems.push('Credential-like browser console output')
-    })
-    page.on('pageerror', error => {
-      if (credentialPattern.test(error.message)) problems.push('Credential-like browser page error')
-    })
-    page.on('websocket', socket => {
-      const url = new URL(socket.url())
-      if (!allowedHmrOrigins.has(url.origin)) problems.push('Unauthorized WebSocket host ' + url.hostname)
-    })
-  }
-  for (const page of context.pages()) listen(page)
-  context.on('page', listen)
-  context.on('request', request => {
-    const url = new URL(request.url())
-    requestHosts.add(url.hostname)
-    if (!allowedRequest(url)) problems.push('Unexpected request host ' + url.hostname)
-    if (!allowedRequest(url) && request.headers().authorization) problems.push('Authorization header to unauthorized host ' + url.hostname)
-  })
-  await context.routeWebSocket(/.*/, async route => {
-    const url = new URL(route.url())
-    if (allowedHmrOrigins.has(url.origin)) {
-      await route.connectToServer()
-    } else {
-      problems.push('Blocked unauthorized WebSocket host ' + url.hostname)
-      route.close()
-    }
-  })
-  await context.route('**/*', async route => {
-    const url = new URL(route.request().url())
-    const local = allowedLocalOrigins.has(url.origin)
-    if ((!live && !local) || (live && !allowedRequest(url))) {
-      if (!allowedRequest(url)) problems.push('Blocked unauthorized HTTP origin ' + url.hostname)
-      await route.abort('blockedbyclient')
-    } else {
-      await route.continue()
-    }
-  })
-  return { problems, requestHosts }
-}
-
-async function assertBuild(page) {
-  const served = await page.evaluate(async () => {
-    const { c1BuildSha, c1BuildDirty } = await import('/src/c1BuildInfo.ts')
-    return { sha: c1BuildSha, dirty: c1BuildDirty }
-  })
-  expect(served.sha).toBe(sha)
-  expect(served.dirty).toBe(checkoutDirty)
-}
-
-async function assertMemoryOnly(page, context) {
-  const result = await page.evaluate(async () => {
-    const local = Object.entries(localStorage)
-    const session = Object.entries(sessionStorage)
-    const jwt = /eyJ[A-Za-z0-9_-]{20,}\./
-    const forbidden = /token|secret|bearer/i
-    const allowedSessionKeys = new Set(['msal.interaction.status', 'msal.interaction.inProgress'])
-    return {
-      localEmpty: local.length === 0,
-      sessionSafe: session.every(([key, value]) => allowedSessionKeys.has(key) && value.length < 128 && !forbidden.test(value) && !jwt.test(value)),
-      domSafe: !jwt.test(document.body.innerText),
-      indexedDbEmpty: (await indexedDB.databases()).length === 0,
-    }
-  })
-  const localCookies = await context.cookies(['http://localhost:5173', 'http://127.0.0.1:5173'])
-  expect(localCookies).toEqual([])
-  expect(result).toEqual({ localEmpty: true, sessionSafe: true, domSafe: true, indexedDbEmpty: true })
+  // Static structural checks (not runtime evidence) over entraAuth.ts,
+  // entraAuthCore.ts and App.tsx; fails closed if auth moves to an
+  // uninspected file. See c1-source-policy.mjs.
+  expect(sourceViolations(loadSources())).toEqual([])
 }
 
 test('M-1/M-4/M-5: configured auth runtime is tenant-scoped, memory-only, correctly redirected, no unauthorized egress', async ({ page, context }) => {
@@ -304,19 +234,44 @@ test('M5 browser: signOut invokes MSAL logoutPopup for the selected account', as
   expect(audit.problems).toEqual([])
 })
 
-test('M6-B/M6-C browser: egress firewall blocks wrong-port HTTP and external WebSockets', async ({ page, context }) => {
+// Local zero-delivery sink: counts every HTTP request and WebSocket upgrade.
+async function startSink() {
+  const hits = []
+  const server = createServer((request, response) => { hits.push('http ' + request.method); response.end('c1-sink') })
+  server.on('upgrade', (_request, socket) => { hits.push('ws upgrade'); socket.destroy() })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  return { port: server.address().port, hits, close: () => new Promise(resolve => server.close(resolve)) }
+}
+
+test('M6-B/M6-C browser: egress firewall blocks wrong-port HTTP and WebSockets with zero delivery (positive-control sink)', async ({ page, context, browser }) => {
   test.skip(live || unconfigured, 'Offline synthetic egress probe only')
-  const audit = await observeContext(context)
-  await page.goto('/')
-  await page.evaluate(() => {
-    void fetch('http://localhost:8000/api/jobs', { method: 'POST' }).catch(() => {})
-    const socket = new WebSocket('ws://evil.c1test:9999/ws')
-    socket.onerror = () => {}
-  })
-  await expect.poll(() => audit.problems.some(p => p.includes('Blocked unauthorized HTTP origin localhost'))).toBe(true)
-  await expect.poll(() => audit.problems.some(p => p.includes('Blocked unauthorized WebSocket host evil.c1test'))).toBe(true)
-  // Block decisions occur prior to delivery. An independent sink test is still
-  // required to prove zero delivered packets in the adversarial mutation run.
+  const sink = await startSink()
+  try {
+    // Positive control: an unguarded browser context CAN reach the sink, so a
+    // zero count below proves blocking rather than an unreachable target.
+    const control = await browser.newContext()
+    const controlPage = await control.newPage()
+    await controlPage.goto('http://127.0.0.1:' + sink.port + '/c1-positive-control')
+    await control.close()
+    expect(sink.hits.length).toBeGreaterThan(0)
+    sink.hits.length = 0
+
+    const audit = await observeContext(context)
+    await page.goto('/')
+    await page.evaluate(port => {
+      void fetch('http://localhost:' + port + '/api/jobs', { method: 'POST', body: 'c1' }).catch(() => {})
+      void fetch('http://localhost:8000/api/jobs', { method: 'POST' }).catch(() => {})
+      const socket = new WebSocket('ws://127.0.0.1:' + port + '/ws')
+      socket.onerror = () => {}
+    }, sink.port)
+    await expect.poll(() => audit.problems.some(p => p === 'Blocked unauthorized HTTP origin http://localhost:' + sink.port)).toBe(true)
+    await expect.poll(() => audit.problems.some(p => p === 'Blocked unauthorized HTTP origin http://localhost:8000')).toBe(true)
+    await expect.poll(() => audit.problems.some(p => p === 'Blocked unauthorized WebSocket origin ws://127.0.0.1:' + sink.port)).toBe(true)
+    await page.waitForTimeout(500)
+    expect(sink.hits).toEqual([])
+  } finally {
+    await sink.close()
+  }
 })
 
 test('M-1: missing SPA configuration is fail-closed', async ({ page, context }) => {

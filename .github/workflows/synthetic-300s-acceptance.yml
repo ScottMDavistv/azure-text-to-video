@@ -35,6 +35,10 @@ jobs:
           sudo apt-get install -y ffmpeg
           command -v ffmpeg
           command -v ffprobe
+      - name: Verify project worker synthetic scene-plan renderer outputs actual MP4
+        env:
+          SYNTHETIC_RUNTIME_ACCEPTANCE: '1'
+        run: python -m unittest discover -s tests/design_management -p 'test_synthetic_job_renderer.py' -v
       - name: Generate five-minute synthetic MP4 and validate streams/duration
         run: python scripts/synthetic_300s_render.py --duration 300 --segment 60
       - name: Store nonbillable acceptance evidence
