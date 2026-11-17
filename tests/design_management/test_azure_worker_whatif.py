@@ -260,6 +260,90 @@ class WorkerWhatIfTests(unittest.TestCase):
                 self.assertIn("worker-resource-read", whatif.SUMMARY.read_text())
                 self.assertNotIn("stderr", whatif.SUMMARY.read_text().lower())
 
+    def test_only_structured_azure_arm_codes_are_classified(self):
+        expected = {
+            "ERROR: (AuthorizationFailed) Sensitive details": "rbac-denied",
+            "(LinkedAuthorizationFailed) scope hidden": "rbac-denied",
+            '{"error":{"code":"AuthorizationFailed","message":"secret"}}': "rbac-denied",
+            "ERROR: (InvalidTemplate) details": "template-validation",
+            "(InvalidTemplateDeployment) details": "template-validation",
+            '{"error":{"code":"InvalidDeploymentParameter","message":"secret"}}': "template-validation",
+            "(BicepError) compilation": "template-validation",
+            "ERROR: (SomeOtherError) AuthorizationFailed in details": "unknown",
+            "AuthorizationFailed in body of message": "unknown",
+            '{"message":"(AuthorizationFailed) narrative only"}': "unknown",
+            '{"error":{"message":"AuthorizationFailed"}}': "unknown",
+            '{"error":{"code":"AuthorizationFailedExploit"}}': "unknown",
+            "(AuthorizationFailedExtra) content": "unknown",
+            "": "unknown",
+        }
+        for stderr, category in expected.items():
+            with self.subTest(stderr=stderr[:50]):
+                self.assertEqual(whatif.classify_azure_failure(stderr), category)
+        self.assertEqual(whatif.classify_azure_failure(None), "unknown")
+        self.assertEqual(whatif.classify_azure_failure("X" * 65537), "unknown")
+
+    def test_arm_preview_denial_reports_only_allowlisted_category(self):
+        secret = "RAW-IDENTITY-SCOPE-SECRET"
+        calls = []
+        def runner(argv, **kwargs):
+            index = len(calls)
+            calls.append(argv)
+            if index == 0:
+                return SimpleNamespace(returncode=0, stdout=json.dumps(
+                    {"id": whatif.SUBSCRIPTION}), stderr="")
+            if index == 1:
+                return SimpleNamespace(returncode=0, stdout=json.dumps(job()), stderr="")
+            return SimpleNamespace(returncode=1, stdout=secret,
+                                   stderr="ERROR: (AuthorizationFailed) " + secret)
+        with tempfile.TemporaryDirectory() as tmp:
+            source = pathlib.Path(tmp) / "worker-job.bicep"
+            source.write_text(SAFE_TEMPLATE)
+            with self.assertRaises(whatif.Blocked) as error:
+                whatif.execute(runner=runner, environment=ENV, template_path=source)
+        self.assertEqual(error.exception.stage, "arm-whatif-preview")
+        self.assertEqual(error.exception.error_category, "rbac-denied")
+        data = whatif.report(blocked=str(error.exception), stage=error.exception.stage,
+                             error_category=error.exception.error_category)
+        self.assertEqual(data["arm_error_category"], "rbac-denied")
+        self.assertEqual(data["state"], "blocked-unverified")
+        self.assertIsNone(data["finding"])
+        self.assertNotIn(secret, json.dumps(data))
+        self.assertFalse(data["deployment_performed"])
+        self.assertEqual(len(calls), 3)
+
+    def test_ambiguous_cli_failure_never_claims_iam_denial(self):
+        for stderr in ("failed with status 1", "AuthorizationFailed mentioned in message",
+                       "ERROR: (UnknownCode) (AuthorizationFailed)"):
+            def runner(argv, **kwargs):
+                return SimpleNamespace(returncode=1, stdout="TOKEN",
+                                       stderr=stderr)
+            with self.assertRaises(whatif.Blocked) as error:
+                whatif.run_json(["az", "deployment", "group", "what-if"],
+                                runner=runner, stage="arm-whatif-preview")
+            self.assertEqual(error.exception.error_category, "unknown")
+            self.assertNotIn(stderr, str(error.exception))
+
+    def test_timeout_or_missing_cli_classified_only_as_unavailable(self):
+        def missing(argv, **kwargs):
+            raise FileNotFoundError("AZURE-SECRET")
+        with self.assertRaises(whatif.Blocked) as error:
+            whatif.run_json(["az", "deployment", "group", "what-if"],
+                            runner=missing, stage="arm-whatif-preview")
+        self.assertEqual(error.exception.error_category, "cli-unavailable")
+        self.assertNotIn("AZURE-SECRET", str(error.exception))
+
+    def test_rbac_conclusion_cannot_be_published_for_non_arm_stage(self):
+        with self.assertRaises(ValueError):
+            whatif.report(blocked="blocked", stage="worker-resource-read",
+                          error_category="rbac-denied")
+        with self.assertRaises(ValueError):
+            whatif.report(blocked="blocked", stage="arm-whatif-preview",
+                          error_category="untrusted-raw-error")
+        self.assertEqual(whatif.report(blocked="blocked", stage="arm-whatif-preview",
+                                       error_category="unknown")["arm_error_category"],
+                         "unknown")
+
     def test_workflow_main_only_manual_no_write_actions(self):
         workflow = (ROOT / ".github/workflows/azure-worker-whatif.yml").read_text()
         self.assertIn("workflow_dispatch:", workflow)
