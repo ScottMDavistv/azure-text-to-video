@@ -369,6 +369,7 @@ if command -v openssl >/dev/null && command -v curl >/dev/null && command -v pyt
   t 'public port: unauthenticated probe reaches decoy -> refused, decoy stopped' decoy_expect public public
   t 'sign-in interstitial (unauthenticated 2xx) is treated as exposure -> refused' decoy_expect interstitial public
   t 'port not forwarded (502) -> unverified, refused after timeout' decoy_expect down unverified
+  t 'ambiguous unauthenticated 503 with successful token probe -> unverified, refused' decoy_expect ambiguous unverified
   t 'authenticated probe reaches a different service (no nonce) -> unverified' decoy_expect wrongport unverified
   t 'wrong token -> authenticated probe never reaches decoy -> unverified' decoy_expect private unverified "$PV/bad.hdr"
   # shellcheck disable=SC2034  # C1_PRIVACY_TIMEOUT is read by the library
