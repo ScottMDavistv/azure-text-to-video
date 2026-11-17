@@ -37,6 +37,8 @@ def process_owned_synthetic_job(job_id, *, renderer=render_scene_plan,
         validate_id(job.get("createdBy"))
     except (ValueError, TypeError):
         raise SyntheticRenderError("Refusing legacy or non-project-owned job") from None
+    if job.get("dispatchQueueType") != "synthetic":
+        raise SyntheticRenderError("Synthetic-only queue job classification required")
     if job.get("status") != "queued":
         return {"job_id": canonical, "status": "skipped"}
     return process_synthetic_job(canonical, renderer, artifact_writer=artifact_writer)
