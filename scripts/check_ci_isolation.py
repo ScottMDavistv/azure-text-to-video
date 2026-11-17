@@ -217,6 +217,15 @@ def examine(path, doc, raw=""):
                                                   not re.fullmatch(r"[0-9a-f]{40}", ref)) \
                         or "repository" in opts:
                     problems.append(where + ": privileged/base-context job checks out untrusted ref")
+        if privileged and base_context:
+            # workflow_run executes as main with main's environments; it must never
+            # consume the triggering (possibly PR) run's code, refs or artifacts,
+            # including via env/shell indirection that checkout-ref checks cannot see.
+            if any(str(st.get("uses", "")).lower().startswith("actions/download-artifact@")
+                   for st in steps if isinstance(st, dict)):
+                problems.append(where + ": privileged base-context job downloads artifacts")
+            if any(re.search(r"\bgithub\.event\.workflow_run\b", e, re.I) for e in expressions(job)):
+                problems.append(where + ": privileged base-context job reads workflow_run payload")
         if path == ".github/workflows/autonomous-engineering.yml":
             if secrets & {"COPILOT_DISPATCH_TOKEN", "AUTO_MERGE_USER_TOKEN"}:
                 problems.append(where + ": legacy repository secret references forbidden")

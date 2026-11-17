@@ -268,6 +268,22 @@ class AdversarialIsolationTests(unittest.TestCase):
                        "persist-credentials": "false"}}]})}}
         self.assertTrue(any("untrusted ref" in p for p in self.evaluate(obj)))
 
+    def test_workflow_run_cannot_consume_pr_artifacts_or_payload_indirectly(self):
+        def doc(steps):
+            return {"on": {"workflow_run": {"workflows": ["CI"]}}, "permissions": {"contents": "read"},
+                    "jobs": {"j": self.job(**{"if": "github.ref == 'refs/heads/main'",
+                                              "environment": "prod", "steps": steps})}}
+        secret = {"T": E + "secrets.AZ }}"}
+        artifact = [{"uses": "actions/download-artifact@v4",
+                     "with": {"run-id": "1", "github-token": E + "secrets.GITHUB_TOKEN }}"}},
+                    {"run": "bash out/run.sh", "env": secret}]
+        indirect = [{"uses": "actions/checkout@v4", "with": {"persist-credentials": "false"}},
+                    {"run": "git checkout $S && make",
+                     "env": dict(secret, S=E + "github.event.workflow_run.head_sha }}")}]
+        self.assertTrue(any("downloads artifacts" in p for p in self.evaluate(doc(artifact))))
+        self.assertTrue(any("workflow_run payload" in p for p in self.evaluate(doc(indirect))))
+        self.assertEqual(self.evaluate(doc([{"run": "make", "env": secret}])), [])
+
     def test_event_text_script_injection_rejected(self):
         for field in ("github.event.issue.title", "github.event.pull_request.body",
                       "github.head_ref", "github.event.workflow_run.head_branch",
