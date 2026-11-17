@@ -260,6 +260,30 @@ def test_same_provider_request_different_receipts_cannot_charge_two_jobs(table):
     assert row(table, provider_request_key("fal", request_id))["jobId"] == first
 
 
+
+@pytest.mark.parametrize("variant", ["REQUEST-CASE-1", "Request-Case-1", "ＲＥＱＵＥＳＴ-ＣＡＳＥ-１"])
+def test_provider_request_case_variant_cannot_settle_second_job(table, variant):
+    project, first, second = uid(), uid(), uid()
+    seed(table, project)
+    reserve(table, project, first, 100)
+    reserve(table, project, second, 100)
+    original = "request-case-1"
+    settle_unique_receipt(
+        table, job_id=first, actual_cents=60,
+        provider_request_id=original, receipt_id="case-receipt-first",
+        provider_receipt=evidence(first, original, "case-receipt-first", 60),
+        verify_provider_receipt=receipt_ok)
+    with pytest.raises(FinanceDenied):
+        settle_unique_receipt(
+            table, job_id=second, actual_cents=60,
+            provider_request_id=variant, receipt_id="case-receipt-second",
+            provider_receipt=evidence(second, variant, "case-receipt-second", 60),
+            verify_provider_receipt=receipt_ok)
+    assert row(table, "global:fal")["spentCents"] == 60
+    assert row(table, "global:fal")["reservedCents"] == 100
+    assert inspect_reservation(table, second)["state"] == "reserved"
+    assert row(table, provider_request_key("fal", variant))["jobId"] == first
+
 def test_concurrent_same_request_distinct_receipts_one_winner(table):
     project, first, second = uid(), uid(), uid()
     seed(table, project)
