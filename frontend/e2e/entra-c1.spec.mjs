@@ -52,22 +52,23 @@ async function observeContext(context) {
   context.on('request', request => {
     const url = new URL(request.url())
     requestHosts.add(url.hostname)
-    if (!allowedHosts.has(url.hostname)) problems.push('Unexpected external request host')
-    if (!['localhost', '127.0.0.1', ...Array.from(allowedHosts).filter(x => x !== 'localhost' && x !== '127.0.0.1')].includes(url.hostname)) {
-      if (request.headers().authorization) problems.push('Authorization header sent to unapproved host')
+    if (!allowedHosts.has(url.hostname) || (!['localhost', '127.0.0.1'].includes(url.hostname) && url.protocol !== 'https:')) {
+      problems.push('Unexpected external request host or protocol')
     }
   })
-  // Synthetic/offline mode NEVER allows an outbound request, including Microsoft endpoints.
-  if (!live) {
-    await context.route('**/*', async route => {
-      const url = new URL(route.request().url())
-      if (!['localhost', '127.0.0.1'].includes(url.hostname)) {
-        await route.abort()
-      } else {
-        await route.continue()
-      }
-    })
-  }
+  // Install the deny route BEFORE navigation. Monitor popups and block actual
+  // unauthorized egress instead of observing it after delivery.
+  await context.route('**/*', async route => {
+    const url = new URL(route.request().url())
+    const local = ['localhost', '127.0.0.1'].includes(url.hostname)
+    const authorizedMicrosoft = allowedHosts.has(url.hostname) && url.protocol === 'https:'
+    if (!local && (!live || !authorizedMicrosoft)) {
+      if (live) problems.push('Blocked unauthorized egress')
+      await route.abort('blockedbyclient')
+    } else {
+      await route.continue()
+    }
+  })
   return { problems, requestHosts }
 }
 
@@ -241,14 +242,27 @@ test('LIVE: deliberately cancelled popup returns MSAL user_cancelled, not a gene
   const audit = await observeContext(context)
   await page.goto('/')
   await assertBuild(page)
-  await page.evaluate(() => {
-    window.__c1Cancellation = import('/src/entraAuth.ts').then(({ signIn }) =>
-      signIn().then(() => ({ code: 'unexpected_success' })).catch(e => ({ code: String(e.errorCode || '') }))
-    )
+  // Instrument the real initialized MSAL instance; the LOGIN itself is
+  // triggered by a real user-gesture Playwright click, not page.evaluate.
+  await page.evaluate(async () => {
+    const { initializeAuth } = await import('/src/entraAuth.ts')
+    const auth = await initializeAuth()
+    const original = auth.loginPopup.bind(auth)
+    window.__c1CancelCode = 'not_observed'
+    auth.loginPopup = async (...args) => {
+      try { return await original(...args) }
+      catch (error) {
+        window.__c1CancelCode = String(error?.errorCode || 'missing_error_code')
+        throw error
+      }
+    }
   })
-  await page.pause() // operator closes the Microsoft login popup before resuming
-  const outcome = await page.evaluate(() => window.__c1Cancellation)
-  expect(outcome.code).toBe('user_cancelled')
+  let popupObserved = false
+  context.on('page', popup => { if (popup !== page) popupObserved = true })
+  await page.getByRole('button', { name: 'Sign in with Microsoft' }).click()
+  await page.pause() // operator deliberately closes/cancels actual Microsoft popup
+  await expect.poll(() => page.evaluate(() => window.__c1CancelCode)).toBe('user_cancelled')
+  expect(popupObserved).toBe(true)
   await expect(page.getByText(/^Signed in:/)).toHaveCount(0)
   await assertMemoryOnly(page)
   expect(audit.problems).toEqual([])
