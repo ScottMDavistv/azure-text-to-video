@@ -49,7 +49,10 @@ def authorize_job_admin(authorization=None):
         if separator and scheme.lower() == "bearer":
             provided = token.strip()
 
-    if not hmac.compare_digest(provided, expected):
+    if not hmac.compare_digest(
+        provided.encode("utf-8"),
+        expected.encode("utf-8"),
+    ):
         raise HTTPException(
             status_code=401,
             detail="Unauthorized",
