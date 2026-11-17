@@ -96,3 +96,59 @@ def can_dispatch_coder(*, active_agents, reviewer_active, isolated_secrets,
             reviewer_active is True and isolated_secrets is True and
             exact_head_review is True and included_credits_verified is True and
             paid_overages_enabled is False and independent_coder is True)
+
+
+# Owner-authorized, decision-only queue policy. This remains a pure planner.
+PRIORITY_ORDER = {"critical-security": 0, "high-security": 1,
+                  "other-security": 2, "ordinary": 3}
+ESCALATION_REASONS = frozenset({
+    "owner-permission", "privileged-secret-migration", "finance-or-overage",
+    "deployment-approval", "iam-change", "risk-acceptance",
+    "disputed-security-finding", "repair-attempts-exhausted",
+    "unsupported-capability", "security-sensitive-merge",
+})
+
+
+def ordered_queue(items):
+    """Prioritize security remediation; reject unknown classes rather than downgrade."""
+    if not isinstance(items, list):
+        raise ValueError("Incomplete task queue")
+    normalized = []
+    for task in items:
+        if not isinstance(task, dict) or task.get("priority_class") not in PRIORITY_ORDER:
+            raise ValueError("Untrusted task priority")
+        if not isinstance(task.get("id"), str) or not task["id"]:
+            raise ValueError("Missing task id")
+        normalized.append(task)
+    return sorted(normalized, key=lambda x: (PRIORITY_ORDER[x["priority_class"]], x["id"]))
+
+
+def next_assignable(items, *, active_agents, capacity_verified, security_gates_verified,
+                    included_credits_verified, paid_overages_enabled):
+    """No actual assignment; a blocked P0 security task stalls ordinary dispatch."""
+    queue = ordered_queue(items)
+    if (not isinstance(active_agents, int) or active_agents < 0 or active_agents >= 2
+            or capacity_verified is not True or security_gates_verified is not True
+            or included_credits_verified is not True or paid_overages_enabled is not False):
+        return {"action": "hold", "reason": "Unverified agent/approval/credit capacity"}
+    pending_security = [x for x in queue if x["priority_class"] != "ordinary"
+                        and x.get("state") in ("queued", "blocked", "awaiting-review")]
+    if pending_security:
+        task = pending_security[0]
+        if task.get("state") != "queued":
+            return {"action": "hold", "reason": "Security work awaiting independent gate",
+                    "task_id": task["id"]}
+        if task.get("independent_reviewer") is not True or task.get("distinct_coder") is not True:
+            return {"action": "hold", "reason": "Reviewer/coder separation unverified",
+                    "task_id": task["id"]}
+        return {"action": "would-dispatch-security", "task_id": task["id"]}
+    ordinary = next((x for x in queue if x.get("state") == "queued"), None)
+    return ({"action": "would-dispatch-ordinary", "task_id": ordinary["id"]}
+            if ordinary else {"action": "idle"})
+
+
+def should_notify_owner(event):
+    """Do not notify about progress; only decisions requiring owner intervention."""
+    if not isinstance(event, dict):
+        return False
+    return event.get("requires_owner_decision") is True and event.get("reason") in ESCALATION_REASONS
