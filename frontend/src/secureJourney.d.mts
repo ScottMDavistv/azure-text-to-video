@@ -8,9 +8,9 @@ export function createVideoApi(options: {
   tokenProvider: () => Promise<string>
   fetcher?: typeof fetch
 }): {
-  submit(projectId: string, prompt: string): Promise<VideoJob>
-  queue(projectId: string, jobId: string): Promise<{job_id: string;status: 'queued';dispatched: boolean}>
+  submit(projectId: string, prompt: string, signal?: AbortSignal): Promise<VideoJob>
+  queue(projectId: string, jobId: string, signal?: AbortSignal): Promise<{job_id: string;status: 'queued';dispatched: boolean}>
   status(projectId: string, jobId: string, signal?: AbortSignal): Promise<VideoJob>
-  metadata(projectId: string, jobId: string): Promise<VideoMetadata>
-  download(projectId: string, jobId: string): Promise<Blob>
+  metadata(projectId: string, jobId: string, signal?: AbortSignal): Promise<VideoMetadata>
+  download(projectId: string, jobId: string, signal?: AbortSignal): Promise<Blob>
 }
