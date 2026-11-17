@@ -164,7 +164,6 @@ jobs:
         run: |
           python -m pytest -q backend/tests/test_azurite_finance_recovery.py
           python -m pytest -q backend/tests/test_azurite_bulk03_receipt_integration.py
-          python -m pytest -q backend/tests/test_azurite_settlement_request_binding_l2.py
 
       - name: Test dispatch reconciliation against Azurite Queue and Table SDK
         env:

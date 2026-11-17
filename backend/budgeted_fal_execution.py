@@ -56,7 +56,7 @@ def run_reserved_fal_job(*, enabled, job_id, jobs_table, finance_table,
 
 def settle_verified_charge(*, finance_table, job_id, charge_cents,
                            provider_request_id, provider_receipt,
-                           verify_provider_receipt, submission_table=None):
+                           verify_provider_receipt):
     """Bridge hardened Bulk 02's receipt-aware settlement boundary.
 
     The verifier MUST use independently authenticated provider billing
@@ -95,5 +95,4 @@ def settle_verified_charge(*, finance_table, job_id, charge_cents,
         provider_request_id=provider_request_id, receipt_id=receipt_id,
         provider_receipt=provider_receipt,
         verify_provider_receipt=verify_for_ledger,
-        submission_table=submission_table,
     )

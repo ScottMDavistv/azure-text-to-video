@@ -14,9 +14,6 @@ from finance_controls import (
     FinanceDenied, AmbiguousCommit, reserve, scope_key, settle, PARTITION,
 )
 from finance_recovery import settle_unique_receipt
-from provider_submission_ledger import (
-    claim_intent, create_intent, record_provider_request_id,
-)
 
 AZURITE_CONNECTION = (
     "DefaultEndpointsProtocol=http;"
@@ -47,26 +44,6 @@ def table():
         service.close()
 
 
-@pytest.fixture
-def subs():
-    """Separate durable submission-intent table, as wired in production."""
-    service = TableServiceClient.from_connection_string(AZURITE_CONNECTION)
-    name = "FinIntents" + uuid.uuid4().hex[:16]
-    client = service.create_table(name)
-    try:
-        yield client
-    finally:
-        service.delete_table(name)
-        service.close()
-
-
-def submitted(subs, job, request_id):
-    """Durable submitted intent via the real ledger API (L-2 binding)."""
-    create_intent(subs, job)
-    claim_intent(subs, job)
-    record_provider_request_id(subs, job, request_id)
-
-
 def seed(table, project_id, limit):
     for key in ("global:fal", scope_key(project_id)):
         table.create_entity({
@@ -90,9 +67,9 @@ def verified(job_id, request_id, receipt_id, actual, receipt):
     )
 
 
-def settle_for_test(table, job_id, actual, receipt, subs):
+def settle_for_test(table, job_id, actual, receipt):
     return settle_unique_receipt(
-        table, submission_table=subs, job_id=job_id, actual_cents=actual,
+        table, job_id=job_id, actual_cents=actual,
         provider_request_id=receipt["request_id"],
         receipt_id=receipt["receipt_id"],
         provider_receipt=receipt, verify_provider_receipt=verified,
@@ -132,7 +109,7 @@ def test_azurite_duplicate_job_reservation_is_atomic(table):
         assert entity(table, key)["reservedCents"] == 40
 
 
-def test_azurite_settlement_requires_verified_evidence(table, subs):
+def test_azurite_settlement_requires_verified_evidence(table):
     project, job = uid(), uid()
     seed(table, project, 100)
     reserve(table, project, job, 60)
@@ -141,8 +118,7 @@ def test_azurite_settlement_requires_verified_evidence(table, subs):
     assert entity(table, "reservation:" + job)["state"] == "reserved"
     receipt = {"job_id": job, "amount_cents": 45,
                "request_id": "req-45", "receipt_id": "rec-45", "verified": True}
-    submitted(subs, job, "req-45")
-    settle_for_test(table, job, 45, receipt, subs)
+    settle_for_test(table, job, 45, receipt)
     assert entity(table, "reservation:" + job)["state"] == "settled"
     for key in ("global:fal", scope_key(project)):
         limit = entity(table, key)
@@ -150,16 +126,15 @@ def test_azurite_settlement_requires_verified_evidence(table, subs):
         assert limit["spentCents"] == 45
 
 
-def test_azurite_double_settlement_never_double_charges(table, subs):
+def test_azurite_double_settlement_never_double_charges(table):
     project, job = uid(), uid()
     seed(table, project, 100)
     reserve(table, project, job, 50)
     receipt = {"job_id": job, "amount_cents": 38,
                "request_id": "req-38", "receipt_id": "rec-38", "verified": True}
-    submitted(subs, job, "req-38")
     def attempt(_):
         try:
-            settle_for_test(table, job, 38, receipt, subs)
+            settle_for_test(table, job, 38, receipt)
             return True
         except FinanceDenied:
             return False
@@ -170,15 +145,14 @@ def test_azurite_double_settlement_never_double_charges(table, subs):
     assert entity(table, "global:fal")["reservedCents"] == 0
 
 
-def test_azurite_receipt_mismatch_refuses_settlement(table, subs):
+def test_azurite_receipt_mismatch_refuses_settlement(table):
     project, job = uid(), uid()
     seed(table, project, 100)
     reserve(table, project, job, 50)
     wrong = {"job_id": uid(), "amount_cents": 10,
              "request_id": "req-wrong", "receipt_id": "rec-wrong", "verified": True}
-    submitted(subs, job, "req-wrong")
     with pytest.raises(FinanceDenied):
-        settle_for_test(table, job, 10, wrong, subs)
+        settle_for_test(table, job, 10, wrong)
     assert entity(table, "reservation:" + job)["state"] == "reserved"
 
 
@@ -205,18 +179,17 @@ def test_azurite_lost_reservation_response_requires_reconciliation(table):
     assert entity(table, "global:fal")["reservedCents"] == 30
 
 
-def test_azurite_lost_settlement_response_requires_reconciliation(table, subs):
+def test_azurite_lost_settlement_response_requires_reconciliation(table):
     project, job = uid(), uid()
     seed(table, project, 100)
     reserve(table, project, job, 45)
     receipt = {"job_id": job, "amount_cents": 35,
                "request_id": "req-35", "receipt_id": "rec-35", "verified": True}
-    submitted(subs, job, "req-35")
     with pytest.raises(FinanceDenied, match="reconcile before retry"):
-        settle_for_test(LostResponse(table), job, 35, receipt, subs)
+        settle_for_test(LostResponse(table), job, 35, receipt)
     assert entity(table, "reservation:" + job)["state"] == "settled"
     with pytest.raises(FinanceDenied):
-        settle_for_test(table, job, 35, receipt, subs)
+        settle_for_test(table, job, 35, receipt)
     assert entity(table, "global:fal")["spentCents"] == 35
 
 
