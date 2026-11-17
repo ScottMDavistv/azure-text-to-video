@@ -8,5 +8,8 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     strictPort: true,
+    // Development-only same-origin proxy, avoiding permissive API CORS or
+    // browser cross-origin bearer leakage. No service tokens are injected.
+    proxy: { '/projects': { target: 'http://127.0.0.1:8000', changeOrigin: false } },
   },
 })
