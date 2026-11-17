@@ -5,6 +5,7 @@ import { test, expect } from '@playwright/test'
 // paid providers, cookies or persisted authenticated state are used.
 // It is NOT a substitute for a live Entra registration/MFA/consent test.
 const scope = 'api://a5a09b74-aead-455f-9de7-9b844c8a8465/access_as_user'
+test.skip(process.env.C1_LIVE === '1' || process.env.C1_UNCONFIGURED === '1', 'Tier 1 synthetic tests run only in offline mode')
 
 async function offline(page, context) {
   const unexpected = []
@@ -34,7 +35,7 @@ async function offline(page, context) {
   return unexpected
 }
 
-async function installSyntheticAccount(page, { deniedLogin = false, cancelledLogout = false, deniedApi = false } = {}) {
+async function installSyntheticAccount(page, { deniedLogin = false, cancelledLogin = false, cancelledLogout = false, deniedApi = false } = {}) {
   await page.evaluate(async flags => {
     const { initializeAuth } = await import('/src/entraAuth.ts')
     const auth = await initializeAuth()
@@ -43,7 +44,7 @@ async function installSyntheticAccount(page, { deniedLogin = false, cancelledLog
     window.__tier1 = { loginScopes: [], tokenScopes: [], popupScopes: [], logoutCalls: 0, redirectCalls: 0 }
     auth.loginPopup = async ({ scopes }) => {
       window.__tier1.loginScopes = scopes
-      if (flags.deniedLogin) throw Object.assign(new Error('Synthetic access denied'), { errorCode: 'access_denied' })
+      if (flags.deniedLogin || flags.cancelledLogin) throw Object.assign(new Error('Synthetic auth rejected'), { errorCode: flags.cancelledLogin ? 'user_cancelled' : 'access_denied' })
       return { account }
     }
     auth.setActiveAccount = value => { active = value }
@@ -65,7 +66,7 @@ async function installSyntheticAccount(page, { deniedLogin = false, cancelledLog
       if (flags.cancelledLogout) throw Object.assign(new Error('Synthetic user cancelled logout'), { errorCode: 'user_cancelled' })
       active = null
     }
-  }, { deniedLogin, cancelledLogout, deniedApi })
+  }, { deniedLogin, cancelledLogin, cancelledLogout, deniedApi })
 }
 
 async function assertNoCredentialMaterial(page, context) {
@@ -109,7 +110,7 @@ test('Tier1 synthetic sign-in, delegated scope, silent token and logout UI', asy
   expect(unexpected).toEqual([])
 })
 
-test('Tier1 denied login and cancelled login never report authenticated state', async ({ page, context }) => {
+test('Tier1 denied login never reports authenticated state', async ({ page, context }) => {
   const unexpected = await offline(page, context)
   await installSyntheticAccount(page, { deniedLogin: true })
   await page.getByRole('button', { name: 'Sign in with Microsoft' }).click()
@@ -127,6 +128,42 @@ test('Tier1 delegated API permission failure is never reported as granted', asyn
   await page.getByRole('button', { name: 'Check API permission' }).click()
   await expect(page.getByRole('status').first()).toContainText('API permission request failed')
   await expect(page.getByRole('status').first()).not.toContainText('Delegated API permission acquired')
+  await assertNoCredentialMaterial(page, context)
+  expect(unexpected).toEqual([])
+})
+
+
+test('Tier1 cancelled login never creates an account', async ({ page, context }) => {
+  const unexpected = await offline(page, context)
+  await installSyntheticAccount(page, { cancelledLogin: true })
+  await page.getByRole('button', { name: 'Sign in with Microsoft' }).click()
+  await expect(page.getByRole('status').first()).toContainText('Microsoft sign-in failed')
+  await expect(page.getByText(/^Signed in:/)).toHaveCount(0)
+  await assertNoCredentialMaterial(page, context)
+  expect(unexpected).toEqual([])
+})
+
+test('Tier1 interaction-required fallback and denied popup consent fails closed', async ({ page, context }) => {
+  const unexpected = await offline(page, context)
+  await installSyntheticAccount(page)
+  await page.getByRole('button', { name: 'Sign in with Microsoft' }).click()
+  await expect(page.getByText(/^Signed in:/)).toBeVisible()
+  const prepared = await page.evaluate(async () => {
+    const { initializeAuth } = await import('/src/entraAuth.ts')
+    // Use the exact optimized module imported by the running auth implementation.
+    const transformed = await (await fetch('/src/entraAuth.ts')).text()
+    const msalUrl = transformed.match(/from\s*["']([^"']*azure_msal-browser[^"']*)["']/)?.[1]
+    if (!msalUrl || !msalUrl.startsWith('/node_modules/.vite/deps/')) throw new Error('MSAL module identity unavailable')
+    const { InteractionRequiredAuthError } = await import(/* @vite-ignore */ msalUrl)
+    const auth = await initializeAuth()
+    auth.acquireTokenSilent = async () => { throw new InteractionRequiredAuthError('interaction_required') }
+    return true
+  })
+  expect(prepared).toBe(true)
+  await page.getByRole('button', { name: 'Check API permission' }).click()
+  await expect(page.getByRole('status').first()).toContainText('API permission request failed')
+  const observed = await page.evaluate(() => ({ popupScopes: window.__tier1.popupScopes, redirects: window.__tier1.redirectCalls }))
+  expect(observed).toEqual({ popupScopes: [scope], redirects: 0 })
   await assertNoCredentialMaterial(page, context)
   expect(unexpected).toEqual([])
 })
