@@ -230,11 +230,15 @@ export function evaluate({ meta, phases, reports, artifactHits }) {
       if (pd) ({ verdict, detail } = pd)
       else if (!tests) { verdict = 'FAIL'; detail = 'no report (startup/config failure, exit ' + phases[row.phase].rc + ')' }
       else if (row.kind === 'all') {
-        const missing = row.expect.filter(p => !find(tests, p) || find(tests, p).verdict === 'SKIPPED')
-        const failed = row.expect.filter(p => find(tests, p)?.verdict === 'FAIL')
-        verdict = missing.length || failed.length ? 'FAIL' : 'PASS'
-        detail = (row.expect.length - missing.length - failed.length) + '/' + row.expect.length + ' passed' +
-          (missing.length ? '; missing ' + missing.length : '') + (failed.length ? '; failed ' + failed.length : '')
+        const expected = row.expect.map(p => find(tests, p))
+        const missing = expected.filter(t => !t || t.verdict === 'SKIPPED')
+        const failed = expected.filter(t => t?.verdict === 'FAIL')
+        const incomplete = expected.filter(t => t?.verdict === 'INCOMPLETE')
+        verdict = missing.length || failed.length ? 'FAIL' : incomplete.length ? 'INCOMPLETE' : 'PASS'
+        detail = expected.filter(t => t?.verdict === 'PASS').length + '/' + row.expect.length + ' passed' +
+          (missing.length ? '; missing ' + missing.length : '') +
+          (failed.length ? '; failed ' + failed.length : '') +
+          (incomplete.length ? '; incomplete ' + incomplete.length : '')
       } else {
         const t = find(tests, row.title)
         if (!t) { verdict = 'FAIL'; detail = 'test did not execute' }
