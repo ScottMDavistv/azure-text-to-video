@@ -293,6 +293,21 @@ test('M5 browser: signOut invokes MSAL logoutPopup for the selected account', as
   expect(audit.problems).toEqual([])
 })
 
+test('M6-B/M6-C browser: egress firewall blocks wrong-port HTTP and external WebSockets', async ({ page, context }) => {
+  test.skip(live || unconfigured, 'Offline synthetic egress probe only')
+  const audit = await observeContext(context)
+  await page.goto('/')
+  await page.evaluate(() => {
+    void fetch('http://localhost:8000/api/jobs', { method: 'POST' }).catch(() => {})
+    const socket = new WebSocket('ws://evil.c1test:9999/ws')
+    socket.onerror = () => {}
+  })
+  await expect.poll(() => audit.problems.some(p => p.includes('Blocked unauthorized HTTP origin localhost'))).toBe(true)
+  await expect.poll(() => audit.problems.some(p => p.includes('Blocked unauthorized WebSocket host evil.c1test'))).toBe(true)
+  // Block decisions occur prior to delivery. An independent sink test is still
+  // required to prove zero delivered packets in the adversarial mutation run.
+})
+
 test('M-1: missing SPA configuration is fail-closed', async ({ page, context }) => {
   test.skip(!unconfigured || live, 'Run separately with C1_UNCONFIGURED=1')
   const audit = await observeContext(context)
