@@ -577,3 +577,45 @@ jobs:
             self.skipTest("PyYAML required for real-tree scanner check")
         findings = checker.scan(ROOT)
         self.assertEqual(findings, [])
+
+    def test_n1g_whitespace_event_relay_variants_denied_file_scan(self):
+        cases = (
+            ("workflow_run", "github .event.workflow_run.head_branch", False),
+            ("issues", "github. event.issue.title", False),
+            ("workflow_run", "github . event['workflow_run'].head_branch", False),
+            ("issues", "github .event.issue.title", True),
+            ("workflow_run", "toJSON(github .event)", False),
+        )
+        for trigger, expr, direct in cases:
+            with self.subTest(trigger=trigger, expression=expr, direct=direct):
+                expression = E + expr + " }}"
+                if direct:
+                    jobs = (
+                        "  inspect:\n"
+                        "    runs-on: ubuntu-latest\n"
+                        "    environment: dev-deployment\n"
+                        "    permissions: {contents: read, id-token: write}\n"
+                        "    if: github.ref == 'refs/heads/main'\n"
+                        "    steps:\n"
+                        "      - run: 'echo " + expression + "'\n"
+                    )
+                else:
+                    jobs = (
+                        "  a:\n"
+                        "    runs-on: ubuntu-latest\n"
+                        "    outputs:\n"
+                        "      v: " + expression + "\n"
+                        "    steps: []\n"
+                        "  deploy:\n"
+                        "    needs: a\n"
+                        "    runs-on: ubuntu-latest\n"
+                        "    environment: dev-deployment\n"
+                        "    permissions: {contents: read, id-token: write}\n"
+                        "    if: github.ref == 'refs/heads/main'\n"
+                        "    steps:\n"
+                        "      - run: 'echo " + E + "needs.a.outputs.v }}'\n"
+                    )
+                workflow = "on: " + trigger + "\npermissions: {contents: read}\njobs:\n" + jobs
+                findings = yaml_scan(self, {"whitespace.yml": workflow})
+                expected = "untrusted event text" if direct else "base-context job reads workflow_run payload"
+                self.assertTrue(any(expected in p for p in findings), (expr, findings))
