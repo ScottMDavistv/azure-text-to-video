@@ -8,6 +8,7 @@ import os
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
+from azure.core import MatchConditions
 from azure.core.exceptions import AzureError, ResourceNotFoundError
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
@@ -176,11 +177,15 @@ def project_video_download(project_id: UUID, job_id: UUID,
         raise HTTPException(503, "Video storage unavailable") from None
     def chunks():
         total = 0
-        for chunk in video["blob"].download_blob(max_concurrency=1).chunks():
+        for chunk in video["blob"].download_blob(
+                max_concurrency=1, etag=video["etag"],
+                match_condition=MatchConditions.IfNotModified).chunks():
             total += len(chunk)
-            if total > MAX_DELIVERY_BYTES:
-                raise RuntimeError("Video exceeds maximum delivery limit")
+            if total > MAX_DELIVERY_BYTES or total > video["size_bytes"]:
+                raise RuntimeError("Video exceeds verified content length")
             yield chunk
+        if total != video["size_bytes"]:
+            raise RuntimeError("Video shorter than verified content length")
     return StreamingResponse(
         chunks(), media_type="video/mp4", headers={
             "Content-Length": str(video["size_bytes"]),
