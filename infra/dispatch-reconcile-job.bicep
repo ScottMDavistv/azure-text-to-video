@@ -19,7 +19,7 @@ param jobsTableName string = 'VideoJobs'
 @allowed([ '*/15 * * * *', '0 * * * *' ])
 param cronExpression string = '0 * * * *'
 
-@description('Explicit opt-in: false schedules only the offline --check preflight.')
+@description('Explicit opt-in: false creates no scheduled job and incurs no scheduled-job executions.')
 param activateReconciliation bool = false
 
 @description('Deployment region.')
