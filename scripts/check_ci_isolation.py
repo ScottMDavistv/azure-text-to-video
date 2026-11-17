@@ -7,7 +7,35 @@ import re
 GATE = ".github/workflows/pr-isolation-gate.yml"
 CHECKOUT = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
 PYTHON = "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065"
-EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+def extract_expressions(text):
+    """Read GitHub expressions without treating }} inside single quotes as closing.
+
+    The runner accepts doubled single quotes inside expression strings. Unclosed
+    template expressions are returned as malformed, so callers fail closed.
+    """
+    if not isinstance(text, str):
+        return
+    pos = 0
+    while True:
+        start = text.find("${{", pos)
+        if start < 0:
+            return
+        i, quoted = start + 3, False
+        while i < len(text):
+            if text[i] == "'":
+                if quoted and i + 1 < len(text) and text[i + 1] == "'":
+                    i += 2
+                    continue
+                quoted = not quoted
+            elif not quoted and text.startswith("}}", i):
+                yield text[start + 3:i], False
+                pos = i + 2
+                break
+            i += 1
+        else:
+            yield text[start + 3:], True
+            return
+
 REF = re.compile(r"""github\.ref\s*==\s*(['"])refs/heads/main\1""")
 EVENT = re.compile(r"""github\.event_name\s*(?:==|!=)\s*(['"])[a-z_]+\1""")
 FLAG = re.compile(r"""vars\.[A-Za-z_][A-Za-z0-9_]*\s*==\s*(['"])true\1""")
@@ -40,8 +68,19 @@ def expressions(obj):
         for v in obj:
             yield from expressions(v)
     elif isinstance(obj, str):
-        for v in EXPR.finditer(obj):
-            yield v.group(1)
+        for expression, malformed in extract_expressions(obj):
+            yield expression
+
+def all_strings(obj):
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            yield from all_strings(key)
+            yield from all_strings(value)
+    elif isinstance(obj, list):
+        for value in obj:
+            yield from all_strings(value)
+    elif isinstance(obj, str):
+        yield obj
 
 def secret_refs(obj):
     out = set()
@@ -59,7 +98,9 @@ def privileged_secrets(obj):
 def injected_context(text):
     """Attacker-controllable event text interpolated into a shell/script is denied."""
     bad = set()
-    for expression in EXPR.findall(text if isinstance(text, str) else ""):
+    for expression, malformed in extract_expressions(text):
+        if malformed:
+            bad.add("<malformed github expression>")
         if DYNAMIC_GITHUB.search(expression):
             bad.add("<dynamic github context>")
         bad.update(f for f in EVENT_FIELD.findall(expression)
@@ -158,7 +199,12 @@ def examine(path, doc, raw=""):
     # Reusable workflows run in the caller's context, which may be an untrusted PR.
     call = "workflow_call" in triggers
     base_context = bool(triggers & BASE_CONTEXT)
+    inherited_context = base_context or call
     untrusted = pr or target or feature or call
+    malformed = any(bad for value in all_strings(doc)
+                    for _, bad in extract_expressions(value))
+    if malformed:
+        problems.append(path + ": malformed GitHub expression")
     leaked = secret_refs(doc)
     # Also inspect the raw override used by focused unit tests.
     if raw:
@@ -217,15 +263,24 @@ def examine(path, doc, raw=""):
                                                   not re.fullmatch(r"[0-9a-f]{40}", ref)) \
                         or "repository" in opts:
                     problems.append(where + ": privileged/base-context job checks out untrusted ref")
-        if privileged and base_context:
+        if privileged and inherited_context:
             # workflow_run executes as main with main's environments; it must never
             # consume the triggering (possibly PR) run's code, refs or artifacts,
             # including via env/shell indirection that checkout-ref checks cannot see.
-            if any(str(st.get("uses", "")).lower().startswith("actions/download-artifact@")
+            if any("download-artifact" in str(st.get("uses", "")).lower()
                    for st in steps if isinstance(st, dict)):
                 problems.append(where + ": privileged base-context job downloads artifacts")
-            if any(re.search(r"\bgithub\.event\.workflow_run\b", e, re.I) for e in expressions(job)):
+            if any(re.search(r"\\bgithub\\.event\\.workflow_run\\b", e, re.I)
+                   for e in expressions({"job": job, "env": doc.get("env"),
+                                         "defaults": doc.get("defaults")})):
                 problems.append(where + ": privileged base-context job reads workflow_run payload")
+            if any(str(st.get("uses", "")).startswith("./")
+                   for st in steps if isinstance(st, dict)):
+                problems.append(where + ": privileged base-context/callee local action forbidden")
+            if call and not any(re.fullmatch(
+                    r"""github\\.event_name\\s*==\\s*(['"])workflow_dispatch\\1""", p)
+                    for p in (condition_terms(cond) or [])):
+                problems.append(where + ": privileged reusable callee requires positive workflow_dispatch guard")
         if path == ".github/workflows/autonomous-engineering.yml":
             if secrets & {"COPILOT_DISPATCH_TOKEN", "AUTO_MERGE_USER_TOKEN"}:
                 problems.append(where + ": legacy repository secret references forbidden")
