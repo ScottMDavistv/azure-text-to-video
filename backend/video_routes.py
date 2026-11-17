@@ -176,6 +176,7 @@ def get_video_resource(job_id):
         "job_id": job_id,
         "blob_name": blob_name,
         "size_bytes": size,
+        "etag": properties.etag,
         "blob": blob,
     }
 

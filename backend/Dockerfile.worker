@@ -9,6 +9,11 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Synthetic-only FFmpeg is required for a future separately approved worker image.
+# Adding the tool does not activate the existing manual inspection-only Azure job.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy only top-level Python modules.
 # Do not copy local virtual environments, tests, or secrets.
 COPY *.py ./
