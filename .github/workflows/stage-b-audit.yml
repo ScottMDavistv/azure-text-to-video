@@ -1,13 +1,6 @@
 name: Stage B Azure Read-Only Inventory
 
 on:
-  push:
-    branches:
-      - feature/bulk-03-integrated
-    paths:
-      - .github/workflows/stage-b-audit.yml
-      - deploy/stage-b/01-readonly-inventory.sh
-      - deploy/stage-b/02-identity-rbac-audit.sh
   workflow_dispatch:
 
 permissions:
@@ -16,7 +9,7 @@ permissions:
 jobs:
   inventory:
     name: Stage B - read-only Azure inventory
-    if: github.ref == 'refs/heads/feature/bulk-03-integrated'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: stage-b-audit
     permissions:
@@ -29,7 +22,7 @@ jobs:
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       AZURE_CORE_ONLY_SHOW_ERRORS: 'true'
     steps:
-      - name: Checkout audited branch
+      - name: Checkout trusted main for manual audit
         uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -109,6 +102,6 @@ jobs:
         run: |
           echo "## Stage B read-only audit" >> "$GITHUB_STEP_SUMMARY"
           echo "- Environment: stage-b-audit" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Branch: feature/bulk-03-integrated" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Branch: protected main (manual only)" >> "$GITHUB_STEP_SUMMARY"
           echo "- OIDC authentication; Reader permissions only" >> "$GITHUB_STEP_SUMMARY"
           echo "- No Azure writes, deployments, paid jobs, or FAL credentials" >> "$GITHUB_STEP_SUMMARY"
