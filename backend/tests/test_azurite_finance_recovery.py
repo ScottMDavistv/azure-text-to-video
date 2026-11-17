@@ -12,6 +12,10 @@ from finance_recovery import (
     receipt_key, provider_request_key,
 )
 from project_access import Actor
+from provider_submission_ledger import (
+    PARTITION as SUBMISSION_PARTITION, claim_intent, create_intent,
+    record_provider_request_id,
+)
 
 CONNECTION = (
     "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;"
@@ -38,6 +42,36 @@ def table():
     finally:
         service.delete_table(name)
         service.close()
+
+
+@pytest.fixture
+def subs():
+    """Separate durable submission-intent table, as wired in production."""
+    service = TableServiceClient.from_connection_string(CONNECTION)
+    name = "Intents" + uuid.uuid4().hex[:17]
+    client = service.create_table(name)
+    try:
+        yield client
+    finally:
+        service.delete_table(name)
+        service.close()
+
+
+def submitted(subs, job, request_id):
+    """Record a durable submitted intent through the real ledger API."""
+    create_intent(subs, job)
+    claim_intent(subs, job)
+    record_provider_request_id(subs, job, request_id)
+
+
+def submitted_raw(subs, job, request_id):
+    """Durable record with an ID the validated writer would refuse.
+
+    Only used to prove the provider-scoped guard row still blocks NFKC
+    variants even if such a record ever existed.
+    """
+    subs.create_entity({"PartitionKey": SUBMISSION_PARTITION, "RowKey": job,
+                        "state": "submitted", "providerRequestId": request_id})
 
 
 def seed(table, project):
@@ -67,21 +101,23 @@ def evidence(job, request, receipt, cents):
             "receipt_id": receipt, "cents": cents, "trusted": True}
 
 
-def test_atomic_receipt_deduplication_across_jobs(table):
+def test_atomic_receipt_deduplication_across_jobs(table, subs):
     project, first, second = uid(), uid(), uid()
     seed(table, project)
     reserve(table, project, first, 100)
     reserve(table, project, second, 100)
     request = "provider-test-1"
+    submitted(subs, first, request)
+    submitted(subs, second, request)
     receipt = "single-charge-record"
     settle_unique_receipt(
-        table, job_id=first, actual_cents=60,
+        table, submission_table=subs, job_id=first, actual_cents=60,
         provider_request_id=request, receipt_id=receipt,
         provider_receipt=evidence(first, request, receipt, 60),
         verify_provider_receipt=receipt_ok)
     with pytest.raises(FinanceDenied):
         settle_unique_receipt(
-            table, job_id=second, actual_cents=60,
+            table, submission_table=subs, job_id=second, actual_cents=60,
             provider_request_id=request, receipt_id=receipt,
             provider_receipt=evidence(second, request, receipt, 60),
             verify_provider_receipt=receipt_ok)
@@ -90,13 +126,14 @@ def test_atomic_receipt_deduplication_across_jobs(table):
     assert inspect_reservation(table, second)["state"] == "reserved"
 
 
-def test_forged_or_missing_receipt_does_not_settle(table):
+def test_forged_or_missing_receipt_does_not_settle(table, subs):
     project, job = uid(), uid()
     seed(table, project)
     reserve(table, project, job, 50)
+    submitted(subs, job, "request-1")
     with pytest.raises(FinanceDenied):
         settle_unique_receipt(
-            table, job_id=job, actual_cents=50,
+            table, submission_table=subs, job_id=job, actual_cents=50,
             provider_request_id="request-1", receipt_id="r-1",
             provider_receipt=evidence(job, "request-OTHER", "r-1", 50),
             verify_provider_receipt=receipt_ok)
@@ -156,17 +193,19 @@ def test_closed_reservation_cannot_be_released_again(table):
     assert row(table, "global:fal")["reservedCents"] == 0
 
 
-def test_concurrent_receipt_replay_one_winner(table):
+def test_concurrent_receipt_replay_one_winner(table, subs):
     project, job1, job2 = uid(), uid(), uid()
     seed(table, project)
     reserve(table, project, job1, 100)
     reserve(table, project, job2, 100)
+    submitted(subs, job1, "provider-same-request")
+    submitted(subs, job2, "provider-same-request")
     receipt_id = "provider-unique-charge-id"
     jobs = [job1, job2]
     def submit(job):
         try:
             settle_unique_receipt(
-                table, job_id=job, actual_cents=40,
+                table, submission_table=subs, job_id=job, actual_cents=40,
                 provider_request_id="provider-same-request",
                 receipt_id=receipt_id,
                 provider_receipt=evidence(job, "provider-same-request", receipt_id, 40),
@@ -236,20 +275,24 @@ def test_ambiguous_non_submission_must_never_release(table):
     assert row(table, "global:fal")["reservedCents"] == 70
 
 
-def test_same_provider_request_different_receipts_cannot_charge_two_jobs(table):
+def test_same_provider_request_different_receipts_cannot_charge_two_jobs(table, subs):
     project, first, second = uid(), uid(), uid()
     seed(table, project)
     reserve(table, project, first, 100)
     reserve(table, project, second, 100)
     request_id = "same-request-two-receipts"
+    # Both durable records carry the same ID, so the L-2 binding passes
+    # and the provider-scoped guard row is what must stop the second job.
+    submitted(subs, first, request_id)
+    submitted(subs, second, request_id)
     settle_unique_receipt(
-        table, job_id=first, actual_cents=70,
+        table, submission_table=subs, job_id=first, actual_cents=70,
         provider_request_id=request_id, receipt_id="receipt-A",
         provider_receipt=evidence(first, request_id, "receipt-A", 70),
         verify_provider_receipt=receipt_ok)
     with pytest.raises(FinanceDenied):
         settle_unique_receipt(
-            table, job_id=second, actual_cents=80,
+            table, submission_table=subs, job_id=second, actual_cents=80,
             provider_request_id=request_id, receipt_id="receipt-B",
             provider_receipt=evidence(second, request_id, "receipt-B", 80),
             verify_provider_receipt=receipt_ok)
@@ -262,20 +305,22 @@ def test_same_provider_request_different_receipts_cannot_charge_two_jobs(table):
 
 
 @pytest.mark.parametrize("variant", ["REQUEST-CASE-1", "Request-Case-1", "ＲＥＱＵＥＳＴ-ＣＡＳＥ-１"])
-def test_provider_request_case_variant_cannot_settle_second_job(table, variant):
+def test_provider_request_case_variant_cannot_settle_second_job(table, subs, variant):
     project, first, second = uid(), uid(), uid()
     seed(table, project)
     reserve(table, project, first, 100)
     reserve(table, project, second, 100)
     original = "request-case-1"
+    submitted(subs, first, original)
+    (submitted if variant.isascii() else submitted_raw)(subs, second, variant)
     settle_unique_receipt(
-        table, job_id=first, actual_cents=60,
+        table, submission_table=subs, job_id=first, actual_cents=60,
         provider_request_id=original, receipt_id="case-receipt-first",
         provider_receipt=evidence(first, original, "case-receipt-first", 60),
         verify_provider_receipt=receipt_ok)
     with pytest.raises(FinanceDenied):
         settle_unique_receipt(
-            table, job_id=second, actual_cents=60,
+            table, submission_table=subs, job_id=second, actual_cents=60,
             provider_request_id=variant, receipt_id="case-receipt-second",
             provider_receipt=evidence(second, variant, "case-receipt-second", 60),
             verify_provider_receipt=receipt_ok)
@@ -284,16 +329,18 @@ def test_provider_request_case_variant_cannot_settle_second_job(table, variant):
     assert inspect_reservation(table, second)["state"] == "reserved"
     assert row(table, provider_request_key("fal", variant))["jobId"] == first
 
-def test_concurrent_same_request_distinct_receipts_one_winner(table):
+def test_concurrent_same_request_distinct_receipts_one_winner(table, subs):
     project, first, second = uid(), uid(), uid()
     seed(table, project)
     reserve(table, project, first, 100)
     reserve(table, project, second, 100)
+    submitted(subs, first, "same-request-race")
+    submitted(subs, second, "same-request-race")
     def submit(job_and_receipt):
         job, receipt = job_and_receipt
         try:
             settle_unique_receipt(
-                table, job_id=job, actual_cents=40,
+                table, submission_table=subs, job_id=job, actual_cents=40,
                 provider_request_id="same-request-race", receipt_id=receipt,
                 provider_receipt=evidence(job, "same-request-race", receipt, 40),
                 verify_provider_receipt=receipt_ok)
@@ -311,19 +358,21 @@ def test_concurrent_same_request_distinct_receipts_one_winner(table):
 
 
 @pytest.mark.parametrize("second_receipt", ["receipt-a", "RECEIPT-A"])
-def test_case_variant_receipt_cannot_settle_other_job(table, second_receipt):
+def test_case_variant_receipt_cannot_settle_other_job(table, subs, second_receipt):
     project, first, second = uid(), uid(), uid()
     seed(table, project)
     reserve(table, project, first, 100)
     reserve(table, project, second, 100)
+    submitted(subs, first, "request-first")
+    submitted(subs, second, "request-second")
     settle_unique_receipt(
-        table, job_id=first, actual_cents=35,
+        table, submission_table=subs, job_id=first, actual_cents=35,
         provider_request_id="request-first", receipt_id="Receipt-A",
         provider_receipt=evidence(first, "request-first", "Receipt-A", 35),
         verify_provider_receipt=receipt_ok)
     with pytest.raises(FinanceDenied):
         settle_unique_receipt(
-            table, job_id=second, actual_cents=40,
+            table, submission_table=subs, job_id=second, actual_cents=40,
             provider_request_id="request-second", receipt_id=second_receipt,
             provider_receipt=evidence(second, "request-second", second_receipt, 40),
             verify_provider_receipt=receipt_ok)
@@ -334,13 +383,14 @@ def test_case_variant_receipt_cannot_settle_other_job(table, second_receipt):
 
 @pytest.mark.parametrize("invalid_receipt", ["Receipt-A ", " Receipt-A",
                                              "Receipt-A\u200b", "Receipt-A\x00"])
-def test_noncanonical_receipts_rejected_without_budget_movement(table, invalid_receipt):
+def test_noncanonical_receipts_rejected_without_budget_movement(table, subs, invalid_receipt):
     project, job = uid(), uid()
     seed(table, project)
     reserve(table, project, job, 60)
+    submitted(subs, job, "request-one")
     with pytest.raises(FinanceDenied):
         settle_unique_receipt(
-            table, job_id=job, actual_cents=25,
+            table, submission_table=subs, job_id=job, actual_cents=25,
             provider_request_id="request-one", receipt_id=invalid_receipt,
             provider_receipt=evidence(job, "request-one", invalid_receipt, 25),
             verify_provider_receipt=receipt_ok)
