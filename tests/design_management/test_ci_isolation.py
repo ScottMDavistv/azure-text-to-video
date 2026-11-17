@@ -526,7 +526,7 @@ jobs:
         self.assertTrue(any("downloads artifacts" in p for p in findings), findings)
 
     def test_n3_local_action_windows_and_self_repository_forms_denied(self):
-        for action in (r".\\.github\\actions\\x", "$/.github/actions/x", "./.github/actions/x"):
+        for action in (r".\.github\actions\x", "$/.github/actions/x", "./.github/actions/x"):
             document = (
                 "on: workflow_run\npermissions: {contents: read}\n"
                 "jobs:\n  deploy:\n    runs-on: windows-latest\n"
