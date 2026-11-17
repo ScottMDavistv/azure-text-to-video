@@ -96,3 +96,14 @@ def test_worker_dockerfile_continuations_are_valid():
             assert stripped.split()[0].upper() in instructions
         continued = line.endswith("\\")
     assert not continued
+
+@pytest.mark.parametrize("unsafe", ["1", "true", "yes", " TRUE "])
+def test_worker_rejects_unsafe_legacy_auth_alternatives(config, monkeypatch, unsafe):
+    monkeypatch.setenv("ALLOW_UNAUTHENTICATED_DEV", unsafe)
+    with pytest.raises(SyntheticRenderError):
+        synthetic.require_synthetic_readiness()
+
+def test_worker_rejects_legacy_paid_provider_environment(config, monkeypatch):
+    monkeypatch.setenv("VIDEO_PROVIDER", "fal")
+    with pytest.raises(SyntheticRenderError):
+        synthetic.require_synthetic_readiness()
