@@ -60,7 +60,7 @@ SAFE_ERROR_CATEGORIES = frozenset({
 })
 # Recognize the Azure CLI's leading error token, or a JSON top-level error.code
 # envelope only. Never search narrative message strings or nested arbitrary JSON.
-AZURE_CLI_CODE = re.compile(r'^\\s*(?:ERROR:\\s*)?\\(([A-Za-z][A-Za-z0-9]*)\\)', re.ASCII)
+AZURE_CLI_CODE = re.compile(r'^\s*(?:ERROR:\s*)?\(([A-Za-z][A-Za-z0-9]*)\)', re.ASCII)
 
 
 def classify_azure_failure(stderr):
