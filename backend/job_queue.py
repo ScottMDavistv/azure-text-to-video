@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from uuid import UUID
 
 from azure.storage.queue import QueueClient
@@ -24,7 +25,7 @@ def synthetic_queue_name():
     candidate = os.getenv("AZURE_SYNTHETIC_JOBS_QUEUE", "").strip()
     if (not candidate or candidate == QUEUE_NAME
             or len(candidate) < 3 or len(candidate) > 63
-            or not __import__("re").fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", candidate)):
+            or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", candidate)):
         raise ValueError("A distinct valid synthetic-only queue must be configured")
     return candidate
 
