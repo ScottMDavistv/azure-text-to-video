@@ -109,7 +109,7 @@ export default function App() {
         <p className="muted" role="status">{authMessage}</p>
         {view === 'studio' ? (
           <div className="dashboard">
-            <LiveJourney accountName={accountName} />
+            <LiveJourney key={accountName ?? "signed-out"} accountName={accountName} />
             <section className="panel" aria-labelledby="prompt-title">
               <h2 id="prompt-title">Create a video concept</h2>
               <p className="muted">Describe your story. This form runs only a deterministic local simulation.</p>
