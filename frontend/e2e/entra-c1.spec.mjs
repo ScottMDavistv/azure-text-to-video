@@ -185,6 +185,19 @@ test('M-1/M-2: attempted login sends correct tenant, PKCE, registered URI, clien
   })
   await page.goto('/')
   await assertBuild(page)
+  await page.evaluate(async () => {
+    const { initializeAuth } = await import('/src/entraAuth.ts')
+    const auth = await initializeAuth()
+    const original = auth.loginPopup.bind(auth)
+    window.__c1OfflineCancelCode = 'not_observed'
+    auth.loginPopup = async (...args) => {
+      try { return await original(...args) }
+      catch (error) {
+        window.__c1OfflineCancelCode = String(error?.errorCode || 'missing_error_code')
+        throw error
+      }
+    }
+  })
   await page.getByRole('button', { name: 'Sign in with Microsoft' }).click()
   await expect.poll(() => authorizations.length, { timeout: 15000 }).toBeGreaterThan(0)
   const request = authorizations[0]
@@ -199,6 +212,7 @@ test('M-1/M-2: attempted login sends correct tenant, PKCE, registered URI, clien
   expect(['fragment', 'query']).toContain(request.mode)
   // Close the fake popup, without contacting Microsoft.
   for (const popup of context.pages().filter(p => p !== page)) await popup.close().catch(() => {})
+  await expect.poll(() => page.evaluate(() => window.__c1OfflineCancelCode), { timeout: 15000 }).toBe('user_cancelled')
   await expect(page.getByRole('button', { name: 'Sign in with Microsoft' })).toBeEnabled({ timeout: 15000 })
   await expect(page.getByText(/^Signed in:/)).toHaveCount(0)
   await assertMemoryOnly(page, context)
