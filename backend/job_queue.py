@@ -18,6 +18,32 @@ def get_queue_client():
     )
 
 
+
+def synthetic_queue_name():
+    """A dedicated queue is mandatory; never share the legacy job queue."""
+    candidate = os.getenv("AZURE_SYNTHETIC_JOBS_QUEUE", "").strip()
+    if (not candidate or candidate == QUEUE_NAME
+            or len(candidate) < 3 or len(candidate) > 63
+            or not __import__("re").fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", candidate)):
+        raise ValueError("A distinct valid synthetic-only queue must be configured")
+    return candidate
+
+
+def get_synthetic_queue_client():
+    return QueueClient(
+        account_url=f"https://{STORAGE_ACCOUNT}.queue.core.windows.net",
+        queue_name=synthetic_queue_name(),
+        credential=get_credential(),
+    )
+
+
+def enqueue_synthetic_job(job_id):
+    validated_id = str(UUID(str(job_id)))
+    get_synthetic_queue_client().send_message(json.dumps({
+        "job_id": validated_id,
+    }))
+    return {"job_id": validated_id, "queued": True}
+
 def enqueue_job(job_id):
     validated_id = str(UUID(str(job_id)))
 
