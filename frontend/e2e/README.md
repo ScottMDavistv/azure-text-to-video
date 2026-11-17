@@ -35,7 +35,7 @@ The live test checks tenant, token audience/scope, issuer, expiration, active MS
 
 Record exact checkout SHA, browser/version, UTC time, test commands, each C1 result, and relevant sanitized MSAL error codes. Do **not** share credentials, bearer tokens, cookies, request URLs containing OAuth parameters, decoded JWT claims, HAR files, console dumps, traces, screenshots of Microsoft sign-in, or auth storage state.
 
-The source mutation runner performs seven intentionally defective source transformations **in memory**, verifies that each violates a static constraint, and never changes repository files. It is a useful regression guard but **not a substitute for Playwright runtime mutation testing**. Reviewers should independently repeat browser mutation tests on a temporary checkout before certifying suite readiness.
+The source mutation runner performs twelve intentionally defective source transformations (M1–M12, across `src/entraAuth.ts`, `src/entraAuthCore.ts` and `src/App.tsx`) **in memory**, verifies that each violates a static constraint, and never changes repository files. It is a useful regression guard but **not a substitute for Playwright runtime mutation testing**. Reviewers should independently repeat browser mutation tests on a temporary checkout before certifying suite readiness.
 
 Current independent Claude verdict on original suite at `d32ec67`: REQUEST CHANGES. Retest and independently review the new exact head before changing this verdict. PR #46's C1 gate and review Thread 1 remain open; C2, C3 and #51 still apply. Never self-approve or automatically merge.
 
@@ -56,3 +56,13 @@ If using `C1_MUTATION_MODE=1`, test runs are development-only and are never acce
 Claude's independent browser re-review found 6 pass / 1 fail / 3 skipped on the offline baseline. B-1 was a bare `@azure/msal-browser` specifier inside `page.evaluate`, which the browser could not resolve. The M4 test now obtains the optimized dependency URL from Vite's transformed `/src/entraAuth.ts` and imports the same module instance, preserving `InteractionRequiredAuthError instanceof` identity. It requires the synthetic fallback to invoke 1 popup and 0 redirects. The evidence `dirty=` marker now reflects actual `git status`, not just `C1_MUTATION_MODE`.
 
 **Not yet independently verified at the new exact head:** clean 0-fail offline baseline and M4 mutant fail at the popup/redirect assertion with static checks disabled. Claude must rerun both, and confirm that the optimized MSAL module resolution works with the actual Vite version. The independent review request is on PR #60 and Issue #61. Live C1 remains INCOMPLETE.
+
+## Alignment with PR #46 certified head `6b62c05` (2026-11-17)
+
+PR #46 split the MSAL flow: `src/entraAuth.ts` now wires the real `PublicClientApplication`/`InteractionRequiredAuthError`, and `src/entraAuthCore.ts` holds the configuration, popup flows and the failed-logout fail-safe. This branch merges `6b62c05` (no conflicts; no application file is changed by this branch) and extends the suite to the new structure:
+
+- Static source invariants (`assertSourceInvariants`) and `c1-mutation-check.mjs` read **both** auth files. New invariants: no `storeAuthStateInCookie: true`; redirect and post-logout URIs bound to `getRedirectUri(origin)` with `getOrigin: () => window.location.origin`; the approved tenant constant; popup consent gated on `isInteractionRequired` wired to `instanceof InteractionRequiredAuthError`; and the failed-logout fail-safe (`setActiveAccount(null)` then `clearCache`).
+- Static mutations: M1–M7 retargeted to `entraAuthCore.ts`, plus M8 (cookie auth state), M9/M10 (popup on non-interaction errors, core gate and wrapper predicate), M11/M12 (failed-logout fail-safe removal).
+- New offline browser tests: **M9 browser** (a non-interaction silent-token error is rethrown with 0 popups and 0 redirects) and **M10 browser** (a failed sign-out popup still clears the active account and the in-memory cache for that account). These run against the real MSAL instance in Chromium, complementing PR #46's mocked unit tests.
+
+**Authored by a Claude implementation session; not independently reviewed or certified.** Live C1 remains OPEN.

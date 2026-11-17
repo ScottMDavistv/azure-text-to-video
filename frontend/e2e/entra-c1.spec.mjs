@@ -10,7 +10,11 @@ const checkoutDirty = Boolean(execFileSync('git', ['status', '--porcelain', '--u
 const tenant = '773e9051-c546-4b75-9432-90f4f8242660'
 const audience = 'a5a09b74-aead-455f-9de7-9b844c8a8465'
 const scope = 'api://' + audience + '/access_as_user'
-const authSource = readFileSync(fileURLToPath(new URL('../src/entraAuth.ts', import.meta.url)), 'utf8')
+// PR #46 (6b62c05) split the MSAL flow: entraAuth.ts wires the real MSAL
+// classes; entraAuthCore.ts holds config, popup flows and logout fail-safe.
+const authWrapperSource = readFileSync(fileURLToPath(new URL('../src/entraAuth.ts', import.meta.url)), 'utf8')
+const authCoreSource = readFileSync(fileURLToPath(new URL('../src/entraAuthCore.ts', import.meta.url)), 'utf8')
+const authSource = authWrapperSource + '\n' + authCoreSource
 const appSource = readFileSync(fileURLToPath(new URL('../src/App.tsx', import.meta.url)), 'utf8')
 const allowedHosts = new Set([
   'localhost', '127.0.0.1', 'login.microsoftonline.com', 'login.microsoft.com',
@@ -71,18 +75,33 @@ test.afterAll(async () => {
 
 function assertSourceInvariants() {
   // Offline structural checks are intentionally narrow; a real login remains required.
-  expect(authSource).toMatch(/cacheLocation:\s*['"]memoryStorage['"]/)
-  expect(authSource).toMatch(/storeAuthStateInCookie:\s*false/)
-  expect(authSource).toMatch(/loginPopup\s*\(/)
-  expect(authSource).toMatch(/logoutPopup\s*\(/)
-  expect(authSource).toMatch(/acquireTokenPopup\s*\(/)
+  expect(authCoreSource).toMatch(/cacheLocation:\s*['"]memoryStorage['"]/)
+  expect(authCoreSource).toMatch(/storeAuthStateInCookie:\s*false/)
+  expect(authSource).not.toMatch(/storeAuthStateInCookie:\s*true/)
+  expect(authCoreSource).toMatch(/loginPopup\s*\(/)
+  expect(authCoreSource).toMatch(/logoutPopup\s*\(/)
+  expect(authCoreSource).toMatch(/acquireTokenPopup\s*\(/)
   expect(authSource).not.toMatch(/acquireTokenRedirect\s*\(|loginRedirect\s*\(|logoutRedirect\s*\(/)
-  expect(authSource).toMatch(/redirectUri:\s*getRedirectUri\s*\(\s*window\.location\.origin\s*\)/)
+  // Redirect and post-logout URIs come only from the registered-origin allowlist.
+  expect(authCoreSource).toMatch(/const redirectUri = getRedirectUri\(origin\)/)
+  expect(authCoreSource).toMatch(/^\s*redirectUri,\s*$/m)
+  expect(authCoreSource).toMatch(/postLogoutRedirectUri:\s*redirectUri,/)
+  expect(authCoreSource).toMatch(/buildMsalConfig\(clientId, options\.tenantId, options\.getOrigin\(\)\)/)
+  expect(authWrapperSource).toMatch(/getOrigin:\s*\(\)\s*=>\s*window\.location\.origin,/)
+  // Single-tenant authority with the approved tenant ID.
+  expect(authCoreSource).toMatch(/authority:\s*`https:\/\/login\.microsoftonline\.com\/\$\{tenantId\}`/)
+  expect(authWrapperSource).toContain("const tenantId = '" + tenant + "'")
   expect(authSource).not.toMatch(/\bauthority:\s*[^\n]*\/common\b/i)
   expect(authSource).not.toMatch(/\bauthority:\s*[^\n]*\/organizations\b/i)
+  expect(authSource).not.toMatch(/login\.microsoftonline\.com\/(?:common|organizations|consumers)\b/i)
+  // Popup consent only for interaction-required errors, using the real MSAL class.
+  expect(authCoreSource).toMatch(/if \(options\.isInteractionRequired\(error\)\) \{/)
+  expect(authWrapperSource).toMatch(/isInteractionRequired:\s*\(error\)\s*=>\s*error instanceof InteractionRequiredAuthError,/)
+  // Failed logout must still clear the local account and in-memory cache.
+  expect(authCoreSource).toMatch(/catch \(error\) \{\s*\/\/[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*auth\.setActiveAccount\(null\)\s*\n\s*try \{\s*\n\s*await auth\.clearCache\(\{ account: account \?\? undefined \}\)/)
   expect(appSource).not.toMatch(/\bfetch\s*\(\s*['"]https?:\/\//)
   // No explicit browser storage reads/writes in auth application code.
-  for (const source of [authSource, appSource]) {
+  for (const source of [authWrapperSource, authCoreSource, appSource]) {
     expect(source).not.toMatch(/\b(?:localStorage|sessionStorage)\s*(?:\.|\[)/)
   }
 }
@@ -327,6 +346,66 @@ test('M5 browser: signOut invokes MSAL logoutPopup for the selected account', as
     }
   })
   expect(calls).toEqual({ count: 1, correctAccount: true })
+  expect(audit.problems).toEqual([])
+})
+
+test('M9 browser: non-interaction token errors are rethrown without opening a popup', async ({ page, context }) => {
+  test.skip(live || unconfigured, 'Offline synthetic SPA only')
+  const audit = await observeContext(context)
+  await page.goto('/')
+  const calls = await page.evaluate(async () => {
+    const { initializeAuth, acquireApiToken } = await import('/src/entraAuth.ts')
+    const auth = await initializeAuth()
+    const account = { homeAccountId: 'synthetic-account', username: 'synthetic-user' }
+    const original = {
+      getActiveAccount: auth.getActiveAccount, acquireTokenSilent: auth.acquireTokenSilent,
+      acquireTokenPopup: auth.acquireTokenPopup, acquireTokenRedirect: auth.acquireTokenRedirect,
+    }
+    const counts = { popup: 0, redirect: 0, rejected: false, sameError: false }
+    try {
+      const injected = new Error('synthetic_network_failure')
+      auth.getActiveAccount = () => account
+      auth.acquireTokenSilent = async () => { throw injected }
+      auth.acquireTokenPopup = async () => { counts.popup++; return { accessToken: 'synthetic-non-token' } }
+      auth.acquireTokenRedirect = async () => { counts.redirect++ }
+      try { await acquireApiToken() } catch (error) { counts.rejected = true; counts.sameError = error === injected }
+      return counts
+    } finally {
+      for (const [key, method] of Object.entries(original)) auth[key] = method
+    }
+  })
+  expect(calls).toEqual({ popup: 0, redirect: 0, rejected: true, sameError: true })
+  expect(audit.problems).toEqual([])
+})
+
+test('M10 browser: failed sign-out popup still clears the active account and in-memory cache', async ({ page, context }) => {
+  test.skip(live || unconfigured, 'Offline synthetic SPA only')
+  const audit = await observeContext(context)
+  await page.goto('/')
+  const seen = await page.evaluate(async () => {
+    const { initializeAuth, signOut } = await import('/src/entraAuth.ts')
+    const auth = await initializeAuth()
+    const account = { homeAccountId: 'synthetic-account', username: 'synthetic-user' }
+    const original = {
+      getActiveAccount: auth.getActiveAccount, logoutPopup: auth.logoutPopup,
+      setActiveAccount: auth.setActiveAccount, clearCache: auth.clearCache,
+    }
+    const result = { rejected: false, activeCleared: false, cacheCleared: false, cacheAccount: false }
+    try {
+      auth.getActiveAccount = () => account
+      auth.logoutPopup = async () => { throw new Error('synthetic_popup_blocked') }
+      auth.setActiveAccount = value => { if (value === null) result.activeCleared = true }
+      auth.clearCache = async request => {
+        result.cacheCleared = true
+        result.cacheAccount = request?.account?.homeAccountId === account.homeAccountId
+      }
+      try { await signOut() } catch { result.rejected = true }
+      return result
+    } finally {
+      for (const [key, method] of Object.entries(original)) auth[key] = method
+    }
+  })
+  expect(seen).toEqual({ rejected: true, activeCleared: true, cacheCleared: true, cacheAccount: true })
   expect(audit.problems).toEqual([])
 })
 
