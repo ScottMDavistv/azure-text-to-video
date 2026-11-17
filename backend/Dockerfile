@@ -56,7 +56,7 @@ COPY operations_cli.py .
 # Project API remains disabled until ENABLE_PROJECT_ROUTES=true
 # and a trusted OIDC issuer, audience, mapping table are configured.
 COPY project_models.py project_access.py project_store.py project_security.py .
-COPY project_oidc.py project_api_routes.py .
+COPY project_oidc.py project_api_routes.py user_video_routes.py .
 COPY finance_controls.py fal_budget_guard.py .
 COPY financial_outbox.py safe_reconciliation.py budget_hold_events.py .
 COPY job_scheduler.py held_jobs.py held_job_dispatch.py held_job_coordinator.py .
