@@ -99,6 +99,7 @@ def injected_context(text):
     """Attacker-controllable event text interpolated into a shell/script is denied."""
     bad = set()
     for expression, malformed in extract_expressions(text):
+        expression = re.sub(r"\s*\.\s*", ".", expression)
         if malformed:
             bad.add("<malformed github expression>")
         if DYNAMIC_GITHUB.search(expression):
