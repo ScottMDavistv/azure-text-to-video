@@ -4,80 +4,44 @@ import {
   type AccountInfo,
   type AuthenticationResult,
 } from '@azure/msal-browser'
+import { createEntraAuth, getRedirectUri, type MsalClient } from './entraAuthCore.ts'
 
 const tenantId = '773e9051-c546-4b75-9432-90f4f8242660'
 const apiClientId = 'a5a09b74-aead-455f-9de7-9b844c8a8465'
-const localhostRedirect = 'http://localhost:5173'
 
-/** Only use origins explicitly registered with the Entra SPA. */
-export function getRedirectUri(origin: string): string {
-  if (origin === localhostRedirect || origin === 'http://127.0.0.1:5173') {
-    return localhostRedirect
-  }
-  throw new Error('Unregistered frontend origin; check the Entra SPA redirect URI')
-}
+export { getRedirectUri }
 
 export const apiScopes = [`api://${apiClientId}/access_as_user`]
 
-const frontendClientId = import.meta.env.VITE_ENTRA_SPA_CLIENT_ID?.trim() ?? ''
+const auth = createEntraAuth({
+  clientId: import.meta.env.VITE_ENTRA_SPA_CLIENT_ID?.trim() ?? '',
+  tenantId,
+  apiScopes,
+  getOrigin: () => window.location.origin,
+  createClient: (config) => new PublicClientApplication(config),
+  isInteractionRequired: (error) => error instanceof InteractionRequiredAuthError,
+})
 
 export function isAuthConfigured(): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(frontendClientId)
+  return auth.isAuthConfigured()
 }
 
-let initialization: Promise<PublicClientApplication> | null = null
-
-export async function initializeAuth(): Promise<PublicClientApplication> {
-  if (!isAuthConfigured()) {
-    throw new Error('The local Entra SPA client ID is not configured')
-  }
-  if (!initialization) {
-    const client = new PublicClientApplication({
-      auth: {
-        clientId: frontendClientId,
-        authority: `https://login.microsoftonline.com/${tenantId}`,
-        redirectUri: getRedirectUri(window.location.origin),
-        postLogoutRedirectUri: getRedirectUri(window.location.origin),
-        navigateToLoginRequestUrl: false,
-      },
-      cache: { cacheLocation: 'memoryStorage', storeAuthStateInCookie: false },
-    })
-    initialization = (async () => {
-      await client.initialize()
-      await client.handleRedirectPromise()
-      return client
-    })()
-  }
-  return initialization
+export async function initializeAuth(): Promise<MsalClient> {
+  return auth.initializeAuth()
 }
 
 export async function getSignedInAccount(): Promise<AccountInfo | null> {
-  const auth = await initializeAuth()
-  return auth.getActiveAccount() ?? auth.getAllAccounts()[0] ?? null
+  return auth.getSignedInAccount()
 }
 
 export async function signIn(): Promise<void> {
-  const auth = await initializeAuth()
-  await auth.loginRedirect({ scopes: apiScopes })
+  return auth.signIn()
 }
 
 export async function signOut(): Promise<void> {
-  const auth = await initializeAuth()
-  const account = await getSignedInAccount()
-  await auth.logoutRedirect({ account: account ?? undefined })
+  return auth.signOut()
 }
 
 export async function acquireApiToken(): Promise<AuthenticationResult | null> {
-  const auth = await initializeAuth()
-  const account = await getSignedInAccount()
-  if (!account) throw new Error('Sign in with Microsoft before requesting API permission')
-  try {
-    return await auth.acquireTokenSilent({ account, scopes: apiScopes })
-  } catch (error) {
-    if (error instanceof InteractionRequiredAuthError) {
-      await auth.acquireTokenRedirect({ account, scopes: apiScopes })
-      return null
-    }
-    throw error
-  }
+  return auth.acquireApiToken()
 }
