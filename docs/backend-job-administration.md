@@ -18,7 +18,14 @@ A separate environment variable is required:
 
 `JOB_ADMIN_TOKEN`
 
-The token must contain at least 32 characters.
+The token must contain at least 32 characters and must be an ASCII
+RFC 7235 `token68` value (letters, digits, `-._~+/`, optional trailing
+`=`), for example the output of `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+A token outside that grammar (non-ASCII, embedded whitespace or other
+punctuation) cannot be sent reliably in an HTTP `Authorization` header,
+so the endpoints fail closed with `503 Job administration is not
+configured`. The configured value is never echoed in responses or in
+the runtime security status report.
 
 Do not commit real tokens or put them in URLs.
 
