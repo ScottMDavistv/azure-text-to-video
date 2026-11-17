@@ -249,6 +249,25 @@ watchdog_kill() {      # L-3: launcher SIGKILL -> watchdog tears the session dow
   [[ -z "$(c1_marked_pids "$s")" && ! -e "$s" ]]
 }
 t 'watchdog removes processes and session files after the launcher is SIGKILLed' watchdog_kill
+watchdog_zombie() {    # launcher SIGKILLed but NOT yet reaped by its parent (zombie)
+  local s fake w parent; s=$(c1_session_new "$ROOT")
+  # A parent that never reaps: its child plays the launcher.
+  python3 -I -c 'import os,sys,time
+p=os.fork()
+if p==0: time.sleep(300); os._exit(0)
+print(p, flush=True); time.sleep(60)' >"$s/fake" & parent=$!
+  for _ in $(seq 1 30); do [[ -s "$s/fake" ]] && break; sleep 0.1; done
+  fake=$(cat "$s/fake")
+  w=$(c1_spawn "$s" victim sleep 300)
+  c1_start_watchdog "$ROOT" "$s" "$fake" "$HERE/../lib/c1-lib.sh"; sleep 0.5
+  kill -KILL "$fake"; sleep 0.3
+  [[ "$(c1_proc_stat_field "$fake" 1)" == Z ]]           # still an unreaped zombie
+  for _ in $(seq 1 40); do [[ -z "$(c1_marked_pids "$s")" && ! -e "$s" ]] && break; sleep 0.25; done
+  local ok=0; [[ -z "$(c1_marked_pids "$s")" && ! -e "$s" ]] && ok=1
+  kill "$parent" 2>/dev/null || true
+  (( ok == 1 ))
+}
+t 'watchdog treats an unreaped (zombie) launcher as gone' watchdog_zombie
 watchdog_normal() {    # normal cleanup stops the watchdog without a competing cleanup
   local s fake; s=$(c1_session_new "$ROOT")
   sleep 300 & fake=$!
