@@ -58,4 +58,5 @@ def reconcile_verified_fal_charge(
         charge_cents=actual_cents, provider_request_id=request_id,
         provider_receipt=provider_receipt,
         verify_provider_receipt=verify_provider_receipt,
+        submission_table=submission_table,
     )
