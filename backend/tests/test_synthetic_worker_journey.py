@@ -12,7 +12,8 @@ JID = str(uuid4())
 def owned_job():
     return {"PartitionKey": "video", "RowKey": JID,
             "prompt": "A quiet lake", "status": "queued",
-            "projectId": PID, "createdBy": UID}
+            "projectId": PID, "createdBy": UID,
+            "dispatchQueueType": "synthetic"}
 
 @pytest.fixture
 def config(monkeypatch):
