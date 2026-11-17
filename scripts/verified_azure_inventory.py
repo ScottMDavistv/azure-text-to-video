@@ -112,7 +112,7 @@ def load(repo, token, *, read=api_get, now=None):
         if (not isinstance(run, dict) or run.get("conclusion") != "success" or
                 run.get("head_branch") != "main" or run.get("event") not in
                 ("schedule", "workflow_dispatch", "push") or
-                not str(run.get("path", "")).startswith(WORKFLOW + "@") or
+                run.get("path") != WORKFLOW or
                 (run.get("repository") or {}).get("full_name", "").casefold() != repo.casefold()):
             continue
         age = (now - timestamp(run.get("created_at"))).total_seconds()
