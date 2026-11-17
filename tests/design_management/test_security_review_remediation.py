@@ -10,7 +10,7 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 HEAD = "a" * 40
 PR = {"number": 46, "state": "open", "draft": True,
-      "head": {"sha": HEAD}, "base": {"ref": "main",
+      "head": {"sha": HEAD}, "user": {"login": "owner"}, "base": {"ref": "main",
       "repo": {"full_name": "ScottMDavistv/azure-text-to-video"}}}
 REVIEW = {"commit_id": HEAD, "state": "COMMENTED",
           "user": {"login": "copilot-pull-request-reviewer", "type": "Bot"},
@@ -20,10 +20,15 @@ REVIEW = {"commit_id": HEAD, "state": "COMMENTED",
 
 
 def assess(pr=PR, reviews=None, issues=None, login="copilot-pull-request-reviewer",
-           kind="Bot"):
+           kind="Bot", **overrides):
     return mod.plan(pr, [REVIEW] if reviews is None else reviews,
                     [] if issues is None else issues,
-                    reviewer_login=login, reviewer_type=kind)
+                    reviewer_login=login, reviewer_type=kind,
+                    **dict(dict(coding_actor_login="coding-agent",
+                                coding_session_id="coding-session-1",
+                                reviewer_session_id="review-session-2",
+                                independence_verified=True, reviews_complete=True,
+                                comments_complete=True, issues_complete=True), **overrides))
 
 
 class SecurityRemediationTests(unittest.TestCase):
@@ -41,13 +46,13 @@ class SecurityRemediationTests(unittest.TestCase):
 
     def test_stale_review_never_authenticates(self):
         bad = dict(REVIEW, commit_id="b" * 40)
-        self.assertEqual(assess(reviews=[bad])["tasks"], [])
+        self.assertEqual(assess(reviews=[bad])["state"], "hold")
 
     def test_fake_reviewer_and_untrusted_actor_fail_closed(self):
         self.assertEqual(assess(login="someone-else")["state"], "hold")
         self.assertEqual(assess(kind="User")["state"], "hold")
         forged = dict(REVIEW, user={"login": "someone-else", "type": "Bot"})
-        self.assertEqual(assess(reviews=[forged])["tasks"], [])
+        self.assertEqual(assess(reviews=[forged])["state"], "hold")
 
     def test_protected_main_and_draft_required(self):
         for mutation in ({"draft": False}, {"state": "closed"},
@@ -56,8 +61,7 @@ class SecurityRemediationTests(unittest.TestCase):
             self.assertEqual(assess(pr=dict(PR, **mutation))["state"], "hold")
 
     def test_partial_review_inventory_holds(self):
-        self.assertEqual(mod.plan(PR, None, [], reviewer_login="copilot-pull-request-reviewer",
-                                  reviewer_type="Bot")["state"], "hold")
+        self.assertEqual(assess(reviews="missing")["state"], "hold")
         wrong = dict(REVIEW, comments="not-a-list")
         self.assertEqual(assess(reviews=[wrong])["state"], "hold")
 
@@ -67,6 +71,42 @@ class SecurityRemediationTests(unittest.TestCase):
         self.assertTrue(mod.sensitive([".github/workflows/ci.yml"], complete=True))
         self.assertTrue(mod.sensitive(["docs/readme.md"], complete=False))
         self.assertFalse(mod.sensitive(["docs/readme.md"], complete=True))
+
+    def test_unrecognized_and_malformed_paths_are_sensitive(self):
+        for path in ("backend/main.py", "scripts/new_controller.py", "", "../misc.py",
+                     "docs/../readme.md", "/docs/readme.md", "docs//readme.md",
+                     "docs/readme.md\\\\evil", "frontend/src/new.ts", None):
+            with self.subTest(path=path):
+                self.assertTrue(mod.sensitive([path], complete=True))
+        self.assertFalse(mod.sensitive(["docs/readme.md"], complete=True))
+        self.assertFalse(mod.sensitive(["docs/guide/setup.md"], complete=True))
+
+    def test_reviewer_coder_independence_and_provenance(self):
+        for change in (dict(coding_actor_login="copilot-pull-request-reviewer"),
+                       dict(coding_session_id="review-session-2"),
+                       dict(coding_actor_login=None),
+                       dict(independence_verified=False),
+                       dict(reviewer_session_id=""),
+                       dict(coding_session_id=None)):
+            with self.subTest(change=change):
+                self.assertEqual(assess(**change)["state"], "hold")
+        self.assertEqual(assess(pr=dict(PR, user={"login": "copilot-pull-request-reviewer"}))["state"], "hold")
+        self.assertEqual(assess(pr=dict(PR, user={}))["state"], "hold")
+
+    def test_all_inventory_pagination_must_be_verified(self):
+        for field in ("reviews_complete", "comments_complete", "issues_complete"):
+            with self.subTest(field=field):
+                self.assertEqual(assess(**{field: False})["state"], "hold")
+                self.assertEqual(assess(**{field: None})["state"], "hold")
+        self.assertEqual(assess(issues=[None])["state"], "hold")
+        self.assertEqual(assess(reviews=[REVIEW], issues_complete=True)["state"], "review-findings")
+
+    def test_missing_or_stale_review_evidence_holds(self):
+        self.assertEqual(assess(reviews=[])["state"], "hold")
+        self.assertEqual(assess(reviews=[dict(REVIEW, commit_id="b" * 40)])["state"], "hold")
+        self.assertEqual(assess(reviews=[dict(REVIEW, comments=None)])["state"], "hold")
+        no_findings = dict(REVIEW, comments=[])
+        self.assertEqual(assess(reviews=[no_findings])["state"], "no-new-findings")
 
     def test_agent_cap_and_credit_gates(self):
         ok = dict(active_agents=1, reviewer_active=True, isolated_secrets=True,
