@@ -1,80 +1,79 @@
 # Independent security review handoff — C1 validation harness
 
-**Status: DRAFT — awaiting independent review. The implementing Claude session has not approved and must not approve this change.**
+**Status: DRAFT. The remediation awaits a NEW independent full-diff review.** Neither the implementing session nor the author of the earlier reviewer patch may review or approve it.
 
-## What to review
+## History
 
-The complete diff of this PR against `test/c1-playwright-entra-validation` at `6b45d0acad10065cb825c12c4544cabdad3441d7`. All changes are under `tools/c1-harness/`:
+| Head | What | Who |
+|---|---|---|
+| `19f8851` | Original harness | Implementation session A |
+| — | Independent review of `19f8851`: **REQUEST CHANGES** (H-1, H-2, M-1–M-4, L-1–L-5). [PR #74 comment](https://github.com/ScottMDavistv/azure-text-to-video/pull/74#issuecomment-6960978238) | Reviewer session B |
+| this branch | Remediation of every finding, plus a new finding, N-1 | **Session B**, now acting as implementer at the owner's request. Session B also wrote the earlier reviewer patch, which was treated as untrusted input and re-verified here. **Session B must therefore not review this.** |
 
-| File | Role |
-|---|---|
-| `c1-session.sh` | One-command launcher: preflight → dependencies → offline phases → private desktop → supervised phases → evidence → cleanup |
-| `lib/c1-lib.sh` | Commit/worktree verification, preflight, dependency install, Xvfb/x11vnc/noVNC startup, session lock, cleanup |
-| `lib/c1-evidence.mjs` | In-memory Playwright report reduction, verdicts, sanitizer, review package |
-| `supplemental/playwright.supplemental.config.mjs` | LIVE-only config for the two supplemental supervised cases, serving the same approved worktree |
-| `supplemental/c1-supervised.spec.mjs` | Supervised **consent denial** and **cancelled logout** tests, added because the approved README says these must be "separately tested" |
-| `tests/test_c1_lib.sh`, `tests/c1-evidence.test.mjs` | Regression tests for startup, failure recovery and security restrictions |
-| `README.md` | Operator guide |
+The remediation keeps the pins at auth `73fe6d2` / Playwright `6b45d0a`. Per the owner, re-pinning happens only after the PR #60 alignment with PR #46 `6b62c05` has been independently reviewed.
 
-**No approved test was modified.** `frontend/**`, PR #46's authentication code, the Entra registration, the origin allowlist and the Playwright allowlists are untouched. `tests/test_c1_lib.sh` enforces this by asserting that `git diff --name-only 6b45d0a HEAD` contains only `tools/c1-harness/**`.
+## What changed (by finding)
 
-## Review focus (from the assignment)
+| ID | Change | Regression evidence (offline) |
+|---|---|---|
+| H-1 | The shell test runner no longer calls cases in a `\|\|` context (errexit was masked there), and a self-check case must fail. | `test runner enforces every assertion` |
+| H-2 | x11vnc drops `-localhost`, which made x11vnc 0.9.16 refuse every Unix-socket client. `tests/rfb_probe.py` performs full RFB authentication over **both** the Unix socket and the noVNC websocket: none-auth refused, wrong password rejected, correct password accepted. | `desktop: …`; the probe fails if `-localhost` is restored |
+| M-1 | Evidence fails closed. **R12**: any FAIL test or non-zero phase. **R11**: port privacy must be technically verified. **R10**: Playwright 1.65.1 plus the headless *and* headed Chromium builds expected by `playwright-core/browsers.json`. **R2B**: the browser-mutation runner, when the pinned suite has one. | `M-1a…M-1d` Node tests; a real `--offline-only` run with substituted Chromium 153 reports FAIL |
+| M-2 | Fail-closed Codespaces privacy (see "Port privacy design" below). Supervised mode refuses to run outside Codespaces. The typed `PRIVATE` fallback is removed. | 12 offline cases against `tests/mock_forwarder.py`, plus simulated-Codespace end-to-end runs |
+| M-3 | Every signal is ownership-verified (`c1_owned_pid`): the session marker, plus the kernel start time for recorded `pid starttime` entries. The PID must be numeric and above 1, and not the caller. Group signals go only to PIDs that are both group and session leader (the `setsid` leader `c1_spawn` created). | Cases for reused PIDs, legacy/garbage lines, unmarked group members, a marked non-leader and a marked job leader in a foreign session |
+| M-4 | R8 PASS requires a passing test, MSAL `access_denied`, `AADSTS65004`, and **two operator attestations** (no prior consent; consent prompt shown and cancelled). Otherwise it is INCOMPLETE, never a risk-accepted PASS. The spec makes `access_denied` without AADSTS INCOMPLETE. | `M-4` Node tests |
+| L-1 | The harness self-check rejects skip-worktree/assume-unchanged entries and compares `git hash-object` with `HEAD:` for every harness file. | assume-unchanged and skip-worktree cases |
+| L-2 | Phase stdout and stderr go to `0700` session files. The terminal shows only `--summarize` (one sanitized line per test) and `--filter` (sanitizer-approved lines; others withheld). | `L-2` Node tests |
+| L-3 | A marker-scoped watchdog in its own session tears everything down when the launcher's PID and start time disappear, and treats a zombie as gone. Cleanup is verified on every exit path; a failure exits non-zero. | `watchdog …` cases; real-launcher SIGKILL clean in about 1 s |
+| L-4 | Test phases run under `env -i` with an allowlist (`HOME PATH LANG LC_ALL TERM USER DISPLAY XAUTHORITY C1_HARNESS_SESSION`). `PLAYWRIGHT_*`, `PW_*` and `npm_config_*` are unset. Probes ignore proxies and CA overrides. | `test-phase environment is an allowlist` |
+| L-5 | The helper-equivalence tests read the SHA from `c1-lib.sh`, and fail rather than skip. | `L-5` Node test |
+| **N-1** (new, High) | `preflight()` used `verification && check label`, which is exempt from errexit, so a failed ancestry/diff, worktree, localhost or post-install check was ignored (present since `19f8851`). Each check now returns on failure, the session aborts before starting anything, and R1 FAILS unless all six mandatory check labels are present. | Real run with broken ancestry: exit 1 "preflight failed; nothing was started"; `N-1` Node test; static check |
 
-1. **Network exposure.**
-   - The only TCP listener is websockify/noVNC on `127.0.0.1:6080`; the launcher aborts if the set of harness listeners differs.
-   - Xvfb runs with `-nolisten tcp -nolisten local` and a random `mcookie` in a `0600` Xauthority file.
-   - x11vnc uses `-rfbport 0 -unixsock <0600 socket>`. The RFB handshake test asserts it offers only security type 2 (VNC auth).
-   - Codespaces port visibility is set and verified as private with `gh`. If `gh` lacks scope, the operator must type `PRIVATE`.
-2. **Authentication handling.** The harness never sees credentials. The operator types them into Microsoft pages in the headed Chromium. The supplemental tests wrap the real MSAL instance and export only `{state, code, aadsts}`, matched against strict regexes.
-3. **Credential confidentiality.**
-   - Trace, video and screenshots are off.
-   - `TMPDIR` is set to the `0700` session directory, so Playwright output and Chromium profiles are created there.
-   - Raw JSON reports are read in memory, and the session directory is scanned for JWT/Bearer strings before deletion.
-   - The sanitizer refuses output containing JWTs, bearer strings, emails/UPNs, GUIDs, URLs with a query or fragment, OAuth parameter names, cookie headers or long opaque strings.
-4. **Cleanup.**
-   - Every spawned process carries `C1_HARNESS_SESSION=<session dir>`. Cleanup kills the recorded process groups plus every process whose environment carries the marker, including orphaned Vite servers.
-   - The session directory is then removed (`realpath`-guarded `rm`). Ports 5173 and 6080 must be free afterwards.
-   - A session lock with PID and kernel start time detects stale sessions after a crash.
-5. **Exact-head evidence integrity.**
-   - The approved SHAs are pinned constants with no environment override.
-   - The auth commit must be an ancestor, and `git diff --name-only auth pw` must equal the six approved files exactly.
-   - Tests run in a detached worktree at exactly `6b45d0a`, clean, with no skip-worktree or assume-unchanged entries. This is re-checked after dependency installation and again after the run.
-   - The approved config's own `VITE_C1_SHA` and `assertBuild` checks still apply.
+## Port privacy design (M-2): to be validated by the reviewer in a real private Codespace
+
+1. Xvfb, fluxbox and x11vnc start with no TCP listener.
+2. A Python decoy serves a 128-bit nonce on `127.0.0.1:6080`.
+3. The harness probes `https://$CODESPACE_NAME-6080.$GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN/c1-privacy-<nonce>.txt` twice, with `curl --proto =https --noproxy '*'` under `env -i`, using system CAs, and without following redirects:
+   - **without credentials**: any 2xx, or any body containing the nonce, means *public*, and the harness stops;
+   - **with `X-Github-Token`** (the header comes from a `0600` file): it must return 200 with the nonce.
+   It polls for up to 120 s.
+4. Organization-wide visibility also requires sign-in, so the probe alone cannot exclude it. The harness therefore requires either a `gh` read-back of `private` or a repository owner type of `User` (GitHub API, read with the token).
+5. The decoy stops, and websockify starts on the same port. `/vnc.html` is re-probed the same way, using the `noVNC` signature, before the password is printed and before each supervised phase.
+6. A background monitor re-probes every 15 s. It stops noVNC immediately if the port is seen public, or after 3 consecutive unverifiable checks.
+
+**Assumptions the reviewer must confirm in a real Codespace:**
+- an unauthenticated request to a private port returns a redirect or 401/403 rather than a 2xx;
+- `X-Github-Token: $GITHUB_TOKEN` reaches a private port from inside the Codespace;
+- personal Codespaces offer no organization visibility.
+
+If any of these is false, the design fails **closed**: the desktop is not served.
 
 ## Verification performed by the implementing session (not a substitute for review)
 
-These ran in an Anthropic cloud sandbox, not in Codespaces, with no Microsoft network access:
+Anthropic cloud sandbox: Ubuntu 24.04, Node 22.23.4, x11vnc 0.9.16, ShellCheck 0.9.0. **No real Codespace and no Microsoft network.** The Playwright CDN is blocked, so local runs used Chromium **153** (Playwright 1.65.1 expects **159.0.8154.6**). R10 correctly reports those runs as FAIL.
 
-- `tests/test_c1_lib.sh`: **44 passed, 0 failed, 0 skipped**. This includes the desktop integration tests: loopback-only noVNC, RFB handshake offers only VNC auth, no abstract X socket, one-time password file consumed, cleanup, and stale-session recovery.
-- `tests/c1-evidence.test.mjs`: **19 passed, 0 failed**. This includes byte-equivalence of the replicated allowlists, `allowedRequest` and `assertMemoryOnly` against the approved spec at `6b45d0a`.
-- `c1-session.sh --offline-only` through the real launcher, against the approved worktree at `6b45d0a`:
-  - Static mutation 7/7.
-  - Offline suite **7 passed / 0 failed** (3 live tests skipped by design).
-  - Unconfigured suite **2 passed / 0 failed**.
-  - Evidence: R1–R5 PASS, R6–R9 INCOMPLETE (not executed), overall INCOMPLETE. Cleanup PASS.
-  - **Caveat:** the Playwright CDN is blocked in the sandbox, so a locally available Chromium 153 was symlinked in place of revision 1255 (Chromium 159). Codespaces downloads the correct build. Re-run the offline baseline there.
-- A headed supplemental run on the Xvfb desktop reached the supervised `page.pause()`, with the Playwright Inspector visible and the MSAL popup aimed at the tenant authority. Microsoft itself was unreachable from the sandbox.
-- SIGTERM and SIGHUP while waiting for the operator: listeners closed, zero harness processes left, state directory empty.
-- **Not executed:** any live Entra sign-in (R6–R9), Codespaces port forwarding and `gh codespace ports` visibility, or GitHub Actions for this PR (see the PR description).
+- `tests/test_c1_lib.sh`: all cases pass, including desktop RFB authentication over unix and websocket, privacy against the mock forwarder, watchdog and process-group safety.
+- `tests/c1-evidence.test.mjs`: all pass.
+- ShellCheck at warning level: clean. `security_invariants.py`: pass.
+- Library mutation check (`lib_mutations.py`, session tooling): 5/6 injected defects are detected. "Recorded start time ignored" escapes by design, because the marker check alone already prevents every observable mis-signal and the start time is a redundant layer.
+- Real launcher, `--offline-only`: R1, R2, R3, R4, R5 and R12 PASS; R10 FAIL (Chromium 153); R2B INCOMPLETE (no runner at `6b45d0a`); cleanup PASS.
+- Real launcher in a **simulated** Codespace (local TLS mock of the forwarding domain and `api.github.com`, test CA, failing `gh` shim):
 
-## Defects found and fixed during implementation (for reviewer awareness)
+  | Scenario | Result |
+  |---|---|
+  | Public | Desktop never served, no password printed, R11 FAIL, exit 1 |
+  | Private | Password printed only after verification; VNC auth correct via noVNC; only `127.0.0.1:6080` listened; R11 PASS |
+  | Flipped to public mid-session | noVNC torn down in 14 s, remaining phases blocked, R11 FAIL |
+  | Organization-owned repository | Refused |
 
-- Under `pipefail`, `c1_marked_pids` returned non-zero, which aborted cleanup. Fixed and covered by a regression test.
-- `--git-common-dir` was relative, so a *modified* cached worktree was silently recreated instead of rejected. Fixed with `--path-format=absolute`; the test now asserts rejection.
-- SIGPIPE: `tr </dev/urandom | head` killed the password generator under `pipefail`. The same class of bug affected `grep -q` pipelines and could have hidden a dirty-tree or marker match. All were rewritten without early-exit pipelines.
-- The test wrapper originally ran cases inside `if (...)`, where bash disables `errexit`. Cases now run with `errexit` and `pipefail` active, and a signal exit fails the test.
-- Cancelled logout: MSAL 4.30 `logoutPopup` clears the local cache **before** opening the popup and swallows popup-closed errors. A cancelled logout therefore resolves; it does not reject with `user_cancelled`. The test detects cancellation by whether the popup ever returned to the app origin.
+  In every scenario the token was absent from the terminal and the evidence, and cleanup was complete.
+- Interruptions with the desktop served: SIGTERM, SIGHUP and SIGINT each cleaned up fully in 0.5 s, and SIGKILL in 1.0 s via the watchdog.
 
-## Open questions and accepted risks for the reviewer to decide
-
-1. **VNC password strength.** RFB VNC auth truncates passwords to 8 characters (about 47 bits from `[A-Za-z0-9]`). The primary control is GitHub-authenticated private port forwarding; VNC auth is defence in depth. Is that acceptable, or should the harness also require noVNC-side TLS or token auth?
-2. **Visibility race.** If a user's default port visibility is Public, port 6080 could be briefly public between the listener starting and the visibility check. VNC auth still applies. Should the harness refuse when `gh` cannot verify, instead of falling back to operator confirmation?
-3. **Consent-denial acceptance.** PASS requires `access_denied` plus either `AADSTS65004` or no AADSTS code. Tenant-wide admin consent makes the row permanently INCOMPLETE. Confirm these criteria.
-4. **Cancelled-logout semantics.** Local sign-out completes even though Microsoft sign-out is cancelled, so the Microsoft SSO session may survive in that browser. The harness discards the context; real users would not. Is this a PR #46 finding to raise?
-5. **Duplicated helpers.** The supplemental spec replicates the approved LIVE egress and storage helpers. Equivalence is tested for the allowlists, `allowedRequest` and `assertMemoryOnly`, and by fragment for the guard. Should these move into a shared module in a future PR #60 revision instead?
-6. **Install scripts.** `npm ci` runs lifecycle scripts from the approved lockfile, exactly as the approved README does. `@playwright/test` uses `--ignore-scripts`. `sudo apt-get` installs only the listed packages plus `playwright install-deps chromium`.
-7. **Terminal output.** Playwright's list reporter writes to the operator's terminal, and it may include MSAL error text. The harness never persists it; terminal scrollback is the operator's responsibility.
+**Not executed:** a real Codespace, Chromium 159, browser mutations at the pinned SHA (no runner), live Entra (R6–R9), and GitHub Actions for `tools/c1-harness` (no workflow runs these tests).
 
 ## Requested verdict
 
-APPROVE / REQUEST CHANGES for the harness PR, with findings. Keep the PR in **draft** until that verdict. Don't merge automatically, and don't use this harness's evidence to certify C1 without a separate independent review of a supervised session's review package.
+APPROVE / REQUEST CHANGES for the remediation, with findings. Keep the PR in **draft**. Don't use this harness's evidence to certify C1 until all of the following are done:
+1. the re-pin to the independently reviewed PR #60;
+2. a real-Codespace instrument validation;
+3. a separate independent review of a supervised session's review package.
