@@ -243,7 +243,7 @@ async function startSink() {
   return { port: server.address().port, hits, close: () => new Promise(resolve => server.close(resolve)) }
 }
 
-test('M6-B/M6-C browser: wrong-port HTTP and WebSocket egress are blocked with zero delivery (positive-control sink)', async ({ page, context, browser }) => {
+test('M6-B/M6-C browser: egress firewall blocks wrong-port HTTP and WebSockets with zero delivery (positive-control sink)', async ({ page, context, browser }) => {
   test.skip(live || unconfigured, 'Offline synthetic egress probe only')
   const sink = await startSink()
   try {
