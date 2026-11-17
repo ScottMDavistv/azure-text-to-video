@@ -106,6 +106,11 @@ def read_project_job(project_id: UUID, job_id: UUID,
         raise HTTPException(503, "Project job storage unavailable") from None
 
 def synthetic_dispatch_enabled():
+    from job_queue import synthetic_queue_name
+    try:
+        synthetic_queue_name()
+    except ValueError:
+        return False
     # A queued job must never enter a paid/live worker configuration, regardless
     # of which common affirmative environment spelling was used.
     unsafe = {"1", "true", "yes"}
@@ -127,6 +132,7 @@ def synthetic_dispatch_enabled():
 def queue_project_job(project_id: UUID, job_id: UUID,
                       authorization: str | None = Header(default=None)):
     from jobs import transition_job
+    from job_queue import enqueue_synthetic_job
     from dispatch_recovery import (DispatchConflict, DispatchUncertain,
                                    dispatch_queued_job)
     try:
@@ -136,7 +142,7 @@ def queue_project_job(project_id: UUID, job_id: UUID,
         if not synthetic_dispatch_enabled():
             raise HTTPException(503, "Synthetic dispatch is disabled")
         transition_job(str(job_id), "queued", dispatchState="pending")
-        result = dispatch_queued_job(str(job_id))
+        result = dispatch_queued_job(str(job_id), send=enqueue_synthetic_job)
         return {"job_id": str(job_id), "status": "queued",
                 "dispatched": result["dispatched"]}
     except (DispatchConflict, ValueError) as exc:
