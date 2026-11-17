@@ -11,8 +11,8 @@ const mutations = [
   { id: 'M1', file: 'src/entraAuth.ts', before: "cacheLocation: 'memoryStorage'", after: "cacheLocation: 'localStorage'", grep: 'configured auth runtime is tenant-scoped', proof: /localStorage/ },
   { id: 'M2', file: 'src/entraAuth.ts', before: 'redirectUri: getRedirectUri(window.location.origin)', after: 'redirectUri: window.location.origin', grep: 'M2 browser:', proof: /127\.0\.0\.1/ },
   { id: 'M3', file: 'src/entraAuth.ts', before: 'https://login.microsoftonline.com/$'+'{tenantId}', after: 'https://login.microsoftonline.com/common', grep: 'configured auth runtime is tenant-scoped', proof: /common/ },
-  { id: 'M4', file: 'src/entraAuth.ts', before: 'auth.acquireTokenPopup(', after: 'auth.acquireTokenRedirect(', grep: 'M4 browser:', proof: /redirect: 1/ },
-  { id: 'M5', file: 'src/entraAuth.ts', before: 'await auth.logoutPopup(', after: 'await Promise.resolve(', grep: 'M5 browser:', proof: /count: 0/ },
+  { id: 'M4', file: 'src/entraAuth.ts', before: 'auth.acquireTokenPopup(', after: 'auth.acquireTokenRedirect(', grep: 'M4 browser:', proof: /["']?redirect["']?:\s*1/ },
+  { id: 'M5', file: 'src/entraAuth.ts', before: 'await auth.logoutPopup(', after: 'await Promise.resolve(', grep: 'M5 browser:', proof: /["']?count["']?:\s*0/ },
   { id: 'M6', file: 'src/App.tsx', before: 'export default function App() {', after: "export default function App() {\n  fetch('https://unauthorized-fal.invalid/');", grep: 'M5 browser:', proof: /unauthorized-fal\.invalid/ },
   { id: 'M7', file: 'src/entraAuth.ts', before: 'export async function signIn(): Promise<void> {', after: "export async function signIn(): Promise<void> {\n  sessionStorage.setItem('token', 'Bearer eyJsynthetic-only');", grep: 'attempted login sends correct tenant', proof: /sessionSafe/ },
 ]
