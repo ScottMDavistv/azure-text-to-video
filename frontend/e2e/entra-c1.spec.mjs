@@ -78,7 +78,7 @@ async function observeContext(context) {
     const url = new URL(route.request().url())
     const local = allowedLocalOrigins.has(url.origin)
     if ((!live && !local) || (live && !allowedRequest(url))) {
-      problems.push('Blocked unauthorized HTTP origin ' + url.hostname)
+      if (!allowedRequest(url)) problems.push('Blocked unauthorized HTTP origin ' + url.hostname)
       await route.abort('blockedbyclient')
     } else {
       await route.continue()
