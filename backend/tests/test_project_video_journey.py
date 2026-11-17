@@ -15,7 +15,8 @@ ACTOR = Actor(UID, True)
 def record(owner=UID, project=PID, state="completed"):
     return {"PartitionKey": "video", "RowKey": JID, "prompt": "Morning light",
             "createdAt": "2026-11-16T00:00:00Z", "status": state,
-            "createdBy": owner, "projectId": project}
+            "createdBy": owner, "projectId": project,
+            "dispatchQueueType": "synthetic"}
 
 @pytest.fixture
 def enabled(monkeypatch):
@@ -70,6 +71,7 @@ def test_authorized_creation_records_server_identity_not_caller_fields(enabled):
     assert entity["createdBy"] == UID
     assert entity["projectId"] == PID
     assert entity["prompt"] == "Morning light"
+    assert entity["dispatchQueueType"] == "synthetic"
     assert response["status"] == "created"
     assert "createdBy" not in response
 
@@ -307,3 +309,34 @@ def test_synthetic_dispatch_fails_closed_on_shared_queue(enabled, monkeypatch):
     for value in ("", QUEUE_NAME, "BAD_QUEUE"):
         monkeypatch.setenv("AZURE_SYNTHETIC_JOBS_QUEUE", value)
         assert routes.synthetic_dispatch_enabled() is False
+
+
+def test_legacy_reconciler_refuses_synthetic_job_without_queue_send(enabled):
+    from dispatch_recovery import dispatch_queued_job, DispatchConflict
+    from unittest.mock import Mock
+    job = record(state="queued")
+    job["dispatchQueueType"] = "synthetic"
+    job["dispatchAttempts"] = 1
+    table = Mock()
+    table.get_entity.return_value = job
+    with patch("job_queue.enqueue_job") as legacy_send, \
+         pytest.raises(DispatchConflict, match="dedicated queue"):
+        dispatch_queued_job(JID, table=table)
+    table.update_entity.assert_not_called()
+    legacy_send.assert_not_called()
+
+
+def test_queue_rejects_unclassified_job_before_state_mutation(enabled, monkeypatch):
+    monkeypatch.setenv("ENABLE_SYNTHETIC_VIDEO_DISPATCH", "true")
+    table = MagicMock()
+    old_job = record(state="created")
+    del old_job["dispatchQueueType"]
+    table.get_entity.return_value = old_job
+    with patch.object(routes, "get_jobs_table_client", return_value=table), \
+         patch.object(routes, "verify_project_token", return_value=ACTOR), \
+         patch.object(routes, "require_project_role"), \
+         patch("jobs.transition_job") as transition:
+        with pytest.raises(HTTPException) as error:
+            routes.queue_project_job(PID, JID, authorization="Bearer signed")
+    assert error.value.status_code == 409
+    transition.assert_not_called()
