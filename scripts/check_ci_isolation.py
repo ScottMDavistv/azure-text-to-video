@@ -1,153 +1,199 @@
 #!/usr/bin/env python3
-"""Read-only workflow privilege audit. Execute the trusted main copy on PR YAML as DATA."""
+"""Fail-closed GitHub Actions privilege isolation audit; PR YAML is data."""
 import argparse
 import pathlib
 import re
 
 GATE = ".github/workflows/pr-isolation-gate.yml"
+CHECKOUT = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+PYTHON = "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065"
+EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+REF = re.compile(r"""github\.ref\s*==\s*(['"])refs/heads/main\1""")
+EVENT = re.compile(r"""github\.event_name\s*(?:==|!=)\s*(['"])[a-z_]+\1""")
+FLAG = re.compile(r"""vars\.[A-Za-z_][A-Za-z0-9_]*\s*==\s*(['"])true\1""")
+CONFIRM = re.compile(r"""inputs\.confirmation\s*==\s*(['"])DEPLOY-DEV\1""")
+SECRET = re.compile(r"\bsecrets\b", re.I)
+NAMED = re.compile(r"""\bsecrets(?:\.([A-Za-z_][A-Za-z0-9_]*)|\[\s*['"]([^'"]+)['"]\s*\])""", re.I)
 
 def events(document):
     value = document.get("on")
-    if isinstance(value, dict):
-        return set(value)
-    if isinstance(value, list):
-        return set(value)
-    if isinstance(value, str):
-        return {value}
-    return set()
+    return set(value) if isinstance(value, (dict, list)) else ({value} if isinstance(value, str) else set())
 
-def privileged_secrets(value):
-    """Extract custom Actions secret references from job YAML, never secret values."""
-    if isinstance(value, dict):
-        found = set()
-        for entry in value.values():
-            found.update(privileged_secrets(entry))
-        return found
-    if isinstance(value, list):
-        found = set()
-        for entry in value:
-            found.update(privileged_secrets(entry))
-        return found
-    if isinstance(value, str):
-        return set(re.findall(r"\bsecrets\.([A-Za-z0-9_]+)\b", value)) - {"GITHUB_TOKEN"}
-    return set()
+def expressions(obj):
+    if isinstance(obj, dict):
+        for v in obj.values():
+            yield from expressions(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from expressions(v)
+    elif isinstance(obj, str):
+        for v in EXPR.finditer(obj):
+            yield v.group(1)
 
+def secret_refs(obj):
+    out = set()
+    for expression in expressions(obj):
+        if SECRET.search(expression):
+            refs = NAMED.findall(expression)
+            out.update((x or y) for x, y in refs)
+            if not refs or re.search(r"\bsecrets\b(?!\s*(?:\.|\[))", expression, re.I):
+                out.add("<dynamic secret context>")
+    return out
 
-def main_only(expression):
-    return isinstance(expression, str) and "github.ref" in expression and "refs/heads/main" in expression
+def privileged_secrets(obj):
+    return secret_refs(obj) - {"GITHUB_TOKEN"}
 
-def excludes_pr(expression):
-    if not isinstance(expression, str):
+def condition_terms(expr):
+    """Only whole, positive, AND-conjoined literal guards are trusted."""
+    if not isinstance(expr, str):
+        return None
+    src = expr.strip()
+    if src.startswith("${{") and src.endswith("}}"):
+        src = src[3:-2].strip()
+    if not src or "||" in src or "!" in src.replace("!=", ""):
+        return None
+    parts = [p.strip() for p in src.split("&&")]
+    return parts if all(p and any(pattern.fullmatch(p) for pattern in
+                       (REF, EVENT, FLAG, CONFIRM)) for p in parts) else None
+
+def main_only(expr):
+    parts = condition_terms(expr)
+    return bool(parts and any(REF.fullmatch(p) for p in parts))
+
+def excludes_pr(expr):
+    parts = condition_terms(expr)
+    if not parts:
         return False
-    value = re.sub(r"\s+", "", expression).replace('"', "'")
-    return ("github.event_name!='pull_request'" in value or
-            "github.event_name=='workflow_dispatch'" in value)
+    return any(re.fullmatch(r"""github\.event_name\s*==\s*(['"])workflow_dispatch\1""", p)
+               or re.fullmatch(r"""github\.event_name\s*!=\s*(['"])pull_request\1""", p)
+               for p in parts)
 
 def elevated(permissions):
-    if not isinstance(permissions, dict):
-        return True
-    return any(str(v).lower() not in ("read", "none") for v in permissions.values())
+    return not isinstance(permissions, dict) or any(
+        str(v).lower() not in ("read", "none") for v in permissions.values())
 
-def examine(path, document, raw=""):
+def unsafe_push(document):
+    on = document.get("on")
+    if not isinstance(on, dict) or "push" not in on:
+        return False
+    push = on["push"]
+    return not (isinstance(push, dict) and push.get("branches") == ["main"]
+                and not any(k in push for k in ("branches-ignore", "tags", "tags-ignore")))
+
+def expected_gate():
+    """Exact trusted-main structural allowlist; changing any field fails closed."""
+    return {
+        "name": "Trusted PR Workflow Isolation Gate",
+        "on": {"pull_request_target":
+               {"types": ["opened", "reopened", "synchronize", "ready_for_review"]}},
+        "permissions": {"contents": "read"},
+        "concurrency": {"group": "trusted-pr-isolation-${{ github.event.pull_request.number }}",
+                        "cancel-in-progress": "true"},
+        "jobs": {"audit": {
+            "name": "Trusted workflow isolation (read-only)",
+            "runs-on": "ubuntu-latest", "timeout-minutes": "10",
+            "steps": [
+                {"name": "Checkout trusted main scanner without persistent credentials",
+                 "uses": CHECKOUT,
+                 "with": {"ref": "main", "path": "trusted", "persist-credentials": "false"}},
+                {"name": "Checkout untrusted PR files as inert data",
+                 "uses": CHECKOUT,
+                 "with": {"repository": "${{ github.event.pull_request.head.repo.full_name }}",
+                          "ref": "${{ github.event.pull_request.head.sha }}",
+                          "path": "candidate", "persist-credentials": "false"}},
+                {"name": "Configure trusted Python", "uses": PYTHON,
+                 "with": {"python-version": "3.12"}},
+                {"name": "Install pinned YAML parser",
+                 "run": "python -m pip install --disable-pip-version-check 'PyYAML==6.0.2'"},
+                {"name": "Validate PR workflow YAML using only trusted code",
+                 "run": "python trusted/scripts/check_ci_isolation.py --root candidate"},
+            ]
+        }}
+    }
+
+def examine(path, doc, raw=""):
     problems = []
-    if not isinstance(document, dict):
-        return [path + ": expected workflow mapping"]
-    ev = events(document)
-    if not ev:
-        problems.append(path + ": missing events")
-    jobs = document.get("jobs")
-    if not isinstance(jobs, dict) or not jobs:
-        return problems + [path + ": missing jobs"]
-    permissions = document.get("permissions")
-    if not isinstance(permissions, dict):
-        problems.append(path + ": explicit permissions required")
-        permissions = {}
-    pr = "pull_request" in ev
-    target = "pull_request_target" in ev
-    if pr and elevated(permissions):
-        problems.append(path + ": untrusted PR workflow has write permission")
-    # An unreviewed PR may otherwise exfiltrate a repository Actions secret.
-    if (pr or target) and re.search(r"[$][{][{]\s*secrets[.]", raw):
-        problems.append(path + ": untrusted workflow references GitHub secrets")
-    if target:
-        if path != GATE or pr or permissions != {"contents": "read"}:
-            problems.append(path + ": unexpected or privileged pull_request_target")
-        if list(jobs) != ["audit"]:
-            problems.append(path + ": trusted PR-data gate must contain only audit")
-    for name, job in jobs.items():
-        where = path + " job " + name
+    if not isinstance(doc, dict):
+        return [path + ": invalid workflow"]
+    triggers = events(doc)
+    jobs = doc.get("jobs")
+    if not triggers or not isinstance(jobs, dict) or not jobs:
+        return [path + ": missing triggers or jobs"]
+    perms = doc.get("permissions")
+    if not isinstance(perms, dict):
+        problems.append(path + ": explicit workflow permissions required")
+        perms = {}
+    pr, target = "pull_request" in triggers, "pull_request_target" in triggers
+    feature = unsafe_push(doc)
+    untrusted = pr or target or feature
+    leaked = secret_refs(doc)
+    # Also inspect the raw override used by focused unit tests.
+    if raw:
+        leaked.update(secret_refs({"raw": raw}))
+    if untrusted and leaked:
+        problems.append(path + ": untrusted secret context " + repr(sorted(leaked)))
+    if untrusted and elevated(perms):
+        problems.append(path + ": untrusted workflow has write/OIDC access")
+    if target and (path != GATE or doc != expected_gate()):
+        problems.append(path + ": trusted gate violates protected-main structural allowlist")
+    for key, job in jobs.items():
+        where = path + " job " + str(key)
         if not isinstance(job, dict):
             problems.append(where + ": invalid job")
             continue
-        condition = job.get("if", "")
-        privileged = privileged_secrets(job)
-        if privileged and not job.get("environment"):
+        cond = job.get("if", "")
+        local = job.get("permissions", perms)
+        secrets = privileged_secrets(job)
+        privileged = elevated(local) or bool(job.get("environment")) or bool(secrets)
+        if secrets and not job.get("environment"):
             problems.append(where + ": custom secret requires a restricted environment")
-        if privileged and not main_only(condition):
-            problems.append(where + ": custom secret job must be explicitly main-only")
-        if path == ".github/workflows/autonomous-engineering.yml" and privileged:
-            if "DM_COPILOT_DISPATCH_TOKEN" not in privileged:
-                problems.append(where + ": controller must use dedicated environment-only credential name")
-            if "COPILOT_DISPATCH_TOKEN" in privileged or "AUTO_MERGE_USER_TOKEN" in privileged:
+        if privileged and (untrusted or "workflow_dispatch" in triggers or
+                           "workflow_run" in triggers) and not main_only(cond):
+            problems.append(where + ": privileged job must be guarded on main")
+        if path == ".github/workflows/autonomous-engineering.yml":
+            if secrets & {"COPILOT_DISPATCH_TOKEN", "AUTO_MERGE_USER_TOKEN"}:
                 problems.append(where + ": legacy repository secret references forbidden")
-        can_run_on_pr = not (main_only(condition) and excludes_pr(condition))
-        job_permissions = job.get("permissions", permissions)
-        if not isinstance(job_permissions, dict):
-            problems.append(where + ": invalid permission mapping")
-        if pr and can_run_on_pr and elevated(job_permissions):
-            problems.append(where + ": PR job has token or OIDC write access")
-        if pr and can_run_on_pr and job.get("environment"):
-            problems.append(where + ": PR job may access protected environment")
-        if pr and can_run_on_pr and "self-hosted" in str(job.get("runs-on", "")):
-            problems.append(where + ": untrusted PR on self-hosted runner")
-        if "workflow_dispatch" in ev and elevated(job_permissions) and not main_only(condition):
-            problems.append(where + ": privileged dispatch is not limited to main")
-        if "workflow_run" in ev and elevated(job_permissions) and not main_only(condition):
-            problems.append(where + ": privileged workflow_run is not limited to main")
-        if (pr and can_run_on_pr) or target:
+            if "DM_COPILOT_DISPATCH_TOKEN" not in secrets:
+                problems.append(where + ": controller requires dedicated environment token")
+        if (pr and not (main_only(cond) and excludes_pr(cond))) or target or feature:
+            if elevated(local):
+                problems.append(where + ": untrusted job has write/OIDC token")
+            if job.get("environment"):
+                problems.append(where + ": untrusted job accesses environment")
+            if "self-hosted" in str(job.get("runs-on", "")):
+                problems.append(where + ": untrusted job on self-hosted runner")
             for step in job.get("steps", []) or []:
-                if not isinstance(step, dict):
-                    continue
-                if str(step.get("uses", "")).startswith("actions/checkout@"):
-                    if (step.get("with") or {}).get("persist-credentials") != "false":
-                        problems.append(where + ": checkout may persist credentials")
-                if target and step.get("run"):
-                    cmd = str(step["run"])
-                    if any(s in cmd for s in ("cd candidate", "./candidate", "candidate/")):
-                        problems.append(where + ": PR checkout must never be executed")
-        if target and (elevated(job_permissions) or job.get("environment")):
-            problems.append(where + ": trusted PR gate cannot be privileged")
+                if (isinstance(step, dict) and
+                    str(step.get("uses", "")).startswith("actions/checkout@") and
+                    (step.get("with") or {}).get("persist-credentials") != "false"):
+                    problems.append(where + ": checkout persists credentials")
     return problems
 
 def scan(root):
-    import yaml  # Pinned PyYAML installed in the isolated scanner workflow.
-    folder = pathlib.Path(root) / ".github/workflows"
-    paths = sorted(folder.glob("*.yml")) + sorted(folder.glob("*.yaml"))
+    import yaml
+    paths = sorted((pathlib.Path(root) / ".github/workflows").glob("*.yml"))
     if not paths:
-        return ["No workflows found (fail closed)"]
-    findings = []
-    for file in paths:
-        name = file.relative_to(root).as_posix()
-        raw = file.read_text(encoding="utf-8")
+        return ["No workflows found"]
+    problems = []
+    for path in paths:
         try:
-            document = yaml.load(raw, Loader=yaml.BaseLoader)
+            data = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
         except yaml.YAMLError:
-            findings.append(name + ": invalid YAML")
+            problems.append(str(path) + ": invalid YAML")
             continue
-        findings.extend(examine(name, document, raw))
-    return findings
+        problems.extend(examine(path.relative_to(root).as_posix(), data))
+    return problems
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True)
     args = parser.parse_args()
-    problems = scan(pathlib.Path(args.root).resolve())
-    for item in problems:
-        print("::error::" + item)
-    if problems:
+    results = scan(pathlib.Path(args.root).resolve())
+    for message in results:
+        print("::error::" + message)
+    if results:
         raise SystemExit(1)
-    print("PR workflow isolation policy passed (static review only)")
-    print("Keep Copilot workflow approvals ON until repository secrets and main-only environment restrictions are verified.")
+    print("Isolation policy passed; independent review and Environment safeguards still required.")
 
 if __name__ == "__main__":
     main()

@@ -101,6 +101,76 @@ class IsolationTests(unittest.TestCase):
             self.assertIn("vars." + item, workflow)
             self.assertNotIn("secrets." + item, workflow)
 
+
+    def test_or_and_negated_main_conditions_fail_closed(self):
+        bad = [
+            "github.ref != 'refs/heads/main' && github.event_name != 'pull_request'",
+            "github.ref != 'refs/heads/main' && github.event_name != 'pull_request' || true",
+            "github.ref == 'refs/heads/main' || true",
+            "!(github.ref == 'refs/heads/main')",
+            "github.ref == 'refs/heads/main' && always()",
+        ]
+        for expr in bad:
+            self.assertFalse(checker.main_only(expr))
+            obj = copy.deepcopy(BASE)
+            obj["jobs"]["checks"]["permissions"] = {"id-token": "write"}
+            obj["jobs"]["checks"]["if"] = expr
+            self.assertTrue(self.evaluate(obj), expr)
+
+    def test_untrusted_feature_push_rejects_write_secrets_and_checkout_credentials(self):
+        obj = copy.deepcopy(BASE)
+        obj["on"] = {"push": {"branches": ["feature/**"]}}
+        obj["permissions"] = {"contents": "write"}
+        self.assertTrue(self.evaluate(obj))
+        obj["permissions"] = {"contents": "read"}
+        obj["jobs"]["checks"]["steps"][0]["with"] = {}
+        self.assertTrue(self.evaluate(obj))
+        obj["jobs"]["checks"]["steps"][0]["with"] = {"persist-credentials": "false"}
+        obj["jobs"]["checks"]["env"] = {"TOKEN": "$" + "{{ secrets['EXAMPLE_SECRET'] }}"}
+        self.assertTrue(self.evaluate(obj))
+        obj["on"] = {"push": {"branches": ["main"]}}
+        self.assertFalse(checker.unsafe_push(obj))
+
+    def test_secret_bracket_and_nested_expression_access(self):
+        for expression in (
+            "$" + "{{ secrets['EXAMPLE_SECRET'] }}",
+            "$" + '{{ secrets["EXAMPLE_SECRET"] }}',
+            "$" + "{{ toJSON(secrets) }}",
+            "$" + "{{ fromJSON(toJSON(secrets))['KEY'] }}",
+        ):
+            obj = copy.deepcopy(BASE)
+            obj["env"] = {"LEAK": expression}
+            self.assertTrue(self.evaluate(obj), expression)
+
+    def test_trusted_gate_exact_structural_allowlist(self):
+        name = checker.GATE
+        correct = checker.expected_gate()
+        self.assertEqual(checker.examine(name, correct), [])
+        for mutate in (
+            lambda o: o["jobs"]["audit"]["steps"][0]["with"].update(
+                {"ref": "$" + "{{ github.event.pull_request.head.sha }}"}),
+            lambda o: o["jobs"]["audit"]["steps"][1]["with"].update(
+                {"path": "trusted"}),
+            lambda o: o["jobs"]["audit"]["steps"][4].update(
+                {"run": "python candidate/scripts/check_ci_isolation.py --root candidate"}),
+            lambda o: o["jobs"]["audit"]["steps"].append(
+                {"run": "python candidate/test.py"}),
+            lambda o: o["jobs"]["audit"]["steps"][0].update(
+                {"working-directory": "candidate"}),
+            lambda o: o["jobs"]["audit"]["steps"][2].update(
+                {"uses": "actions/setup-python@v5"}),
+        ):
+            obj = copy.deepcopy(correct)
+            mutate(obj)
+            self.assertTrue(checker.examine(name, obj))
+
+    def test_untrusted_push_job_readonly_only_even_with_main_guard(self):
+        obj = copy.deepcopy(BASE)
+        obj["on"] = {"push": {"branches": ["feature/**", "main"]}}
+        obj["jobs"]["checks"]["if"] = "github.ref == 'refs/heads/main'"
+        obj["jobs"]["checks"]["permissions"] = {"contents": "write"}
+        self.assertTrue(self.evaluate(obj))
+
     def test_real_workflow_tree_when_yaml_installed(self):
         try:
             import yaml
