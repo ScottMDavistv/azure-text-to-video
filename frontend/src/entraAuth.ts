@@ -11,9 +11,17 @@ const localhostRedirect = 'http://localhost:5173'
 const codespacesRedirect =
   'https://turbo-halibut-g4pq966pxp5vf9wxw-5173.app.github.dev'
 
-const env = typeof import.meta !== 'undefined' && import.meta && import.meta.env
-  ? import.meta.env
-  : (typeof process !== 'undefined' ? process.env : {})
+function getRuntimeEnv(): Record<string, string | undefined> {
+  const injected = (globalThis as typeof globalThis & { __ENTRA_ENV__?: Record<string, string | undefined> }).__ENTRA_ENV__
+  if (injected) return injected
+  if (typeof process !== 'undefined' && process.env) {
+    return process.env as Record<string, string | undefined>
+  }
+  if (typeof import.meta !== 'undefined' && import.meta && import.meta.env) {
+    return import.meta.env as Record<string, string | undefined>
+  }
+  return {}
+}
 
 /** Only use origins explicitly registered with the Entra SPA. */
 export function getRedirectUri(origin: string): string {
@@ -26,10 +34,12 @@ export function getRedirectUri(origin: string): string {
 
 export const apiScopes = [`api://${apiClientId}/access_as_user`]
 
-const frontendClientId = (env.VITE_ENTRA_SPA_CLIENT_ID ?? '').trim()
+export function getFrontendClientId(): string {
+  return (getRuntimeEnv().VITE_ENTRA_SPA_CLIENT_ID ?? '').trim()
+}
 
 export function isAuthConfigured(): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(frontendClientId)
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(getFrontendClientId())
 }
 
 let initialization: Promise<PublicClientApplication> | null = null
@@ -41,6 +51,10 @@ export function setMsalFactory(
   factory: (config: ConstructorParameters<typeof PublicClientApplication>[0]) => PublicClientApplication,
 ): void {
   authFactory = factory
+  initialization = null
+}
+
+export function resetInitialization(): void {
   initialization = null
 }
 
@@ -63,7 +77,7 @@ export async function initializeAuth(): Promise<PublicClientApplication> {
   if (!initialization) {
     const clientConfig = {
       auth: {
-        clientId: frontendClientId,
+        clientId: getFrontendClientId(),
         authority: `https://login.microsoftonline.com/${tenantId}`,
         redirectUri: getRedirectUri(currentOrigin()),
         postLogoutRedirectUri: getRedirectUri(currentOrigin()),
