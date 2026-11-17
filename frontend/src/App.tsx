@@ -8,6 +8,7 @@ import {
   advanceMockJob, mockProgress, validatePrompt,
   type MockJob,
 } from './mockJourney.mjs'
+import LiveJourney from './LiveJourney'
 import './App.css'
 
 export default function App() {
@@ -108,6 +109,7 @@ export default function App() {
         <p className="muted" role="status">{authMessage}</p>
         {view === 'studio' ? (
           <div className="dashboard">
+            <LiveJourney accountName={accountName} />
             <section className="panel" aria-labelledby="prompt-title">
               <h2 id="prompt-title">Create a video concept</h2>
               <p className="muted">Describe your story. This form runs only a deterministic local simulation.</p>
