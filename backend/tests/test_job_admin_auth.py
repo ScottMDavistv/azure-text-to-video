@@ -61,6 +61,32 @@ def test_missing_authorization(monkeypatch):
     assert exc.value.status_code == 401
 
 
+def test_lone_surrogate_or_invalid_unicode_fails_closed(monkeypatch):
+    monkeypatch.setenv(
+        "ENABLE_JOB_ADMIN_ENDPOINTS",
+        "true",
+    )
+    monkeypatch.setenv("JOB_ADMIN_TOKEN", TOKEN)
+
+    for value in ("******", "******", "******"):
+        with pytest.raises(HTTPException) as exc:
+            authorize_job_admin(value)
+        assert exc.value.status_code == 401
+
+
+def test_non_ascii_job_admin_token_configuration_fails_closed(monkeypatch):
+    monkeypatch.setenv(
+        "ENABLE_JOB_ADMIN_ENDPOINTS",
+        "true",
+    )
+    monkeypatch.setenv("JOB_ADMIN_TOKEN", "é" * 48)
+
+    with pytest.raises(HTTPException) as exc:
+        authorize_job_admin(f"******")
+
+    assert exc.value.status_code == 503
+
+
 def test_incorrect_authorization(monkeypatch):
     monkeypatch.setenv(
         "ENABLE_JOB_ADMIN_ENDPOINTS",

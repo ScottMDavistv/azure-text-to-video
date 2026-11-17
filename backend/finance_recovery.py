@@ -11,6 +11,7 @@ from finance_controls import (
     PARTITION, FinanceDenied, audit, check_id, check_money, commit,
     create, load, now, replace, require_admin, scope_key,
 )
+from provider_submission_ledger import read_intent
 
 
 def receipt_key(provider_name, receipt_id):
