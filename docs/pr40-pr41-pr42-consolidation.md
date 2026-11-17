@@ -19,7 +19,7 @@
 | #41 | Private no-cache, no-sniff bounded MP4 delivery | `project_video_download` uses existing `get_video_resource` size guard and streaming cap |
 | #41 | Disabled-by-default user API and downloads | `ENABLE_AUTHENTICATED_VIDEO_JOBS`, `ENABLE_PROJECT_ROUTES`, `ENABLE_VIDEO_DOWNLOADS`, `ENABLE_SYNTHETIC_VIDEO_DISPATCH` all default off |
 | #42 | Provider-free 300s synthetic FFmpeg and bounded worker seam | `synthetic_job_renderer.py`, `synthetic_worker_cli.py`, offline real MP4 acceptance tests |
-| #46 | MSAL token handling improvements, OIDC/financial/security hardening | **Partial overlap only:** #42 retains redirect-based login/logout and token acquisition; current PR #46 uses popup flows. These files are NOT identical. An independent conflict/behavior review is required before merging either PR. |
+| #46 | MSAL token handling improvements, OIDC/financial/security hardening | **Partial overlap only:** #42 retains redirect-based login/logout and token acquisition; current PR #46 uses popup flows. These files are NOT identical. An independent conflict/behavior review is required before merging PR #42. |
 
 ## Deliberate exclusions and unresolved security gates
 
@@ -28,10 +28,10 @@
 - #40's fetch network error handling is only partially represented; any untrusted server response must remain generic and must never echo tokens or internal details.
 - No production CORS/ingress/Entra registration, project enrollment, worker launch, Azure IAM/deployment, paid FAL or automatic dispatch authorized.
 - The default Azure worker is still inspection-only. Full live Azure prompt → Queue → owned synthetic worker → private blob → authenticated browser MP4 has **not been validated**.
-- PR #46 overlaps Microsoft sign-in but remains independently draft; compatibility is required before enabling a real frontend workflow.
+- PR #46 has merged to main. PR #42 still contains its older redirect-based auth implementation; reconcile against main's popup-based entraAuthCore before integration, and independently verify account-switch behavior.
 
 **Decision:** Keep #40 and #41 open as draft records until this canonical #42 branch is independently reviewed and explicitly approved for merge. Do not close or merge any PR in this consolidation task.
 
 ## Direct PR #46 overlap check
 
-Source PR #46 changes `frontend/src/entraAuth.ts`, while #42 also needs it for authenticated browser requests. The project API route code in #42 does **not** replace or weaken #46's finance/admin auth, provider receipt identity or Copilot author verification changes; those other modules are not copied or activated. The shared file is NOT identical: #42 uses redirect flows and #46 uses popup flows. Do not assume compatibility. Select a single reviewed user interaction model and rerun authentication/session tests and full CI before any integration. The rest of #46 requires independent security review and remains draft.
+Source PR #46 changes `frontend/src/entraAuth.ts`, while #42 also needs it for authenticated browser requests. The project API route code in #42 does **not** replace or weaken #46's finance/admin auth, provider receipt identity or Copilot author verification changes; those other modules are not copied or activated. The shared file is NOT identical: #42 uses redirect flows and #46 uses popup flows. Do not assume compatibility. Select a single reviewed user interaction model and rerun authentication/session tests and full CI before any integration. PR #46 has now merged; its security-reviewed authentication core and other controls are the mandatory baseline for PR #42 integration.
