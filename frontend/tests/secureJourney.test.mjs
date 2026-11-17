@@ -134,3 +134,24 @@ test('rejects video metadata when job is not completed', async () => {
     fetcher: createFetch([{json: metadata}], []) })
   await assert.rejects(api.metadata(PROJECT, JOB), { status: 502 })
 })
+
+test('rejects malicious declared MP4 size before buffering response', async () => {
+  const metadata = { job_id: JOB, status: 'completed', available: true,
+    content_type: 'video/mp4', size_bytes: 3,
+    download_endpoint: '/projects/' + PROJECT + '/jobs/' + JOB + '/video' }
+  let blobRead = false
+  let count = 0
+  const fetcher = async () => {
+    count += 1
+    if (count === 1) return { ok: true, json: async () => metadata }
+    return {
+      ok: true,
+      headers: { get: name => name === 'content-type' ? 'video/mp4'
+        : name === 'content-length' ? '104857601' : null },
+      blob: async () => { blobRead = true; throw new Error('body should not be buffered') },
+    }
+  }
+  const api = createVideoApi({ tokenProvider: async () => 'signed', fetcher })
+  await assert.rejects(api.download(PROJECT, JOB), { status: 502 })
+  assert.equal(blobRead, false)
+})
