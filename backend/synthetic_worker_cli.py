@@ -19,7 +19,7 @@ def require_synthetic_readiness():
                  "ENABLE_SYNTHETIC_VIDEO_DISPATCH"):
         if os.getenv(flag, "").strip().lower() != "true":
             raise SyntheticRenderError("Explicit project synthetic worker authorization required")
-    if os.getenv("ALLOW_UNAUTHENTICATED_DEV", "false").lower() == "true":
+    if os.getenv("ALLOW_UNAUTHENTICATED_DEV", "false").strip().lower() in {"1", "true", "yes"}:
         raise SyntheticRenderError("Unauthenticated legacy mode prohibited")
 
 def process_owned_synthetic_job(job_id, *, renderer=render_scene_plan,
