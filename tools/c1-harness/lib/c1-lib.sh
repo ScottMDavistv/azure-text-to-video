@@ -481,8 +481,13 @@ c1_privacy_check() {
   f=$(mktemp "${TMPDIR:-/tmp}/c1probe.XXXXXXXX") || return 1
   code=$(c1_https_probe "$base$path" "$f" "" "$ca")
   if grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=public; rm -f "$f"; return 1; fi
-  # Any 2xx to an unauthenticated client is treated as exposure (fail closed).
+  # Only a definite sign-in denial proves that the unauthenticated probe
+  # did not reach the forwarded service. Transport errors, 5xx, 404, and
+  # unexpected responses are ambiguous: fail closed even if token access works.
   if [[ "$code" == 2?? ]]; then C1_PRIVACY_STATE=public; rm -f "$f"; return 1; fi
+  if [[ "$code" != 302 && "$code" != 303 && "$code" != 401 && "$code" != 403 ]]; then
+    rm -f "$f"; return 1
+  fi
   code=$(c1_https_probe "$base$path" "$f" "$hdr" "$ca")
   if [[ "$code" == 200 ]] && grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=private; rm -f "$f"; return 0; fi
   rm -f "$f"; return 1
