@@ -13,7 +13,7 @@ function createFetch(steps, calls) {
     return {
       ok: next.ok !== false,
       status: next.status ?? 200,
-      headers: { get: () => next.contentType ?? 'video/mp4' },
+      headers: { get: name => name === 'content-type' ? (next.contentType ?? 'video/mp4') : null },
       json: async () => next.json,
       blob: async () => next.blob,
     }
