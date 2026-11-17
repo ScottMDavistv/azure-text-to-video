@@ -14,6 +14,13 @@ A same-repository Copilot PR can change its own Actions YAML. If routine workflo
 - Guard manually dispatched Azure preview and Azure OIDC verification on main. Preserve existing environments and all credential restrictions.
 - A trusted `pull_request_target` **data-only** scanner reads candidate workflow YAML from an inert checkout; it runs its Python code from protected main with `contents: read`, no secrets, no OIDC and no environment. It never executes candidate code.
 - Deterministic deny tests cover secret access, elevated PR tokens, credential persistence, general-purpose `pull_request_target`, unguarded OIDC and unguarded privileged dispatch.
+- Nov 17 hardening: trigger allowlist (unknown events denied); `workflow_call` callees treated as caller (possibly PR) context; `secrets: inherit` and unpinned remote reusable workflows denied; privileged and default-branch-context (`workflow_run`, `issues`, `schedule`) jobs may only check out `main` or a literal reviewed commit SHA; attacker-controlled event text (`github.event.*` titles/bodies/branch names, `github.head_ref`, whole-`github` dumps) in `run:`/`github-script` denied; YAML anchors, merge keys, duplicate keys, multi-document files, symlinks and case-variant suffixes denied; any scanner error or missing parser exits non-zero; the gate's PyYAML install is hash-pinned (`scripts/ci-isolation-requirements.txt`). Security Checks runs the regression suite with the real parser and fails on any skipped test.
+
+## Repository protection gaps found Nov 17 (owner settings; not changed by this PR)
+
+- `main` ruleset requires a PR but **0 approving reviews**, no code-owner review, no stale-review dismissal and no last-push approval, so GitHub does not enforce an independent approval or invalidate it when the head changes. Raise to ≥1 approval with *dismiss stale approvals* and *require approval of the most recent push* before relying on review as a control.
+- Add a `CODEOWNERS` entry for `.github/` and `scripts/check_ci_isolation.py` with *require code-owner review*: the trusted gate runs main's scanner, so a PR that weakens the scanner itself is only caught by human review.
+- After merge, add `Trusted workflow isolation (read-only)` to the required status checks (it cannot be required before it exists on `main`, because `pull_request_target` always runs the base-branch copy).
 
 ## Mandatory checks before the owner may switch approvals OFF
 

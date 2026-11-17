@@ -215,3 +215,181 @@ class IsolationTests(unittest.TestCase):
         except ImportError:
             self.skipTest("pinned PyYAML provided by policy gate; normal backend CI uses mock tests")
         self.assertEqual(checker.scan(ROOT), [])
+
+
+E = "$" + "{{ "  # avoid literal expressions in this test file
+
+
+def yaml_scan(test, files):
+    import tempfile
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        test.skipTest("PyYAML unavailable")
+    with tempfile.TemporaryDirectory() as root:
+        folder = pathlib.Path(root) / ".github/workflows"
+        folder.mkdir(parents=True)
+        for name, text in files.items():
+            (folder / name).write_text(text)
+        return checker.scan(root)
+
+
+class AdversarialIsolationTests(unittest.TestCase):
+    """Negative-path regressions from the Nov 17 independent review of PR #50."""
+
+    def evaluate(self, document):
+        return checker.examine(".github/workflows/test.yml", document)
+
+    def job(self, **extra):
+        job = {"runs-on": "ubuntu-latest", "steps": []}
+        job.update(extra)
+        return job
+
+    # 1. Malicious fork PR attempting credential access
+    def test_fork_pr_credential_access_variants_rejected(self):
+        for env in ({"T": E + "secrets.AZURE_CLIENT_SECRET }}"},
+                    {"T": E + "toJSON(secrets) }}"},
+                    {"T": E + "secrets[format('{0}', 'AZ')] }}"}):
+            obj = {"on": {"pull_request": ""}, "permissions": {"contents": "read"},
+                   "jobs": {"j": self.job(env=env)}}
+            self.assertTrue(self.evaluate(obj), env)
+        obj = {"on": "pull_request", "permissions": {"contents": "read"},
+               "jobs": {"j": self.job(steps=[{"uses": "actions/checkout@v4"}])}}
+        self.assertTrue(any("persists credentials" in p for p in self.evaluate(obj)))
+
+    # 2. Untrusted workflow attempting privilege escalation
+    def test_workflow_run_cannot_execute_pr_head_with_privilege(self):
+        obj = {"on": {"workflow_run": {"workflows": ["CI"], "types": ["completed"]}},
+               "permissions": {"contents": "read"},
+               "jobs": {"j": self.job(**{
+                   "if": "github.ref == 'refs/heads/main'", "environment": "prod",
+                   "steps": [{"uses": "actions/checkout@v4", "with": {
+                       "ref": E + "github.event.workflow_run.head_sha }}",
+                       "persist-credentials": "false"}}]})}}
+        self.assertTrue(any("untrusted ref" in p for p in self.evaluate(obj)))
+
+    def test_event_text_script_injection_rejected(self):
+        for field in ("github.event.issue.title", "github.event.pull_request.body",
+                      "github.head_ref", "github.event.workflow_run.head_branch",
+                      "toJSON(github)", "github.event['comment']"):
+            obj = {"on": {"issues": ""}, "permissions": {"contents": "read"},
+                   "jobs": {"j": self.job(steps=[{"run": "echo " + E + field + " }}"}])}}
+            self.assertTrue(any("untrusted event text" in p for p in self.evaluate(obj)), field)
+        safe = {"on": {"pull_request": ""}, "permissions": {"contents": "read"},
+                "jobs": {"j": self.job(steps=[{"run": "git diff " + E +
+                                               "github.event.pull_request.base.sha }}"}])}}
+        self.assertEqual(self.evaluate(safe), [])
+
+    def test_unsupported_triggers_denied(self):
+        for trigger in ("issue_comment", "pull_request_review", "pull_request_review_comment",
+                        "merge_group", "discussion", "check_run", "repository_dispatch"):
+            obj = {"on": [trigger], "permissions": {"contents": "read"},
+                   "jobs": {"j": self.job()}}
+            self.assertTrue(any("unsupported trigger" in p for p in self.evaluate(obj)), trigger)
+
+    def test_duplicate_merge_and_alias_yaml_denied(self):
+        dup = ("on: pull_request\npermissions: write-all\npermissions: {contents: read}\n"
+               "jobs:\n  j: {runs-on: ubuntu-latest, steps: []}\n")
+        merge = ("on: pull_request\npermissions: {contents: read}\nx: &p {permissions: write-all}\n"
+                 "jobs:\n  j: {<<: *p, runs-on: ubuntu-latest, steps: []}\n")
+        recursive = "on: pull_request\npermissions: {contents: read}\njobs: &a {j: *a}\n"
+        for text in (dup, merge, recursive):
+            self.assertTrue(yaml_scan(self, {"x.yml": text}), text)
+
+    # 3. Unauthorized workflow dispatch
+    def test_dispatch_privileged_job_needs_positive_main_guard(self):
+        for cond in ("", "github.ref != 'refs/heads/main'",
+                     "github.ref == 'refs/heads/main' || true",
+                     "!(github.ref != 'refs/heads/main')",
+                     "contains(github.ref, 'main')"):
+            obj = {"on": {"workflow_dispatch": ""},
+                   "permissions": {"contents": "read", "id-token": "write"},
+                   "jobs": {"j": self.job(**({"if": cond} if cond else {}))}}
+            self.assertTrue(any("guarded on main" in p for p in self.evaluate(obj)), cond)
+
+    # 4. Reusable workflow permission inheritance
+    def test_reusable_workflow_secret_inheritance_rejected(self):
+        caller = {"on": {"pull_request": ""}, "permissions": {"contents": "read"},
+                  "jobs": {"c": {"uses": "./.github/workflows/deploy.yml", "secrets": "inherit"}}}
+        self.assertTrue(any("inherit" in p for p in self.evaluate(caller)))
+        caller["jobs"]["c"]["secrets"] = {"AZ": E + "secrets.AZ }}"}
+        self.assertTrue(self.evaluate(caller))
+        remote = {"on": {"workflow_dispatch": ""}, "permissions": {"contents": "read"},
+                  "jobs": {"c": {"if": "github.ref == 'refs/heads/main'",
+                                 "uses": "evil/repo/.github/workflows/x.yml@main"}}}
+        self.assertTrue(any("pinned" in p for p in self.evaluate(remote)))
+
+    def test_workflow_call_callee_treated_as_caller_context(self):
+        callee = {"on": {"workflow_call": ""}, "permissions": {"contents": "read"},
+                  "jobs": {"d": self.job(environment="prod",
+                                         steps=[{"run": "deploy", "env": {
+                                             "T": E + "secrets.AZ }}"}}])}}
+        findings = self.evaluate(callee)
+        self.assertTrue(any("guarded on main" in p for p in findings))
+        callee["jobs"]["d"]["permissions"] = {"contents": "write"}
+        self.assertTrue(any("write/OIDC" in p for p in self.evaluate(callee)))
+
+    # 5. Protected environment approval bypass
+    def test_environment_unreachable_from_untrusted_jobs(self):
+        for env in ("dev-deployment", {"name": E + "github.event.pull_request.head.ref }}"}):
+            obj = {"on": {"pull_request": ""}, "permissions": {"contents": "read"},
+                   "jobs": {"j": self.job(environment=env)}}
+            self.assertTrue(any("environment" in p for p in self.evaluate(obj)), env)
+
+    # 6. Changed PR head after approval
+    def test_gate_binds_to_exact_event_head_sha_and_restarts_on_push(self):
+        gate = checker.expected_gate()
+        candidate = gate["jobs"]["audit"]["steps"][1]["with"]
+        self.assertEqual(candidate["ref"], "$" + "{{ github.event.pull_request.head.sha }}")
+        self.assertIn("synchronize", gate["on"]["pull_request_target"]["types"])
+        self.assertEqual(gate["concurrency"]["cancel-in-progress"], "true")
+        for ref in ("$" + "{{ github.event.pull_request.head.ref }}", "$" + "{{ github.head_ref }}"):
+            mutated = copy.deepcopy(gate)
+            mutated["jobs"]["audit"]["steps"][1]["with"]["ref"] = ref
+            self.assertTrue(checker.examine(checker.GATE, mutated), ref)
+
+    def test_gate_dependency_is_hash_pinned(self):
+        install = checker.expected_gate()["jobs"]["audit"]["steps"][3]["run"]
+        self.assertIn("--require-hashes", install)
+        reqs = (ROOT / "scripts/ci-isolation-requirements.txt").read_text()
+        self.assertEqual(reqs.count("--hash=sha256:"), 2)
+        self.assertIn("PyYAML==6.0.2", reqs)
+
+    # 7. Attempts to bypass branch protection via push triggers
+    def test_push_branch_filters_other_than_exact_main_are_untrusted(self):
+        for push in ({"branches": ["**"]}, {"branches": ["main", "feature/**"]},
+                     {"branches-ignore": ["main"]}, {"branches": ["main"], "tags": ["v*"]},
+                     {"branches": ["ma*n"]}, "", None):
+            obj = {"on": {"push": push}, "permissions": {"contents": "write"},
+                   "jobs": {"j": self.job(**{"if": "github.ref == 'refs/heads/main'"})}}
+            self.assertTrue(self.evaluate(obj), push)
+
+    # 8. Failure or unavailability of the checks themselves
+    def test_scanner_fails_closed_when_unavailable_or_unreadable(self):
+        import io
+        import sys
+        from unittest import mock
+        with mock.patch.dict(sys.modules, {"yaml": None}), \
+                mock.patch.object(sys, "argv", ["x", "--root", str(ROOT)]), \
+                mock.patch("sys.stdout", new=io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                checker.main()
+        self.assertNotEqual(raised.exception.code, 0)
+        self.assertTrue(yaml_scan(self, {}))  # no workflows → deny
+        self.assertTrue(yaml_scan(self, {"x.yml": "a: [unclosed\n"}))
+        self.assertTrue(yaml_scan(self, {"x.yml": "---\non: push\n---\non: push\n"}))
+        self.assertTrue(yaml_scan(self, {"x.YML": "on: push\npermissions: write-all\n"
+                                                  "jobs:\n  j: {runs-on: x, steps: []}\n"}))
+
+    def test_symlinked_workflow_denied(self):
+        import os
+        import tempfile
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML unavailable")
+        with tempfile.TemporaryDirectory() as root:
+            folder = pathlib.Path(root) / ".github/workflows"
+            folder.mkdir(parents=True)
+            os.symlink("/etc/hostname", folder / "x.yml")
+            self.assertTrue(any("regular file" in p for p in checker.scan(root)))
