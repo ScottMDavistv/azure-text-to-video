@@ -250,7 +250,7 @@ class WorkerWhatIfTests(unittest.TestCase):
 
     def test_diagnostic_report_artifact_contains_only_stage_and_fixed_blocker(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(whatif, "EVIDENCE", pathlib.Path(tmp) / "data.json"), \\
+            with patch.object(whatif, "EVIDENCE", pathlib.Path(tmp) / "data.json"), \
                  patch.object(whatif, "SUMMARY", pathlib.Path(tmp) / "data.md"):
                 whatif.write_report(whatif.report(
                     blocked="Azure operation unavailable or not permitted by current identity",
