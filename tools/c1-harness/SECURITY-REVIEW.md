@@ -10,7 +10,7 @@
 | — | Independent review of `19f8851`: **REQUEST CHANGES** (H-1, H-2, M-1–M-4, L-1–L-5). [PR #74 comment](https://github.com/ScottMDavistv/azure-text-to-video/pull/74#issuecomment-6960978238) | Reviewer session B |
 | this branch | Remediation of every finding, plus a new finding, N-1 | **Session B**, now acting as implementer at the owner's request. Session B also wrote the earlier reviewer patch, which was treated as untrusted input and re-verified here. **Session B must therefore not review this.** |
 
-The remediation keeps the pins at auth `73fe6d2` / Playwright `6b45d0a`. Per the owner, re-pinning happens only after the PR #60 alignment with PR #46 `6b62c05` has been independently reviewed.
+**Reconciliation update:** The harness pins the protected-main baseline `81c352b2c6f7fdae4e94f2ff4e98a7e1c2bdf6c5` (which contains certified PR #46 auth) and exact-head, three-check-green PR #60 `e1873111e2304a7a739e0f35e2ecdca1d43de44d`. The allowed diff is 15 explicit files, including the frontend workflow and logout UI fix. This integration requires its own independent security review before live operation; no prior certification is transferred to the new SHA.
 
 ## What changed (by finding)
 
@@ -56,7 +56,7 @@ Anthropic cloud sandbox: Ubuntu 24.04, Node 22.23.4, x11vnc 0.9.16, ShellCheck 0
 - `tests/c1-evidence.test.mjs`: all pass.
 - ShellCheck at warning level: clean. `security_invariants.py`: pass.
 - Library mutation check (`lib_mutations.py`, session tooling): 5/6 injected defects are detected. "Recorded start time ignored" escapes by design, because the marker check alone already prevents every observable mis-signal and the start time is a redundant layer.
-- Real launcher, `--offline-only`: R1, R2, R3, R4, R5 and R12 PASS; R10 FAIL (Chromium 153); R2B INCOMPLETE (no runner at `6b45d0a`); cleanup PASS.
+- **Historical pre-reconciliation execution:** The old `6b45d0a` baseline yielded R1, R2, R3, R4, R5 and R12 PASS; R10 FAIL (Chromium 153); R2B INCOMPLETE (no runner). **These results do not validate the newly pinned `e187311` head.**
 - Real launcher in a **simulated** Codespace (local TLS mock of the forwarding domain and `api.github.com`, test CA, failing `gh` shim):
 
   | Scenario | Result |
