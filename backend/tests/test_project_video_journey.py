@@ -205,3 +205,39 @@ def test_synthetic_dispatch_rejects_alternate_unsafe_runtime_flags(enabled, monk
 def test_synthetic_dispatch_safe_defaults_require_opt_in(enabled, monkeypatch):
     monkeypatch.setenv("ENABLE_SYNTHETIC_VIDEO_DISPATCH", "false")
     assert routes.synthetic_dispatch_enabled() is False
+
+
+@pytest.mark.parametrize("chunks,expected_error", [
+    ([b"abc", b"de"], False),
+    ([b"abc", b"def"], True),
+    ([b"abc"], True),
+])
+def test_private_download_pins_blob_etag_and_exact_size(
+        enabled, monkeypatch, chunks, expected_error):
+    """Detect replacement and length mismatches without exposing extra bytes."""
+    monkeypatch.setenv("ENABLE_VIDEO_DOWNLOADS", "true")
+    table = MagicMock()
+    table.get_entity.return_value = record()
+    blob = MagicMock()
+    downloader = MagicMock()
+    downloader.chunks.return_value = iter(chunks)
+    blob.download_blob.return_value = downloader
+    resource = {"size_bytes": 5, "etag": '"expected-etag"', "blob": blob}
+    with patch.object(routes, "get_jobs_table_client", return_value=table), \
+         patch.object(routes, "verify_project_token", return_value=ACTOR), \
+         patch.object(routes, "require_project_role"), \
+         patch.object(routes, "get_video_resource", return_value=resource):
+        response = routes.project_video_download(PID, JID,
+                                                 authorization="Bearer signed")
+    output = []
+    if expected_error:
+        with pytest.raises(RuntimeError):
+            output.extend(response.body_iterator)
+    else:
+        output.extend(response.body_iterator)
+        assert b"".join(output) == b"abcde"
+    from azure.core import MatchConditions
+    assert blob.download_blob.call_args.kwargs == {
+        "max_concurrency": 1, "etag": '"expected-etag"',
+        "match_condition": MatchConditions.IfNotModified,
+    }
