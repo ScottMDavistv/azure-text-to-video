@@ -106,3 +106,51 @@ The simulation requires no backend, login, FAL credentials, Azure resources, sto
 Existing Entra local authentication stays separate from the simulation. The production prompt/status/download integration must wait for Design Management acceptance of the backend contract and worker/artifact path, plus authorization decisions for scoped user access. Never replace security validation with mock job data. Do not put access tokens in logs, page markup, environment variables served to the browser or demo state.
 
 Scope: isolated frontend development PR only. No CI deployment, Azure/IAM/finance changes, Copilot dispatch, automatic merge, or paid rendering.
+
+## Authenticated prompt-to-video-to-download integration (development only)
+
+The opt-in React `Authenticated project` mode requests a Microsoft Entra
+`access_as_user` token via MSAL on each API request and never stores/logs that
+token. It talks exclusively to `/projects/{project_id}/jobs` scoped backend
+routes, **not** legacy `/jobs` service-token endpoints. Each API operation
+requires verified Entra signature, issuer, audience, delegated scope, active
+mapped user, active project membership, and server-recorded job `createdBy`
+and `projectId`. Legacy jobs without ownership metadata cannot be accessed.
+
+Frontend activation (public configuration only):
+```text
+VITE_ENABLE_AUTHENTICATED_JOURNEY=true
+VITE_VIDEO_PROJECT_ID=<authorized project UUID>
+VITE_VIDEO_API_ORIGIN=https://<approved API origin>
+```
+Only use a separately approved same-origin reverse proxy or explicitly
+approved HTTPS backend origin. Do not embed `API_ACCESS_TOKEN`,
+`VIDEO_DOWNLOAD_TOKEN`, client secrets, FAL credentials, or other privileged
+service tokens in a SPA.
+
+Backend flags default OFF and must be independently approved after project
+user enrollment, working JWKS validation and secure API routing:
+```text
+ENABLE_PROJECT_ROUTES=false
+ENABLE_AUTHENTICATED_VIDEO_JOBS=false
+ENABLE_SYNTHETIC_VIDEO_DISPATCH=false
+ENABLE_VIDEO_DOWNLOADS=false
+VIDEO_RENDER_PROVIDER=disabled
+ENABLE_PAID_FAL_WORKER=false
+ENABLE_LIVE_VIDEO_RENDERING=false
+```
+
+With authorized flags, the frontend submits a prompt, queues the server-created
+project/owner-scoped job, polls its real job status (no invented progress
+percentage), retrieves private artifact metadata, and fetches authenticated MP4
+bytes to an ephemeral browser Blob URL for preview/download. URLs are revoked
+on replacement/unmount. The user must be provisioned as a project member.
+
+**Integration is not production/live accepted:** The current deployed Azure API
+and worker are not configured for these new routes; the synthetic plan/FFmpeg/
+private Azure Blob lifecycle is not proven end-to-end. Enabling synthetic
+dispatch is contingent on separately verified renderer, queue reliability,
+artifact storage and safe worker activation; enabling paid rendering is never
+part of this change. A failed/disabled queue retains a created job and reports
+an error without manufacturing an MP4. The default offline simulator remains
+available regardless of backend status.
