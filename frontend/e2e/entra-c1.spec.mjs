@@ -13,7 +13,7 @@ const scope = 'api://' + audience + '/access_as_user'
 const authSource = readFileSync(fileURLToPath(new URL('../src/entraAuth.ts', import.meta.url)), 'utf8')
 const appSource = readFileSync(fileURLToPath(new URL('../src/App.tsx', import.meta.url)), 'utf8')
 const allowedHosts = new Set([
-  'localhost', '127.0.0.1', 'login.microsoftonline.com',
+  'localhost', '127.0.0.1', 'login.microsoftonline.com', 'login.microsoft.com',
   'login.live.com', 'aadcdn.msftauth.net', 'aadcdn.msauth.net',
   'logincdn.msftauth.net', 'secure.aadcdn.microsoftonline-p.com',
 ])
@@ -23,6 +23,32 @@ const allowedHmrOrigins = new Set(['ws://localhost:5173', 'ws://127.0.0.1:5173']
 function allowedRequest(url) {
   return allowedLocalOrigins.has(url.origin) || (url.protocol === 'https:' && allowedHosts.has(url.hostname) && !['localhost', '127.0.0.1'].includes(url.hostname))
 }
+
+
+test('C1 exact-host regression: Microsoft login host is HTTPS-only; spoofed hosts stay denied', () => {
+  // These are URL policy assertions only; no requests are sent to Microsoft.
+  for (const allowed of [
+    'https://login.microsoftonline.com/773e9051-c546-4b75-9432-90f4f8242660/',
+    'https://login.microsoft.com/773e9051-c546-4b75-9432-90f4f8242660/',
+  ]) {
+    expect(allowedRequest(new URL(allowed)), allowed).toBe(true)
+  }
+  for (const forbidden of [
+    'http://login.microsoft.com/',
+    'https://login.microsoft.com.evil.example/',
+    'https://notlogin.microsoft.com/',
+    'https://login.microsoft.com.attacker.invalid/',
+    'https://unapproved.example/',
+    'https://localhost:5174/',
+    'http://127.0.0.1:5174/',
+    'ws://login.microsoft.com/',
+    'wss://login.microsoft.com/',
+  ]) {
+    expect(allowedRequest(new URL(forbidden)), forbidden).toBe(false)
+  }
+  expect(allowedHmrOrigins.has('wss://login.microsoft.com')).toBe(false)
+  expect(allowedHmrOrigins.has('ws://unapproved.example')).toBe(false)
+})
 
 
 // Evidence contains only a commit identifier, browser version, timestamps and
