@@ -1,0 +1,119 @@
+name: Manual Azure Worker What-If (No Deployment)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/azure-worker-whatif.yml'
+      - 'scripts/azure_worker_whatif.py'
+      - 'tests/design_management/test_azure_worker_whatif.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guarded-azure-worker-whatif-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  offline-tests:
+    name: Worker what-if fail-closed safety tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5 pinned
+        with:
+          python-version: '3.12'
+      - name: Mock what-if permission denial, unsafe diff and allowed image change
+        run: python -m unittest discover -s tests/design_management -p 'test_azure_worker_whatif.py' -v
+
+  whatif:
+    name: Isolated Azure worker image-only what-if
+    needs: offline-tests
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.AZURE_AUDIT_OPERATIONS_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: azure-readonly-audit
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_AUDIT_OPERATIONS_ENABLED: ${{ vars.AZURE_AUDIT_OPERATIONS_ENABLED }}
+      AZURE_AUDIT_CLIENT_ID: ${{ vars.AZURE_AUDIT_CLIENT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_EXTENSION_USE_DYNAMIC_INSTALL: 'no'
+      AZURE_CORE_COLLECT_TELEMETRY: 'no'
+    steps:
+      - name: Checkout trusted main workflow code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Checkout exact security-reviewed PR 37 worker template
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: e5e1bcbd0a9cb270957febb71faf884d8fc0b649
+          path: reviewed
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5 pinned
+        with:
+          python-version: '3.12'
+      - name: Require dedicated existing Reader OIDC configuration
+        shell: bash
+        env:
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          set -euo pipefail
+          test "$AZURE_AUDIT_OPERATIONS_ENABLED" = "true"
+          test -n "$AZURE_AUDIT_CLIENT_ID"
+          test -n "$AZURE_TENANT_ID"
+          test "$AZURE_SUBSCRIPTION_ID" = "41fbffdc-1793-44f9-b70f-220ea8a9bc6c"
+      - name: Validate immutable GitHub audit OIDC subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64
+          import json
+          import os
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+          expected = ("repo:ScottMDavistv@212811615/"
+                      "azure-text-to-video@1457187422:environment:azure-readonly-audit")
+          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+          url += ("&" if "?" in url else "?") + urlencode(
+              {"audience": "api://AzureADTokenExchange"})
+          req = Request(url, headers={
+              "Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+          with urlopen(req, timeout=15) as response:
+              token = json.load(response)["value"]
+          payload = token.split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+          if (claims.get("sub") != expected
+                  or str(claims.get("repository_id")) != "1457187422"
+                  or str(claims.get("repository_owner_id")) != "212811615"):
+              raise SystemExit("::error::Unrecognized immutable GitHub audit OIDC identity")
+          print("Dedicated immutable audit OIDC identity verified")
+          PY
+      - name: Login with existing Reader identity (OIDC)
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_AUDIT_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Run isolated worker what-if with sanitized, fail-closed output
+        run: python scripts/azure_worker_whatif.py
+      - name: Publish sanitized what-if evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 pinned
+        with:
+          name: azure-worker-whatif-evidence
+          path: |
+            azure-worker-whatif-evidence.json
+            azure-worker-whatif-evidence.md
+          retention-days: 14
+          if-no-files-found: warn
