@@ -90,7 +90,7 @@ test('Tier1 synthetic sign-in, delegated scope, silent token and logout UI', asy
   await installSyntheticAccount(page)
   await page.getByRole('button', { name: 'Sign in with Microsoft' }).click()
   await expect(page.getByText('Signed in: Tier 1 Synthetic Account')).toBeVisible()
-  await expect(page.getByRole('status').first()).toContainText('API role and project access remain unverified')
+  await expect(page.getByRole('status').first()).toContainText('backend authorization is not verified')
   await page.getByRole('button', { name: 'Check API permission' }).click()
   await expect(page.getByRole('status').first()).toContainText('Delegated API permission acquired')
   const scopes = await page.evaluate(() => ({
