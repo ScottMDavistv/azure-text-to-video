@@ -64,7 +64,7 @@ jobs:
           # The PR head is tested directly; avoid validating only a synthetic merge commit.
           # Read-only checkout, zero secrets, zero Entra/Azure/FAL requests.
           git checkout --detach "$C1_PR_HEAD"
-          npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund @playwright/test@1.65.1
+          npm install --no-save --ignore-scripts --no-audit --no-fund @playwright/test@1.65.1
           npx playwright install chromium
           npx playwright test --config=playwright.config.mjs --workers=1
           node e2e/c1-mutation-check.mjs
