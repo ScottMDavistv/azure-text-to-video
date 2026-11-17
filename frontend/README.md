@@ -154,3 +154,23 @@ artifact storage and safe worker activation; enabling paid rendering is never
 part of this change. A failed/disabled queue retains a created job and reports
 an error without manufacturing an MP4. The default offline simulator remains
 available regardless of backend status.
+
+### Synthetic worker implementation and remaining deployment gate
+
+`backend/synthetic_worker_cli.py --once` defines an explicit, bounded
+single-queue-message execution path; it rejects missing project ownership,
+unauthenticated development mode, paid/live provider flags, and missing
+synthetic feature gates before consuming Azure Queue messages. The
+`backend/synthetic_job_renderer.py` converts the validated five-scene plan
+into FFmpeg audio/video, validates an exact 300-second MP4, and lets the
+existing guarded `process_synthetic_job` write it to the private blob
+through its existing atomic job-claim path.
+
+This is **not activated** by the current Azure worker job: Docker's default
+remains `python worker_runtime.py --check`, worker flags stay disabled and
+no Azure deployment/image push has been made. These code paths have offline
+regressions and standalone synthetic FFmpeg fixture acceptance, but an
+actual Entra-submitted job → Azure Queue → deployed synthetic worker →
+private Blob MP4 → browser download **is not yet deployed or verified**.
+Any actual worker execution, private download enabling, Azure IAM changes or
+job image updates need separate authorized review and operational evidence.
