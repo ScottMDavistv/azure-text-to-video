@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { acquireApiToken, getSignedInAccount, isAuthConfigured, signIn } from './entraAuth'
 import { SCENES, TOTAL_SECONDS, validatePrompt } from './mockJourney.mjs'
 import { createVideoApi, validateProjectId, type VideoJob } from './secureJourney.mjs'
@@ -23,6 +23,20 @@ export default function SecureStudio() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const generation = useRef(0)
+  const inFlight = useRef<AbortController | null>(null)
+  const invalidate = () => {
+    generation.current += 1
+    inFlight.current?.abort()
+    inFlight.current = null
+  }
+  const begin = () => {
+    inFlight.current?.abort()
+    const controller = new AbortController()
+    inFlight.current = controller
+    const version = ++generation.current
+    return { controller, current: () => generation.current === version && !controller.signal.aborted }
+  }
 
   const api = useMemo(() => createVideoApi({
     baseUrl: apiOrigin,
@@ -40,17 +54,28 @@ export default function SecureStudio() {
     return () => { active = false }
   }, [])
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl) }, [videoUrl])
+  useEffect(() => () => { generation.current += 1; inFlight.current?.abort() }, [])
 
   useEffect(() => {
     if (!job || job.status === 'completed' || job.status === 'failed') return
     let alive = true
+    let stopped = false
+    const version = generation.current
     const abort = new AbortController()
     const timer = window.setInterval(async () => {
       try {
         const next = await api.status(projectId, job.job_id, abort.signal)
-        if (alive) setJob(next)
+        if (alive && !stopped && generation.current === version) setJob(next)
       } catch (cause) {
-        if (alive && !abort.signal.aborted) setError(displayError(cause))
+        if (alive && !abort.signal.aborted && generation.current === version) {
+          setError(displayError(cause))
+          if (cause instanceof Error && 'status' in cause &&
+              [401, 403, 404].includes(Number(cause.status))) {
+            stopped = true
+            abort.abort()
+            window.clearInterval(timer)
+          }
+        }
       }
     }, 3000)
     return () => { alive = false; abort.abort(); window.clearInterval(timer) }
@@ -63,46 +88,65 @@ export default function SecureStudio() {
     try {
       validateProjectId(projectId)
       if (!account) { setError('Sign in with Microsoft first.'); return }
-      setBusy(true)
-      setError(null)
-      setJob(null)
-      setVideoUrl(null)
-      const created = await api.submit(projectId, prompt)
+    } catch (cause) { setError(displayError(cause)); return }
+    const project = projectId
+    const task = begin()
+    setBusy(true)
+    setError(null)
+    setJob(null)
+    setVideoUrl(null)
+    try {
+      const created = await api.submit(project, prompt, task.controller.signal)
+      if (!task.current()) return
       setJob(created)
       try {
-        await api.queue(projectId, created.job_id)
-        setJob(await api.status(projectId, created.job_id))
+        await api.queue(project, created.job_id, task.controller.signal)
+        if (!task.current()) return
+        const next = await api.status(project, created.job_id, task.controller.signal)
+        if (task.current()) setJob(next)
       } catch (cause) {
-        // Creation was durable; preserve the real job ID for recovery.
-        setError(displayError(cause) + ' Job creation was retained; queue it after the service is available.')
+        if (task.current()) setError(displayError(cause) +
+          ' Job creation was retained; queue it after the service is available.')
       }
     } catch (cause) {
-      setError(displayError(cause))
+      if (task.current()) setError(displayError(cause))
     } finally {
-      setBusy(false)
+      if (task.current()) { setBusy(false); inFlight.current = null }
     }
   }
   async function queueAgain() {
     if (!job || job.status !== 'created') return
+    const project = projectId
+    const jobId = job.job_id
+    const task = begin()
+    setBusy(true)
+    setError(null)
     try {
-      setBusy(true)
-      setError(null)
-      await api.queue(projectId, job.job_id)
-      setJob(await api.status(projectId, job.job_id))
+      await api.queue(project, jobId, task.controller.signal)
+      if (!task.current()) return
+      const next = await api.status(project, jobId, task.controller.signal)
+      if (task.current()) setJob(next)
     } catch (cause) {
-      setError(displayError(cause))
-    } finally { setBusy(false) }
+      if (task.current()) setError(displayError(cause))
+    } finally {
+      if (task.current()) { setBusy(false); inFlight.current = null }
+    }
   }
   async function retrieveVideo() {
     if (!job || job.status !== 'completed') return
+    const project = projectId
+    const jobId = job.job_id
+    const task = begin()
+    setBusy(true)
+    setError(null)
     try {
-      setBusy(true)
-      setError(null)
-      const blob = await api.download(projectId, job.job_id)
-      setVideoUrl(URL.createObjectURL(blob))
+      const blob = await api.download(project, jobId, task.controller.signal)
+      if (task.current()) setVideoUrl(URL.createObjectURL(blob))
     } catch (cause) {
-      setError(displayError(cause))
-    } finally { setBusy(false) }
+      if (task.current()) setError(displayError(cause))
+    } finally {
+      if (task.current()) { setBusy(false); inFlight.current = null }
+    }
   }
   return (
     <div className="dashboard">
@@ -113,7 +157,7 @@ export default function SecureStudio() {
         {!account ? <button className="secondary" type="button" disabled={!isAuthConfigured() || busy} onClick={() => signIn().catch(() => setError('Microsoft sign-in failed.'))}>Sign in with Microsoft</button> : null}
         <form onSubmit={create}>
           <label htmlFor="project-id" className="eyebrow">Authorized project ID</label>
-          <input className="project-input" id="project-id" value={projectId} onChange={e => { setProjectId(e.target.value); setJob(null); setVideoUrl(null) }} placeholder="Project UUID" />
+          <input className="project-input" id="project-id" value={projectId} onChange={e => { invalidate(); setProjectId(e.target.value); setJob(null); setVideoUrl(null); setBusy(false); setError(null) }} placeholder="Project UUID" />
           <label htmlFor="secure-video-prompt" className="eyebrow">Video prompt</label>
           <textarea id="secure-video-prompt" maxLength={2000} value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="Describe your video..." />
           <div className="actions"><span className="muted">{prompt.length}/2,000</span><button className="primary" type="submit" disabled={!account || busy}>{busy ? 'Working…' : 'Submit authenticated job'}</button></div>
