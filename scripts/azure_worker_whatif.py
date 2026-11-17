@@ -28,7 +28,16 @@ SUMMARY = Path("azure-worker-whatif-evidence.md")
 
 
 class Blocked(Exception):
-    pass
+    """Fixed diagnostic stage; never include Azure stderr/stdout in messages."""
+    def __init__(self, message, *, stage='preflight'):
+        super().__init__(message)
+        self.stage = stage
+
+SAFE_STAGES = frozenset({
+    'preflight', 'template-validation', 'account-inspection',
+    'worker-resource-read', 'worker-baseline-check',
+    'arm-whatif-preview', 'image-only-diff-classification',
+})
 
 
 def preflight_env(env):
@@ -63,21 +72,23 @@ def validate_template(source):
         raise Blocked("unexpected managed resource declarations")
 
 
-def run_json(argv, *, runner=subprocess.run, timeout=90):
+def run_json(argv, *, runner=subprocess.run, timeout=90, stage='preflight'):
+    if stage not in SAFE_STAGES:
+        raise Blocked('Unknown diagnostic stage')
     """No shell and no raw Azure output on failure."""
     try:
         result = runner(argv, capture_output=True, text=True,
                         check=False, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
-        raise Blocked("Azure CLI read or preview unavailable") from None
+        raise Blocked("Azure CLI read or preview unavailable", stage=stage) from None
     if result.returncode != 0:
-        raise Blocked("Azure operation unavailable or not permitted by current identity")
+        raise Blocked("Azure operation unavailable or not permitted by current identity", stage=stage)
     try:
         value = json.loads(result.stdout)
     except (ValueError, TypeError):
-        raise Blocked("Azure response was not JSON") from None
+        raise Blocked("Azure response was not JSON", stage=stage) from None
     if not isinstance(value, dict):
-        raise Blocked("Azure response JSON shape unexpected")
+        raise Blocked("Azure response JSON shape unexpected", stage=stage)
     return value
 
 
@@ -147,13 +158,19 @@ def classify_whatif(payload):
 def execute(*, runner=subprocess.run, environment=os.environ, template_path=BICEP):
     preflight_env(environment)
     source = template_path.read_text(encoding="utf-8")
-    validate_template(source)
-    account = run_json(["az", "account", "show", "--output", "json"], runner=runner)
+    try:
+        validate_template(source)
+    except Blocked as exc:
+        raise Blocked(str(exc), stage='template-validation') from None
+    account = run_json(["az", "account", "show", "--output", "json"], runner=runner, stage="account-inspection")
     if account.get("id", "").lower() != SUBSCRIPTION:
-        raise Blocked("Azure account is not on approved dev subscription")
+        raise Blocked("Azure account is not on approved dev subscription", stage="account-inspection")
     job = run_json(["az", "resource", "show", "--ids", JOB_ID,
-                    "--api-version", "2024-03-01", "--output", "json"], runner=runner)
-    check_existing(job)
+                    "--api-version", "2024-03-01", "--output", "json"], runner=runner, stage="worker-resource-read")
+    try:
+        check_existing(job)
+    except Blocked as exc:
+        raise Blocked(str(exc), stage='worker-baseline-check') from None
     # The only ARM preview operation. It may require whatIf/action beyond Reader;
     # absence of permission MUST NOT result in an IAM grant or another identity.
     preview = run_json([
@@ -163,11 +180,16 @@ def execute(*, runner=subprocess.run, environment=os.environ, template_path=BICE
         "--parameters", "workerImage=" + IMAGE,
         "--result-format", "FullResourcePayloads",
         "--output", "json",
-    ], runner=runner, timeout=120)
-    return classify_whatif(preview)
+    ], runner=runner, timeout=120, stage="arm-whatif-preview")
+    try:
+        return classify_whatif(preview)
+    except Blocked as exc:
+        raise Blocked(str(exc), stage='image-only-diff-classification') from None
 
 
-def report(result=None, blocked=None):
+def report(result=None, blocked=None, stage=None):
+    if stage is not None and stage not in SAFE_STAGES:
+        raise ValueError('Unexpected diagnostic stage')
     return {
         "schema_version": 1, "operation": "Azure ARM group what-if only",
         "subscription_scope": "approved development subscription",
@@ -179,6 +201,7 @@ def report(result=None, blocked=None):
         "worker_started": False, "paid_provider_called": False,
         "finding": result if result else None,
         "blocker": blocked if not result else None,
+        "diagnostic_stage": "image-only-diff-classification" if result else (stage or "preflight"),
         "authorization": "what-if only; separate merge and deploy approvals required",
     }
 
@@ -194,7 +217,8 @@ def write_report(data):
     if data["finding"]:
         lines += ["**Permitted image-only delta was verified.**"]
     else:
-        lines += ["**Blocked:** " + (data["blocker"] or "unverified")]
+        lines += ["**Blocked stage:** `" + data["diagnostic_stage"] + "`",
+                  "**Blocked:** " + (data["blocker"] or "unverified")]
     lines += ["", "This report is NOT deployment or merge authorization."]
     SUMMARY.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -207,7 +231,8 @@ def main():
         # Only our fixed, non-sensitive reasons are reportable. Never expose raw
         # CLI stderr, ARM preview JSON, environment values or tokens.
         reason = str(exc) if isinstance(exc, Blocked) else "preflight or Azure operation failed"
-        data = report(blocked=reason)
+        stage = exc.stage if isinstance(exc, Blocked) else 'preflight'
+        data = report(blocked=reason, stage=stage)
     write_report(data)
     print("Azure isolated what-if:", data["state"])
     return 0 if data["finding"] else 2
