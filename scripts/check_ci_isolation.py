@@ -74,8 +74,11 @@ def elevated(permissions):
 
 def unsafe_push(document):
     on = document.get("on")
-    if not isinstance(on, dict) or "push" not in on:
+    if "push" not in events(document):
         return False
+    # Scalar/list push triggers are valid and run on unrestricted branches.
+    if not isinstance(on, dict):
+        return True
     push = on["push"]
     return not (isinstance(push, dict) and push.get("branches") == ["main"]
                 and not any(k in push for k in ("branches-ignore", "tags", "tags-ignore")))
@@ -143,7 +146,8 @@ def examine(path, doc, raw=""):
             continue
         cond = job.get("if", "")
         local = job.get("permissions", perms)
-        secrets = privileged_secrets(job)
+        # Workflow-level env is inherited by every job; count it as effective privilege.
+        secrets = privileged_secrets(job) | privileged_secrets(doc.get("env", {}))
         privileged = elevated(local) or bool(job.get("environment")) or bool(secrets)
         if secrets and not job.get("environment"):
             problems.append(where + ": custom secret requires a restricted environment")
@@ -171,7 +175,8 @@ def examine(path, doc, raw=""):
 
 def scan(root):
     import yaml
-    paths = sorted((pathlib.Path(root) / ".github/workflows").glob("*.yml"))
+    directory = pathlib.Path(root) / ".github/workflows"
+    paths = sorted(set(directory.glob("*.yml")) | set(directory.glob("*.yaml")))
     if not paths:
         return ["No workflows found"]
     problems = []
