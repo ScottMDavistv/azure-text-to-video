@@ -40,8 +40,13 @@ def provider_request_key(provider_name, request_id):
             or request_id != request_id.strip()
             or any(unicodedata.category(c).startswith("C") for c in request_id)):
         raise FinanceDenied("Valid provider request identity required")
+    canonical_id = unicodedata.normalize("NFKC", request_id).casefold()
+    if not canonical_id or canonical_id != canonical_id.strip() or any(
+        unicodedata.category(c).startswith("C") for c in canonical_id
+    ):
+        raise FinanceDenied("Noncanonical provider request identity")
     return "provider-request:" + hashlib.sha256(
-        (provider_name + ":" + request_id).encode("utf-8")
+        (provider_name + ":" + canonical_id).encode("utf-8")
     ).hexdigest()
 
 
