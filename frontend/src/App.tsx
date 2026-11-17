@@ -51,13 +51,26 @@ export default function App() {
   }
   async function login() {
     setBusy(true)
-    try { await signIn() }
-    catch { setAuthMessage('Microsoft sign-in failed. Check the Entra registration.'); setBusy(false) }
+    try {
+      await signIn()
+      const account = await getSignedInAccount()
+      setAccountName(account?.name ?? account?.username ?? null)
+      setAuthMessage(account
+        ? 'Signed in locally. API role and project access remain unverified.'
+        : 'Sign-in did not return an account.')
+    } catch {
+      setAuthMessage('Microsoft sign-in failed. Check the Entra registration.')
+    } finally { setBusy(false) }
   }
   async function logout() {
     setBusy(true)
-    try { await signOut() }
-    catch { setAuthMessage('Microsoft sign-out failed.'); setBusy(false) }
+    try {
+      await signOut()
+      setAccountName(null)
+      setAuthMessage('Signed out. Offline demo remains available.')
+    } catch {
+      setAuthMessage('Microsoft sign-out failed.')
+    } finally { setBusy(false) }
   }
   function submitDemo(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
