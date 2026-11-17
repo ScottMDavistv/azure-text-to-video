@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Strictly isolated Azure what-if evidence collector, no deploy/IAM/provider actions.
+
+Runs only on protected main under the existing audit OIDC environment. Fails
+closed for unexpected changes. Raw Azure output is NEVER printed or uploaded.
+"""
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+SUBSCRIPTION = "41fbffdc-1793-44f9-b70f-220ea8a9bc6c"
+RG = "rg-textvideo-dev"
+JOB = "job-textvideo-worker-dev"
+REGISTRY = "acrtextvideo1794671698.azurecr.io"
+TAG = "692bb1b7f7bd467f1d64e7288115424d21506c12"
+DIGEST = "sha256:219ebbe03d9b1356a4091912b4955c1987ba8a0131a4e084953ab3796b5f0646"
+IMAGE = REGISTRY + "/textvideo-worker@" + DIGEST
+EXISTING_IMAGE = REGISTRY + "/textvideo-worker:" + TAG
+REVIEWED_SHA = "e5e1bcbd0a9cb270957febb71faf884d8fc0b649"
+JOB_ID = ("/subscriptions/" + SUBSCRIPTION + "/resourceGroups/" + RG +
+          "/providers/Microsoft.App/jobs/" + JOB)
+BICEP = Path("reviewed/infra/worker-job.bicep")
+EVIDENCE = Path("azure-worker-whatif-evidence.json")
+SUMMARY = Path("azure-worker-whatif-evidence.md")
+
+
+class Blocked(Exception):
+    pass
+
+
+def preflight_env(env):
+    if (env.get("GITHUB_REF") != "refs/heads/main"
+            or env.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+            or env.get("AZURE_AUDIT_OPERATIONS_ENABLED") != "true"
+            or env.get("GITHUB_REPOSITORY") != "ScottMDavistv/azure-text-to-video"
+            or env.get("GITHUB_REPOSITORY_ID") != "1457187422"
+            or env.get("GITHUB_REPOSITORY_OWNER_ID") != "212811615"):
+        raise Blocked("trusted main manual audit context not established")
+    if env.get("AZURE_SUBSCRIPTION_ID") != SUBSCRIPTION:
+        raise Blocked("wrong subscription configuration")
+
+
+def validate_template(source):
+    """Reject drift from reviewed safe, single-resource template."""
+    required = (
+        "param workerImage string", "@allowed([", "'" + IMAGE + "'",
+        "resource worker 'Microsoft.App/jobs@2024-03-01'",
+        "workloadProfileName: 'Consumption'", "triggerType: 'Manual'",
+        "replicaRetryLimit: 0", "secrets: []",
+        "'worker_runtime.py'", "'--check'",
+        "name: 'VIDEO_RENDER_PROVIDER'", "value: 'disabled'",
+        "name: 'ENABLE_WORKER_CONSUMPTION'",
+        "name: 'ENABLE_LIVE_VIDEO_RENDERING'", "value: 'false'",
+    )
+    if not all(item in source for item in required):
+        raise Blocked("reviewed worker template safety gate failed")
+    # Preclude additional managed resources in the isolated worker template.
+    declarations = re.findall(r"\bresource\s+\w+\s+'([^']+)'\s*=\s*\{", source)
+    if declarations != ["Microsoft.App/jobs@2024-03-01"]:
+        raise Blocked("unexpected managed resource declarations")
+
+
+def run_json(argv, *, runner=subprocess.run, timeout=90):
+    """No shell and no raw Azure output on failure."""
+    try:
+        result = runner(argv, capture_output=True, text=True,
+                        check=False, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        raise Blocked("Azure CLI read or preview unavailable") from None
+    if result.returncode != 0:
+        raise Blocked("Azure operation unavailable or not permitted by current identity")
+    try:
+        value = json.loads(result.stdout)
+    except (ValueError, TypeError):
+        raise Blocked("Azure response was not JSON") from None
+    if not isinstance(value, dict):
+        raise Blocked("Azure response JSON shape unexpected")
+    return value
+
+
+def check_existing(job):
+    if job.get("id", "").casefold() != JOB_ID.casefold():
+        raise Blocked("wrong worker resource")
+    props = job.get("properties") or {}
+    config = props.get("configuration") or {}
+    template = props.get("template") or {}
+    containers = template.get("containers") or []
+    if (len(containers) != 1
+            or containers[0].get("image") != EXISTING_IMAGE
+            or containers[0].get("command") != ["python"]
+            or containers[0].get("args") != ["worker_runtime.py", "--check"]
+            or config.get("triggerType") != "Manual"
+            or props.get("workloadProfileName") != "Consumption"
+            or config.get("secrets")
+            or len((job.get("identity") or {}).get("userAssignedIdentities") or {}) != 1):
+        raise Blocked("existing Azure worker is not the expected disabled baseline")
+    env = {x.get("name"): x for x in containers[0].get("env") or []
+           if isinstance(x, dict)}
+    for key, expected in (("VIDEO_RENDER_PROVIDER", "disabled"),
+                          ("ENABLE_WORKER_CONSUMPTION", "false"),
+                          ("ENABLE_LIVE_VIDEO_RENDERING", "false")):
+        if env.get(key, {}).get("value") != expected or env.get(key, {}).get("secretRef"):
+            raise Blocked("existing Azure worker provider/consumption safeguards differ")
+    return True
+
+
+def classify_whatif(payload):
+    """Pass only one exact image delta on the existing job. All else blocks."""
+    changes = payload.get("changes")
+    if not isinstance(changes, list):
+        raise Blocked("Azure what-if response did not contain change list")
+    modifications = []
+    for change in changes:
+        if not isinstance(change, dict):
+            raise Blocked("unexpected what-if change shape")
+        kind = change.get("changeType")
+        if kind in ("NoChange", "Ignore"):
+            continue
+        if kind != "Modify" or str(change.get("resourceId", "")).casefold() != JOB_ID.casefold():
+            raise Blocked("preview contains non-image change or other resource")
+        modifications.append(change)
+    if len(modifications) != 1:
+        raise Blocked("preview must contain exactly one worker image modification")
+    delta = modifications[0].get("delta")
+    if not isinstance(delta, list) or len(delta) != 1:
+        raise Blocked("preview did not isolate one image property change")
+    item = delta[0]
+    if not isinstance(item, dict):
+        raise Blocked("unexpected Azure what-if delta shape")
+    path = str(item.get("path", "")).removeprefix("$.").removeprefix(".")
+    if (path != "properties.template.containers[0].image"
+            or item.get("propertyChangeType") != "Modify"
+            or item.get("before") != EXISTING_IMAGE
+            or item.get("after") != IMAGE):
+        raise Blocked("preview is not the approved image-only tag-to-digest change")
+    return {"resource": "job-textvideo-worker-dev",
+            "change_type": "Modify",
+            "changed_field": "properties.template.containers[0].image",
+            "old_image_type": "mutable-git-sha-tag",
+            "new_image_digest": DIGEST,
+            "image_only": True}
+
+
+def execute(*, runner=subprocess.run, environment=os.environ, template_path=BICEP):
+    preflight_env(environment)
+    source = template_path.read_text(encoding="utf-8")
+    validate_template(source)
+    account = run_json(["az", "account", "show", "--output", "json"], runner=runner)
+    if account.get("id", "").lower() != SUBSCRIPTION:
+        raise Blocked("Azure account is not on approved dev subscription")
+    job = run_json(["az", "resource", "show", "--ids", JOB_ID,
+                    "--api-version", "2024-03-01", "--output", "json"], runner=runner)
+    check_existing(job)
+    # The only ARM preview operation. It may require whatIf/action beyond Reader;
+    # absence of permission MUST NOT result in an IAM grant or another identity.
+    preview = run_json([
+        "az", "deployment", "group", "what-if",
+        "--resource-group", RG,
+        "--template-file", str(template_path),
+        "--parameters", "workerImage=" + IMAGE,
+        "--result-format", "FullResourcePayloads",
+        "--output", "json",
+    ], runner=runner, timeout=120)
+    return classify_whatif(preview)
+
+
+def report(result=None, blocked=None):
+    return {
+        "schema_version": 1, "operation": "Azure ARM group what-if only",
+        "subscription_scope": "approved development subscription",
+        "resource_group": RG, "worker": JOB,
+        "reviewed_template_commit": REVIEWED_SHA,
+        "image_digest": DIGEST,
+        "state": "image-only-preview" if result else "blocked-unverified",
+        "deployment_performed": False, "iam_modified": False,
+        "worker_started": False, "paid_provider_called": False,
+        "finding": result if result else None,
+        "blocker": blocked if not result else None,
+        "authorization": "what-if only; separate merge and deploy approvals required",
+    }
+
+
+def write_report(data):
+    EVIDENCE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    lines = ["# Isolated Azure worker what-if", "",
+             "**Result:** " + data["state"],
+             "**Worker:** " + JOB,
+             "**Reviewed template SHA:** `" + REVIEWED_SHA + "`",
+             "**Manifest digest:** `" + DIGEST + "`",
+             "**Deployment or IAM changes:** None", ""]
+    if data["finding"]:
+        lines += ["**Permitted image-only delta was verified.**"]
+    else:
+        lines += ["**Blocked:** " + (data["blocker"] or "unverified")]
+    lines += ["", "This report is NOT deployment or merge authorization."]
+    SUMMARY.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def main():
+    try:
+        result = execute()
+        data = report(result)
+    except Exception as exc:
+        # Only our fixed, non-sensitive reasons are reportable. Never expose raw
+        # CLI stderr, ARM preview JSON, environment values or tokens.
+        reason = str(exc) if isinstance(exc, Blocked) else "preflight or Azure operation failed"
+        data = report(blocked=reason)
+    write_report(data)
+    print("Azure isolated what-if:", data["state"])
+    return 0 if data["finding"] else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
