@@ -33,15 +33,6 @@ export default function LiveJourney({ accountName }: { accountName: string | nul
     for (const controller of controllers.current) controller.abort()
     if (videoUrlRef.current) URL.revokeObjectURL(videoUrlRef.current)
   }, [])
-  useEffect(() => {
-    for (const controller of controllers.current) controller.abort()
-    if (videoUrlRef.current) URL.revokeObjectURL(videoUrlRef.current)
-    videoUrlRef.current = null
-    setVideoUrl(null)
-    setJob(null)
-    activeJob.current = null
-  }, [accountName])
-
   async function authorized<T>(operation: (token: string, signal: AbortSignal) => Promise<T>): Promise<T> {
     const controller = new AbortController()
     controllers.current.add(controller)
