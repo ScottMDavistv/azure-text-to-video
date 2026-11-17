@@ -17,7 +17,8 @@ class SyntheticRenderError(RuntimeError):
     pass
 
 def assert_offline():
-    if os.getenv("VIDEO_RENDER_PROVIDER", "disabled").strip().lower() != "disabled":
+    if (os.getenv("VIDEO_RENDER_PROVIDER", "disabled").strip().lower() != "disabled"
+            or os.getenv("VIDEO_PROVIDER", "disabled").strip().lower() != "disabled"):
         raise SyntheticRenderError("Synthetic rendering requires disabled paid provider")
     for name in ("ENABLE_PAID_FAL_WORKER", "ENABLE_LIVE_VIDEO_RENDERING",
                  "ENABLE_WORKER_CONSUMPTION"):
