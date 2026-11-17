@@ -187,3 +187,21 @@ def test_forged_or_insufficient_scope_token_is_rejected(enabled):
         with pytest.raises(HTTPException) as error:
             routes.verified_actor(table, "Bearer no-scope")
     assert error.value.status_code == 403
+
+@pytest.mark.parametrize("name,value", [
+    ("ENABLE_PAID_FAL_WORKER", "1"),
+    ("ENABLE_PAID_FAL_WORKER", "yes"),
+    ("ENABLE_LIVE_VIDEO_RENDERING", "1"),
+    ("ENABLE_WORKER_CONSUMPTION", "true"),
+    ("ALLOW_UNAUTHENTICATED_DEV", "yes"),
+    ("VIDEO_PROVIDER", "fal"),
+])
+def test_synthetic_dispatch_rejects_alternate_unsafe_runtime_flags(enabled, monkeypatch, name, value):
+    monkeypatch.setenv("ENABLE_SYNTHETIC_VIDEO_DISPATCH", "true")
+    monkeypatch.setenv("VIDEO_RENDER_PROVIDER", "disabled")
+    monkeypatch.setenv(name, value)
+    assert routes.synthetic_dispatch_enabled() is False
+
+def test_synthetic_dispatch_safe_defaults_require_opt_in(enabled, monkeypatch):
+    monkeypatch.setenv("ENABLE_SYNTHETIC_VIDEO_DISPATCH", "false")
+    assert routes.synthetic_dispatch_enabled() is False
