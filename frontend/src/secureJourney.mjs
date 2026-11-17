@@ -74,7 +74,7 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch })
       if (type !== 'video/mp4') throw new VideoApiError(502, 'Unexpected video format.')
       const claimed = response.headers.get('content-length')
       // Reject a declared mismatch before allocating any MP4 response body.
-      if (claimed !== null && (!/^[0-9]+$/.test(claimed) || Number(claimed) !== video)) {
+      if (claimed === null || !/^[0-9]+$/.test(claimed) || Number(claimed) !== video) {
         throw new VideoApiError(502, 'Video response size conflicts with authorized metadata.')
       }
       const blob = await response.blob()
