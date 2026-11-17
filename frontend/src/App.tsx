@@ -8,7 +8,10 @@ import {
   advanceMockJob, mockProgress, validatePrompt,
   type MockJob,
 } from './mockJourney.mjs'
+import SecureStudio from './SecureStudio'
 import './App.css'
+
+const authenticatedJourneyEnabled = import.meta.env.VITE_ENABLE_AUTHENTICATED_JOURNEY === 'true'
 
 export default function App() {
   const configured = isAuthConfigured()
@@ -23,6 +26,7 @@ export default function App() {
   const [job, setJob] = useState<MockJob | null>(null)
   const [sequence, setSequence] = useState(0)
   const [view, setView] = useState<'studio' | 'projects'>('studio')
+  const [realMode, setRealMode] = useState(authenticatedJourneyEnabled)
   const [selectedScene, setSelectedScene] = useState(0)
 
   useEffect(() => {
@@ -82,18 +86,18 @@ export default function App() {
           <button className={`nav-item ${view === 'studio' ? 'active' : ''}`} onClick={() => setView('studio')}>Studio</button>
           <button className={`nav-item ${view === 'projects' ? 'active' : ''}`} onClick={() => setView('projects')}>Projects</button>
         </nav>
-        <p className="sidebar-note">Offline demo only. No Azure job, video provider, storage artifact or billable request is created.</p>
+        <p className="sidebar-note">Paid provider disabled. Authenticated project workflow requires separately enabled backend security and synthetic dispatch.</p>
       </aside>
       <main className="workspace">
         <header className="topbar">
-          <span className="eyebrow">Development workspace / Mock workflow</span>
+          <span className="eyebrow">Development workspace / {realMode ? "Authenticated API mode" : "Offline mock workflow"}</span>
           <span className="status-pill">● Paid rendering disabled</span>
         </header>
         <div className="heading-row">
           <div>
             <p className="eyebrow">VIDEO CREATION</p>
             <h1>{view === 'studio' ? 'Creative studio' : 'Your projects'}</h1>
-            <p>{view === 'studio' ? 'Plan a five-minute synthetic video using an offline demonstration.' : 'Demo projects live only in this browser session.'}</p>
+            <p>{view === 'studio' ? realMode ? 'Submit a project-owned job using Microsoft Entra and retrieve private completed videos.' : 'Plan a five-minute synthetic video using an offline demonstration.' : 'Demo projects live only in this browser session.'}</p>
           </div>
           <div className="auth-tools">
             {accountName ? (
@@ -106,7 +110,8 @@ export default function App() {
           </div>
         </div>
         <p className="muted" role="status">{authMessage}</p>
-        {view === 'studio' ? (
+        {authenticatedJourneyEnabled ? <div className="mode-picker"><button className="secondary" type="button" aria-pressed={!realMode} onClick={() => setRealMode(false)}>Offline demo</button><button className="secondary" type="button" aria-pressed={realMode} onClick={() => setRealMode(true)}>Authenticated project</button></div> : null}
+        {view === 'studio' && realMode ? <SecureStudio /> : view === 'studio' ? (
           <div className="dashboard">
             <section className="panel" aria-labelledby="prompt-title">
               <h2 id="prompt-title">Create a video concept</h2>
