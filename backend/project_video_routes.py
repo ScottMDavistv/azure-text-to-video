@@ -136,9 +136,11 @@ def queue_project_job(project_id: UUID, job_id: UUID,
 def authorized_video(project_id, job_id, authorization):
     table = get_jobs_table_client()
     actor = verified_actor(table, authorization)
-    authorized_job(table, str(project_id), str(job_id), actor)
     if not downloads_enabled():
         raise HTTPException(503, "Video downloads are disabled")
+    job = authorized_job(table, str(project_id), str(job_id), actor)
+    if job.get("status") != "completed":
+        raise HTTPException(409, "Video generation is not completed")
     return get_video_resource(str(job_id))
 
 @router.get("/{project_id}/jobs/{job_id}/video/metadata")
