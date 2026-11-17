@@ -11,6 +11,10 @@ const localhostRedirect = 'http://localhost:5173'
 const codespacesRedirect =
   'https://turbo-halibut-g4pq966pxp5vf9wxw-5173.app.github.dev'
 
+const env = typeof import.meta !== 'undefined' && import.meta && import.meta.env
+  ? import.meta.env
+  : (typeof process !== 'undefined' ? process.env : {})
+
 /** Only use origins explicitly registered with the Entra SPA. */
 export function getRedirectUri(origin: string): string {
   if (origin === localhostRedirect || origin === 'http://127.0.0.1:5173') {
@@ -22,32 +26,54 @@ export function getRedirectUri(origin: string): string {
 
 export const apiScopes = [`api://${apiClientId}/access_as_user`]
 
-const frontendClientId = import.meta.env.VITE_ENTRA_SPA_CLIENT_ID?.trim() ?? ''
+const frontendClientId = (env.VITE_ENTRA_SPA_CLIENT_ID ?? '').trim()
 
 export function isAuthConfigured(): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(frontendClientId)
 }
 
 let initialization: Promise<PublicClientApplication> | null = null
+let authFactory:
+  | ((config: ConstructorParameters<typeof PublicClientApplication>[0]) => PublicClientApplication)
+  | null = null
+
+export function setMsalFactory(
+  factory: (config: ConstructorParameters<typeof PublicClientApplication>[0]) => PublicClientApplication,
+): void {
+  authFactory = factory
+  initialization = null
+}
+
+export function resetMsalFactory(): void {
+  authFactory = null
+  initialization = null
+}
+
+function currentOrigin(): string {
+  if (typeof window !== 'undefined' && window.location) {
+    return window.location.origin
+  }
+  return localhostRedirect
+}
 
 export async function initializeAuth(): Promise<PublicClientApplication> {
   if (!isAuthConfigured()) {
     throw new Error('The local Entra SPA client ID is not configured')
   }
   if (!initialization) {
-    const client = new PublicClientApplication({
+    const clientConfig = {
       auth: {
         clientId: frontendClientId,
         authority: `https://login.microsoftonline.com/${tenantId}`,
-        redirectUri: getRedirectUri(window.location.origin),
-        postLogoutRedirectUri: getRedirectUri(window.location.origin),
+        redirectUri: getRedirectUri(currentOrigin()),
+        postLogoutRedirectUri: getRedirectUri(currentOrigin()),
         navigateToLoginRequestUrl: false,
       },
-      cache: { cacheLocation: 'sessionStorage', storeAuthStateInCookie: false },
-    })
+      cache: { cacheLocation: 'memoryStorage', storeAuthStateInCookie: false },
+    }
+    const client = (authFactory ?? ((config) => new PublicClientApplication(config)))(clientConfig)
     initialization = (async () => {
       await client.initialize()
-      await client.handleRedirectPromise()
       return client
     })()
   }
@@ -61,13 +87,23 @@ export async function getSignedInAccount(): Promise<AccountInfo | null> {
 
 export async function signIn(): Promise<void> {
   const auth = await initializeAuth()
-  await auth.loginRedirect({ scopes: apiScopes })
+  try {
+    await auth.loginPopup({ scopes: apiScopes, prompt: 'select_account' })
+  } catch (error) {
+    resetInitialization()
+    throw error
+  }
 }
 
 export async function signOut(): Promise<void> {
   const auth = await initializeAuth()
   const account = await getSignedInAccount()
-  await auth.logoutRedirect({ account: account ?? undefined })
+  try {
+    await auth.logoutPopup({ account: account ?? undefined })
+  } catch (error) {
+    resetInitialization()
+    throw error
+  }
 }
 
 export async function acquireApiToken(): Promise<AuthenticationResult | null> {
@@ -78,9 +114,14 @@ export async function acquireApiToken(): Promise<AuthenticationResult | null> {
     return await auth.acquireTokenSilent({ account, scopes: apiScopes })
   } catch (error) {
     if (error instanceof InteractionRequiredAuthError) {
-      await auth.acquireTokenRedirect({ account, scopes: apiScopes })
-      return null
+      try {
+        return await auth.acquireTokenPopup({ account, scopes: apiScopes, prompt: 'consent' })
+      } catch (popupError) {
+        resetInitialization()
+        throw popupError
+      }
     }
+    resetInitialization()
     throw error
   }
 }

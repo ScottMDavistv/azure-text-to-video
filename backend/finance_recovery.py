@@ -53,6 +53,16 @@ def settle_unique_receipt(table, *, job_id, actual_cents,
     if valid is not True:
         raise FinanceDenied("Provider billing evidence rejected")
 
+    try:
+        submission = read_intent(table, job_id)
+    except Exception as exc:
+        raise FinanceDenied("Submission intent is missing or invalid") from exc
+    if submission.get("state") != "submitted":
+        raise FinanceDenied("Provider submission is not durably recorded")
+    durable_request_id = submission.get("providerRequestId")
+    if durable_request_id != provider_request_id:
+        raise FinanceDenied("Provider request does not match the job's durable submission")
+
     reservation = load(table, "reservation:" + job_id)
     if reservation["state"] != "reserved":
         raise FinanceDenied("Reservation is not open")
