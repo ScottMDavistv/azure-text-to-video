@@ -480,3 +480,59 @@ jobs:
         findings = yaml_scan(self, {"sample.yml": document})
         self.assertTrue(any("workflow_run payload" in p for p in findings))
         self.assertTrue(any("downloads artifacts" in p for p in findings))
+
+    def test_n1_nonprivileged_relay_into_privileged_job_denied(self):
+        for producer, consumer in (
+            ("run-id: " + E + "github.event.workflow_run.id }}",
+             'run: echo "' + E + 'needs.meta.outputs.branch }}"'),
+            ("branch: " + E + "github.event.workflow_run.head_branch }}",
+             'run: echo "' + E + 'needs.meta.outputs.branch }}"'),
+        ):
+            document = (
+                "on: workflow_run\n"
+                "permissions: {contents: read, actions: read}\n"
+                "jobs:\n"
+                "  meta:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    outputs:\n"
+                "      branch: " + E + "github.event.workflow_run.head_branch }}\n"
+                "    steps:\n"
+                "      - uses: actions/download-artifact@v4\n"
+                "        with:\n"
+                "          " + producer + "\n"
+                "  deploy:\n"
+                "    needs: meta\n"
+                "    runs-on: ubuntu-latest\n"
+                "    environment: dev-deployment\n"
+                "    if: github.ref == 'refs/heads/main'\n"
+                "    permissions: {id-token: write, contents: read}\n"
+                "    steps:\n"
+                "      - " + consumer + "\n"
+            )
+            findings = yaml_scan(self, {"relay.yml": document})
+            self.assertTrue(any("workflow_run payload" in p for p in findings), findings)
+            self.assertTrue(any("downloads artifacts" in p for p in findings), findings)
+
+    def test_n2_nonprivileged_base_context_artifact_execution_denied(self):
+        document = (
+            "on: workflow_run\npermissions: {contents: read, actions: read}\n"
+            "jobs:\n  consume:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - uses: actions/download-artifact@v4\n"
+            "        with:\n"
+            "          run-id: " + E + "github.event.workflow_run.id }}\n"
+            "      - run: bash artifact/entry.sh\n"
+        )
+        findings = yaml_scan(self, {"artifact.yml": document})
+        self.assertTrue(any("downloads artifacts" in p for p in findings), findings)
+
+    def test_n3_local_action_windows_and_self_repository_forms_denied(self):
+        for action in (r".\\.github\\actions\\x", "$/.github/actions/x", "./.github/actions/x"):
+            document = (
+                "on: workflow_run\npermissions: {contents: read}\n"
+                "jobs:\n  deploy:\n    runs-on: windows-latest\n"
+                "    environment: dev-deployment\n"
+                "    if: github.ref == 'refs/heads/main'\n"
+                "    steps:\n      - uses: '" + action + "'\n"
+            )
+            findings = yaml_scan(self, {"action.yml": document})
+            self.assertTrue(any("local action forbidden" in p for p in findings), (action, findings))
