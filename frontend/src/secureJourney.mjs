@@ -46,6 +46,7 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch })
     if (typeof token !== 'string' || !token.trim()) {
       throw new VideoApiError(401, 'Microsoft API permission is required.')
     }
+    if (signal?.aborted) throw new DOMException('Request aborted', 'AbortError')
     const response = await fetcher(origin + path, {
       method, signal, credentials: 'omit', redirect: 'error',
       cache: 'no-store',
@@ -90,15 +91,15 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch })
     (jobId ? '/' + validateProjectId(jobId) : '')
 
   return {
-    async submit(projectId, prompt) {
+    async submit(projectId, prompt, signal) {
       if (typeof prompt !== 'string' || prompt.trim().length < 1 ||
           prompt.trim().length > 2000) throw new VideoApiError(422, 'Enter 1–2,000 characters.')
       return validateJob(await request(path(projectId), {
-        method: 'POST', body: { prompt: prompt.trim() },
+        method: 'POST', body: { prompt: prompt.trim() }, signal,
       }))
     },
-    async queue(projectId, jobId) {
-      const result = await request(path(projectId, jobId) + '/queue', { method: 'POST' })
+    async queue(projectId, jobId, signal) {
+      const result = await request(path(projectId, jobId) + '/queue', { method: 'POST', signal })
       if (result?.job_id !== jobId || result?.status !== 'queued') {
         throw new VideoApiError(502, 'Unexpected queue response.')
       }
@@ -107,8 +108,8 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch })
     async status(projectId, jobId, signal) {
       return validateJob(await request(path(projectId, jobId), { signal }))
     },
-    async metadata(projectId, jobId) {
-      const data = await request(path(projectId, jobId) + '/video/metadata')
+    async metadata(projectId, jobId, signal) {
+      const data = await request(path(projectId, jobId) + '/video/metadata', { signal })
       if (data?.job_id !== jobId || data?.status !== 'completed' || data?.available !== true ||
           data?.content_type !== 'video/mp4' ||
           !Number.isSafeInteger(data.size_bytes) || data.size_bytes <= 0 ||
@@ -118,9 +119,9 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch })
       }
       return data
     },
-    async download(projectId, jobId) {
-      const metadata = await this.metadata(projectId, jobId)
-      return request(path(projectId, jobId) + '/video', { video: metadata.size_bytes })
+    async download(projectId, jobId, signal) {
+      const metadata = await this.metadata(projectId, jobId, signal)
+      return request(path(projectId, jobId) + '/video', { video: metadata.size_bytes, signal })
     },
   }
 }
