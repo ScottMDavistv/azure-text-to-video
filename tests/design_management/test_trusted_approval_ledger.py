@@ -66,9 +66,9 @@ class LedgerTests(unittest.TestCase):
                                      identity_provider=Identity(),
                                      head_verifier=self.heads)
 
-    def approve(self, challenge, **changes):
-        params = dict(job_id=challenge["job_id"], payload_digest=challenge["payload_digest"],
-                      challenge=challenge["challenge"], user_access_token=TOKEN, now=200)
+    def approve(self, proposal, **changes):
+        params = dict(job_id=proposal["job_id"], payload_digest=proposal["payload_digest"],
+                      challenge=proposal["challenge"], user_access_token=TOKEN, now=200)
         params.update(changes)
         return self.ledger.approve(**params)
 
