@@ -728,8 +728,7 @@ c1_privacy_monitor_loop() {
     else misses=$((misses + 1)); reason=unverified
     fi
     if (( misses >= 3 )); then
-      # L-9: propagate an unverified teardown. The watchdog detects the
-      # teardown-failed marker and terminates the exact recorded launcher.
+      # L-9: an unverifiable teardown must propagate failure to the watchdog.
       c1_teardown_novnc "$s" "$port" "$ws" "$wsst" "$reason" || return 2
       return 0
     fi
@@ -765,37 +764,9 @@ c1_watchdog_loop() {
   # A SIGKILLed launcher can linger as an unreaped zombie with the same start
   # time; zombie (Z) or dead (X) counts as gone.
   while [[ "$(c1_proc_start "$lpid")" == "$lstart" && ! "$(c1_proc_stat_field "$lpid" 1)" =~ ^[ZX]$ ]]; do
-    # L-9: a failed privacy teardown must abort the launcher even if it is
-    # waiting for operator input. Only signal the PID/start-time originally
-    # passed to this watchdog after rechecking the active-session record.
-    if [[ -f "$s/privacy-failed" ]] && grep -q ' teardown-failed
-}
-
-# c1_start_watchdog ROOT SESSION LAUNCHER_PID LIBPATH
-c1_start_watchdog() {
-  local root=$1 s=$2 lpid=$3 lib=$4 lst
-  lst=$(c1_proc_start "$lpid"); [[ -n "$lst" ]] || return 1
-  # shellcheck disable=SC2016
-  c1_spawn "$s" watchdog bash -c 'source "$1"; c1_watchdog_loop "$2" "$3" "$4" "$5"' _ "$lib" "$root" "$s" "$lpid" "$lst" >/dev/null
-}
-
-# ------------------------------------------------------- environment (L-4) --
-# Test phases run under `env -i` with this allowlist only (no PLAYWRIGHT_*,
-# NODE_OPTIONS/NODE_PATH, npm_config_*, proxies or CA overrides are inherited).
-C1_ENV_ALLOW=(HOME PATH LANG LC_ALL TERM USER DISPLAY XAUTHORITY C1_HARNESS_SESSION)
-c1_clean_env() {
-  local v
-  printf '%s\0' env -i
-  for v in "${C1_ENV_ALLOW[@]}"; do
-    if [[ -n "${!v+x}" ]]; then printf '%s\0' "$v=${!v}"; fi
-  done
-}
-
-# c1_expected_browser FRONTEND NAME -> browserVersion from playwright-core/browsers.json
-c1_expected_browser() {
-  node -e 'const b=require(process.argv[1]+"/node_modules/playwright-core/browsers.json").browsers.find(x=>x.name===process.argv[2]);if(b)process.stdout.write(b.browserVersion)' "$1" "$2" 2>/dev/null
-}
- "$s/privacy-failed"; then
+    # L-9: if port closure is unverified, stop only the exact recorded launcher
+    # after validating PID/start time and the active-session record.
+    if [[ -f "$s/privacy-failed" ]] && grep -q ' teardown-failed$' "$s/privacy-failed"; then
       local active_pid active_start active_session
       if read -r active_pid active_start active_session <"$root/active" &&
          [[ "$active_pid" == "$lpid" && "$active_start" == "$lstart" && "$active_session" == "$s" ]] &&
