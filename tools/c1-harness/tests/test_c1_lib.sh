@@ -883,8 +883,30 @@ time.sleep(120)'
   [[ "$port" =~ ^[0-9]+$ && "$ino" =~ ^[0-9]+$ ]] || { echo "listener $name did not start" >&2; return 1; }
   printf '%s %s %s\n' "$pid" "$port" "$ino"
 }
-# fixture_net DIR: snapshot of the real kernel tables (tcp6 only if present).
-fixture_net() { mkdir -p "$1"; cp /proc/net/tcp "$1/tcp"; [[ ! -e /proc/net/tcp6 ]] || cp /proc/net/tcp6 "$1/tcp6"; }
+# fixture_net DIR: snapshot real kernel tables into writable private test
+# fixtures. /proc/net entries are read-only; copying their modes would make
+# synthetic IPv4/IPv6 row injection fail (or prompt during replacement).
+fixture_net() {
+  local d=$1
+  mkdir -p "$d"
+  cp -- /proc/net/tcp "$d/tcp"
+  chmod u+w -- "$d/tcp"
+  if [[ -e /proc/net/tcp6 ]]; then
+    cp -- /proc/net/tcp6 "$d/tcp6"
+    chmod u+w -- "$d/tcp6"
+  fi
+}
+fixture_net_writable() {
+  local d="$ADV/fixture-permissions"
+  fixture_net "$d"
+  [[ -w "$d/tcp" ]] && test -s "$d/tcp"
+  printf '# fixture\n' >>"$d/tcp"
+  if [[ -e /proc/net/tcp6 ]]; then
+    [[ -w "$d/tcp6" ]] && test -s "$d/tcp6"
+    printf '# fixture\n' >>"$d/tcp6"
+  fi
+}
+t 'private kernel-table fixtures are writable without modifying /proc/net' fixture_net_writable
 # move_to_v6 DIR INODE PORT HEXADDR32: the real socket INODE now appears ONLY as an IPv6 listener.
 move_to_v6() {
   local d=$1 ino=$2 port=$3 addr=$4
