@@ -228,15 +228,79 @@ reuse_with_start() {   # a recorded PID/starttime matches an UNRELATED process (
   (( ok == 1 )) && c1_cleanup_all "$ROOT" && [[ ! -e "$reg" ]]
 }
 t 'stale recovery never signals an unrelated process (or its group) that reused a recorded PID' reuse_with_start
-reuse_legacy_line() {  # legacy/garbage pids lines without a start time are never trusted
-  local s v; s=$(c1_session_new "$ROOT")
+reuse_legacy_line() {  # legacy/garbage pids lines must not signal or erase evidence
+  local s v rc=0 reg; s=$(c1_session_new "$ROOT")
   setsid sleep 300 </dev/null >/dev/null 2>&1 & v=$!; sleep 0.3
   printf '%s\nnot-a-pid 5\n-1 1\n' "$v" >"$s/pids"; printf '999999 1 %s\n' "$s" >"$ROOT/active"
-  c1_cleanup_all "$ROOT"; sleep 0.3
-  local ok=0; alive "$v" && ok=1; kill "$v" 2>/dev/null || true
-  (( ok == 1 ))
+  c1_cleanup_all "$ROOT" 2>/dev/null || rc=$?
+  reg="$ROOT/.${s##*/}.pids"
+  local ok=0
+  (( rc != 0 )) && [[ -s "$reg" ]] && alive "$v" && ok=1
+  kill "$v" 2>/dev/null || true
+  wait "$v" 2>/dev/null || true
+  # Only the test fixture may remove deliberately corrupt evidence.
+  (( ok == 1 )) || return 1
+  rm -f -- "$reg"
+  c1_cleanup_all "$ROOT"
 }
 t 'stale recovery ignores pids lines without a verified start time' reuse_legacy_line
+
+recovery_refuses_unresolved() {  # active was deleted before a failed verify
+  local s v rc=0 reg; s=$(c1_session_new "$ROOT")
+  setsid sleep 300 </dev/null >/dev/null 2>&1 & v=$!; sleep 0.2
+  printf '%s %s\n' "$v" "$(c1_proc_start "$v")" >"$s/pids"
+  c1_cleanup_session "$ROOT" "$s"
+  reg="$ROOT/.${s##*/}.pids"
+  [[ ! -e "$ROOT/active" && -s "$reg" ]]
+  c1_verify_cleanup "$s" 2>/dev/null && return 1
+  c1_recover_before_start "$ROOT" 2>/dev/null && return 1
+  # The same evidence must gate a new session even without an active lock.
+  [[ -s "$reg" ]] && alive "$v" || return 1
+  kill "$v" 2>/dev/null || true
+  wait "$v" 2>/dev/null || true
+  c1_recover_before_start "$ROOT" && [[ ! -e "$reg" ]]
+}
+t 'N-1: orphan survivor evidence refuses next session until independently retired' recovery_refuses_unresolved
+
+recovery_refuses_orphan_inode() {
+  local s reg; s=$(c1_session_new "$ROOT")
+  c1_cleanup_session "$ROOT" "$s"
+  reg="$ROOT/.${s##*/}.inodes"
+  printf '999999999\n' >"$reg"
+  # An unresolvable evidence reader must not convert this into a clean start.
+  C1_SS_BIN=/nonexistent/ss c1_recover_before_start "$ROOT" 2>/dev/null && return 1
+  [[ -s "$reg" ]] || return 1
+  c1_recover_before_start "$ROOT" && [[ ! -e "$reg" ]]
+}
+t 'N-1: orphan listener evidence is verified before next session' recovery_refuses_orphan_inode
+
+pid_preserve_denied() {
+  local s rc=0 archive; s=$(c1_session_new "$ROOT")
+  printf '123456789 1\n' >"$s/pids"
+  archive="$ROOT/.${s##*/}.pids"
+  mkdir "$archive"  # an archive directory must not be mistaken for a successful write
+  c1_cleanup_session "$ROOT" "$s" 2>/dev/null || rc=$?
+  (( rc != 0 )) && [[ -d "$s" && -s "$s/pids" && -d "$archive" ]] || return 1
+  rmdir "$archive"
+  c1_cleanup_session "$ROOT" "$s" && c1_verify_cleanup "$s"
+}
+t 'N-2: failed PID archive preservation retains source evidence and fails closed' pid_preserve_denied
+
+malformed_preserved_pid() {
+  local s reg rc=0; s=$(c1_session_new "$ROOT")
+  c1_cleanup_session "$ROOT" "$s"
+  reg="$ROOT/.${s##*/}.pids"
+  printf '123456789\nnot-a-pid 1\n123 45 extra\n' >"$reg"
+  c1_verify_cleanup "$s" 2>/dev/null || rc=$?
+  (( rc != 0 )) && [[ -s "$reg" ]] || return 1
+  c1_recover_before_start "$ROOT" 2>/dev/null && return 1
+  [[ -s "$reg" ]] || return 1
+  # Test teardown explicitly removes manufactured invalid bytes.
+  rm -f -- "$reg"
+  c1_recover_before_start "$ROOT"
+}
+t 'N-4: malformed preserved PID lines remain unresolved across recovery' malformed_preserved_pid
+
 group_members() {      # a harness group member that dropped the marker (env -i) is still removed
   local s leader child; s=$(c1_session_new "$ROOT")
   leader=$(c1_spawn "$s" grp bash -c 'env -i sleep 300 & echo $! >"$0/child"; wait' "$s")
