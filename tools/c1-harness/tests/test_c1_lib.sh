@@ -1258,10 +1258,19 @@ ls -l /proc/$pid/fd/ > "$2/child-fds"; c1_harness_listeners "$2" > "$2/got"; ech
   }
   t 'recorded live harness pid without a verifiable marker: inconsistent process state, fail closed' recorded_no_marker
   malformed_record() {
-    local s rc=0; s=$(newsess); export C1_HARNESS_SESSION=$s
+    local s rc=0 cleanup_rc=0 reg; s=$(newsess); export C1_HARNESS_SESSION=$s
     printf 'garbage line here\n' >>"$s/pids"
     c1_harness_listeners "$s" >/dev/null 2>&1 || rc=$?
-    endsess "$s"; (( rc != 0 ))
+    endsess "$s"
+    reg="$ROOT/.${s##*/}.pids"
+    # An invalid PID record must survive cleanup and block bulk recovery.
+    # The fixture must then retire ONLY the invalid bytes it manufactured;
+    # otherwise a later, unrelated bulk-cleanup regression fails spuriously.
+    [[ -s "$reg" ]] && grep -Fxq 'garbage line here' "$reg" || return 1
+    c1_cleanup_all "$ROOT" 2>/dev/null || cleanup_rc=$?
+    (( rc != 0 && cleanup_rc != 0 )) && [[ -s "$reg" ]] || return 1
+    rm -f -- "$reg"
+    c1_cleanup_all "$ROOT" && [[ ! -e "$reg" ]]
   }
   t 'malformed harness pid record: fail closed' malformed_record
   if (( $(id -u) == 0 )) && command -v setpriv >/dev/null; then
