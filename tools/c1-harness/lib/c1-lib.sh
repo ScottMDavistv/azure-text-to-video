@@ -685,6 +685,25 @@ c1_session_status() {
 
 c1_session_dir() { local _p _t s; read -r _p _t s <"$1/active" 2>/dev/null && printf '%s' "$s"; }
 
+# N-1: check ALL retained session evidence before a new run or preflight,
+# even when cleanup removed the active file before verifying the survivors.
+# Never attempt recovery while a verified launcher is still active.
+c1_recover_before_start() {
+  local root=$1 status
+  status=$(c1_session_status "$root") || return 1
+  if [[ "$status" == active ]]; then
+    c1_err 'another C1 session is active; finish it before starting'
+    return 1
+  fi
+  if [[ "$status" == stale ]]; then c1_warn 'recovering from an interrupted C1 session'; fi
+  # Unconditionally scan session directories and orphan PID/inode registers.
+  # c1_cleanup_all fails closed if any evidence cannot be retired safely.
+  c1_cleanup_all "$root" || {
+    c1_err 'unresolved cleanup evidence blocks a new C1 session; inspect and retry cleanup'
+    return 1
+  }
+}
+
 # c1_proc_stat_field PID N -> field N (1-based, counted AFTER "pid (comm)") of /proc/PID/stat
 # Fields: 1=state 3=pgrp 4=session 20=starttime. comm may contain spaces/parens.
 c1_proc_stat_field() { awk -v n="$2" '{sub(/^.*\) /, ""); print $n}' "/proc/$1/stat" 2>/dev/null; }
@@ -804,14 +823,26 @@ c1_verify_cleanup() {
   local preg pid st
   preg="$(dirname -- "$s")/.${s##*/}.pids"
   if [[ -e "$preg" ]]; then
-    local alive=0
-    while read -r pid st _; do
-      [[ "$pid" =~ ^[0-9]+$ && "$st" =~ ^[0-9]+$ ]] || continue
-      if [[ "$(c1_proc_start "$pid")" == "$st" && ! "$(c1_proc_stat_field "$pid" 1)" =~ ^[ZX]$ ]]; then
-        c1_err "recorded harness process $pid ($(c1_safe_comm "$pid")) is still running"; alive=1
-      fi
-    done <"$preg"
-    if (( alive )); then ok=1; else rm -f -- "$preg"; fi
+    local unresolved=0 extra
+    if [[ ! -f "$preg" || ! -r "$preg" ]]; then
+      c1_err 'preserved PID evidence is not a readable regular file'
+      unresolved=1
+    else
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        pid='' st='' extra=''
+        read -r pid st extra <<<"$line" || true
+        if [[ ! "$pid" =~ ^[0-9]+$ || ! "$st" =~ ^[0-9]+$ || -n "$extra" ]]; then
+          c1_err 'malformed preserved PID evidence; record retained'
+          unresolved=1
+          continue
+        fi
+        if [[ "$(c1_proc_start "$pid")" == "$st" && ! "$(c1_proc_stat_field "$pid" 1)" =~ ^[ZX]$ ]]; then
+          c1_err "recorded harness process $pid ($(c1_safe_comm "$pid")) is still running"
+          unresolved=1
+        fi
+      done <"$preg"
+    fi
+    if (( unresolved )); then ok=1; else rm -f -- "$preg" || ok=1; fi
   fi
   reg="$(dirname -- "$s")/.${s##*/}.inodes"
   if [[ -e "$reg" ]]; then
