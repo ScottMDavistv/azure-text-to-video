@@ -103,7 +103,7 @@ class ReReviewChecks(unittest.TestCase):
 
     def test_missing_required_ci_blocks(self):
         t, p, c, ci = sample()
-        ci.pop()
+        ci = [r for r in ci if r["name"] != "Security Checks"]
         self.assertEqual(prepare_review(t, p, c, ci)["state"], "blocked")
 
     def test_failed_ci_blocks(self):
