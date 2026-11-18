@@ -7,6 +7,9 @@ configuration, NEVER by request JSON or the authenticated frontend.
 import hashlib
 import re
 
+from azure.core.exceptions import ResourceNotFoundError
+from project_models import validate_id
+
 from finance_controls import (
     FinanceDenied, approve_increase, provision_limit, request_increase,
 )
@@ -37,7 +40,36 @@ def _admin_lookup(table, token, allowed_admin_digests, *, jwks_client_factory=No
     # This must be sourced from operator-controlled environment, not caller input.
     if digest not in allowed_admin_digests:
         raise FinanceDenied("Verified finance administrator required")
-    return actor, lambda user_id: user_id == actor.user_id
+    def is_active_admin(user_id):
+        # Re-evaluate *both* administrators against the current trusted
+        # allowlist and active OIDC mapping, not the current bearer identity.
+        # An administrator removed from either source can no longer approve.
+        try:
+            validated = validate_id(user_id)
+        except (TypeError, ValueError):
+            return False
+        matches = 0
+        for admin_digest in allowed_admin_digests:
+            try:
+                mapping = table.get_entity(
+                    partition_key="project-oidc-users", row_key=admin_digest,
+                )
+            except ResourceNotFoundError:
+                continue
+            if mapping.get("active") is not True:
+                continue
+            try:
+                mapped_user = validate_id(mapping.get("userId"))
+            except (TypeError, ValueError):
+                continue
+            if mapped_user == validated:
+                matches += 1
+                # Ambiguous identity mappings fail closed.
+                if matches > 1:
+                    return False
+        return matches == 1
+
+    return actor, is_active_admin
 
 
 def request_project_increase_verified(table, *, project_id, request_id,

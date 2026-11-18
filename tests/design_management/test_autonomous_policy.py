@@ -35,7 +35,7 @@ class AutonomousPolicyTests(unittest.TestCase):
     def test_no_auto_merge_without_every_gate(self):
         sha = "a" * 40
         pr = {"state": "open", "draft": False,
-              "user": {"login": "copilot-swe-agent[bot]"},
+              "user": {"login": "copilot-swe-agent[bot]", "type": "Bot"},
               "base": {"ref": "main", "repo": {"full_name": "owner/repo"}},
               "head": {"sha": sha, "repo": {"full_name": "owner/repo"}}}
         good = [file("docs/ui/help.md")]
@@ -52,6 +52,16 @@ class AutonomousPolicyTests(unittest.TestCase):
         self.assertFalse(policy.may_queue_auto_merge(dict(pr, draft=True), good,
             enabled=True, protected_main_verified=True,
             required_checks={"Backend Python Tests", "Security Checks"})[0])
+    def test_human_lookalike_cannot_auto_merge(self):
+        pr = {"state": "open", "draft": False,
+              "user": {"login": "copilot-swe-agent", "type": "User"},
+              "base": {"ref": "main", "repo": {"full_name": "owner/repo"}},
+              "head": {"sha": "a" * 40, "repo": {"full_name": "owner/repo"}}}
+        self.assertFalse(policy.may_queue_auto_merge(
+            pr, [file("docs/ui/help.md")], enabled=True,
+            required_checks={"Backend Python Tests", "Security Checks"},
+            protected_main_verified=True)[0])
+
     def test_retry_limit(self):
         self.assertTrue(policy.bounded_retries(0))
         self.assertTrue(policy.bounded_retries(1))
