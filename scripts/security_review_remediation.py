@@ -31,7 +31,7 @@ def sensitive(paths, *, complete=False, previous_paths=None):
             candidates.append(previous_paths[index])
         for p in candidates:
             if (not isinstance(p, str) or not p or len(p) > 512
-                    or "\\x00" in p or "\\\\" in p or p.startswith("/")
+                    or "\x00" in p or "\\" in p or p.startswith("/")
                     or any(part in ("", ".", "..") for part in p.split("/"))
                     or not (p.startswith("docs/") and p.endswith(".md"))
                     or not all(re.fullmatch(r"[A-Za-z0-9_.-]+", part)
