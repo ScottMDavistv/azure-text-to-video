@@ -246,7 +246,7 @@ reuse_legacy_line() {  # legacy/garbage pids lines must not signal or erase evid
 t 'stale recovery ignores pids lines without a verified start time' reuse_legacy_line
 
 recovery_refuses_unresolved() {  # active was deleted before a failed verify
-  local s v rc=0 reg; s=$(c1_session_new "$ROOT")
+  local s v reg; s=$(c1_session_new "$ROOT")
   setsid sleep 300 </dev/null >/dev/null 2>&1 & v=$!; sleep 0.2
   printf '%s %s\n' "$v" "$(c1_proc_start "$v")" >"$s/pids"
   c1_cleanup_session "$ROOT" "$s"
