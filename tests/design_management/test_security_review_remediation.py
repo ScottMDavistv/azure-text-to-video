@@ -140,7 +140,7 @@ class SecurityRemediationTests(unittest.TestCase):
 
     def test_paths_invalid_and_unknown_fail_closed(self):
         for path in ("backend/main.py", "../x", "/docs/a.md", "", None,
-                     "docs/../a.md", "docs//a.md", "docs/a.md\\\\z", "docs/a.md\\x00"):
+                     "docs/../a.md", "docs//a.md", "docs/a.md" + chr(92) + "z", "docs/a" + chr(0) + ".md"):
             with self.subTest(path=path):
                 self.assertTrue(mod.sensitive([path], complete=True))
         self.assertFalse(mod.sensitive(["docs/readme.md"], complete=True))
