@@ -716,8 +716,8 @@ t 'launcher has no typed-confirmation privacy fallback' bash -c '! grep -q "Type
 
 # L-6 and L-9: test the production monitor setting and the actual fail-closed
 # propagation, not only a test helper's injectable one-second interval.
-t 'L-6: live launcher uses one-second monitoring, not a slow test-only cadence' bash -c \
-  'grep -Fq '\''c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "" 1 "$7" "$8"'\'' "$1" && ! grep -Fq '\''c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "" 15 "$7" "$8"'\'' "$1"' _ "$HERE/../c1-session.sh"
+t 'L-6: live launcher uses bounded 200ms monitoring, not test-only timing' bash -c \
+  'grep -Fq '\''c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "" 0.2 "$7" "$8"'\'' "$1" && ! grep -Fq '\''c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "" 15 "$7" "$8"'\'' "$1"' _ "$HERE/../c1-session.sh"
 
 monitor_teardown_failure_propagates() {
   # No network or actual listener: force a public observation and a teardown
@@ -749,6 +749,54 @@ watchdog_escalates_failed_teardown() {
   [[ ! -e "$d/signalled" ]]
 }
 t 'L-9: watchdog aborts only the exact recorded owner after teardown-failed marker' watchdog_escalates_failed_teardown
+
+# L-6: exercise the real privacy classifier against two slow responses,
+# at the locally scoped monitor timeout, not an unrealistically instant stub.
+monitor_slow_authenticated_probe() {
+  local d="$TMP/slow-monitor"; mkdir -p "$d"
+  printf 'X-Github-Token: fixture\\n' >"$d/header"
+  c1_owned_pid() { return 0; }
+  c1_https_probe() {
+    sleep "$C1_PROBE_MAX_TIME"
+    if [[ -z "${3:-}" ]]; then printf '403\\n'; else printf '000\\n'; fi
+  }
+  c1_teardown_novnc() {
+    sleep 0.5
+    printf '%s\\n' "$5" >"$1/privacy-failed"
+  }
+  local before=$EPOCHREALTIME rc=0 elapsed
+  c1_privacy_monitor_loop "$d" https://example.invalid "$d/header" 98765 1 '' 0.2 6080 0 || rc=$?
+  elapsed=$(awk -v start="$before" -v stop="$EPOCHREALTIME" 'BEGIN { print stop - start }')
+  (( rc == 0 )) && [[ "$(cat "$d/privacy-failed")" == unverified ]] &&
+    awk -v t="$elapsed" 'BEGIN { exit !(t <= 2.5) }'
+}
+t 'L-6: slow authentication probes fail closed and finish teardown within 2.5 s' monitor_slow_authenticated_probe
+
+# The real c1_spawn/c1_start_watchdog/c1_cleanup_session paths, with a test
+# launcher but no Codespace, network, or Entra. A failed monitor teardown marker
+# must stop the launcher and remove the marked session without a manual prompt.
+watchdog_teardown_end_to_end() {
+  local root="$TMP/l9-real" s pid st i
+  s=$(c1_session_new "$root")
+  pid=$(c1_spawn "$s" test-launcher bash -c 'trap "exit 0" TERM; while :; do sleep 0.2; done')
+  st=$(c1_proc_start "$pid"); [[ -n "$st" ]] || return 1
+  printf '%s %s %s\\n' "$pid" "$st" "$s" >"$root/active"
+  c1_start_watchdog "$root" "$s" "$pid" "$HERE/../lib/c1-lib.sh"
+  printf 'now teardown-failed\\n' >"$s/privacy-failed"
+  for (( i=0; i<100; i++ )); do
+    [[ ! -d "$s" && ! -f "$root/active" ]] && break
+    sleep 0.1
+  done
+  [[ ! -d "$s" && ! -f "$root/active" ]] &&
+    [[ "$(c1_proc_stat_field "$pid" 1)" =~ ^[ZX]?$ ]]
+}
+t 'L-9: real watchdog terminates marked launcher and removes session after teardown-failed' watchdog_teardown_end_to_end
+
+t 'L-6: monitor-scoped probe deadline is 0.4s and fast teardown is enabled' bash -c \
+  'grep -Fq "local C1_PROBE_MAX_TIME=0.4 C1_MONITOR_FAST_TEARDOWN=1" "$1" &&
+   grep -Fq "local wait_steps=20" "$1" &&
+   grep -Fq "wait_steps=5" "$1" &&
+   grep -Fq -- "--max-time \\"\$C1_PROBE_MAX_TIME\\"" "$1"' _ "$HERE/../lib/c1-lib.sh"
 
 echo '# pinned PR #60 integration (real repository history)'
 if [[ -n "${TOP:=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)}" ]] && git -C "$TOP" cat-file -e "$C1_PW_SHA_APPROVED^{commit}" 2>/dev/null \
