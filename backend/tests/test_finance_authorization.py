@@ -177,3 +177,32 @@ def test_other_tenant_or_expired_token_denied(signed):
                 table, project_id=project, request_id=uid(), proposed_cents=1000,
                 access_token=invalid, jwks_client_factory=factory)
     table.submit_transaction.assert_not_called()
+
+
+def test_two_distinct_signed_admin_identities_revalidated(signed):
+    from finance_authorization import _admin_lookup
+    token, factory, digest = signed
+    first, second = uid(), uid()
+    table = MagicMock()
+    mapping = {
+        digest("first"): {"active": True, "userId": first},
+        digest("second"): {"active": True, "userId": second},
+    }
+    def get_entity(*, partition_key, row_key):
+        assert partition_key == "project-oidc-users"
+        if row_key not in mapping:
+            raise ResourceNotFoundError("missing")
+        return mapping[row_key]
+    table.get_entity.side_effect = get_entity
+    allowed = frozenset(mapping)
+    actor, lookup = _admin_lookup(
+        table, token("second"), allowed, jwks_client_factory=factory)
+    assert actor.user_id == second
+    assert lookup(first) is True
+    assert lookup(second) is True
+    mapping[digest("first")]["active"] = False
+    assert lookup(first) is False
+    mapping[digest("first")]["active"] = True
+    mapping.pop(digest("first"))
+    assert lookup(first) is False
+    assert lookup(uid()) is False

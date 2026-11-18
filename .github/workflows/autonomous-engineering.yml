@@ -24,8 +24,14 @@ jobs:
   controller:
     if: >-
       github.ref == 'refs/heads/main' &&
-      vars.AUTONOMOUS_ENGINEERING_ENABLED == 'true'
+      vars.AUTONOMOUS_ENGINEERING_ENABLED == 'true' &&
+      vars.CONTROLLER_ENV_ISOLATION_VERIFIED == 'true'
     runs-on: ubuntu-latest
+    # Environment must be configured by owner with Selected branches: main only.
+    # A missing/incorrect environment fails closed until isolation is verified.
+    environment:
+      name: design-management-control
+      deployment: false
     timeout-minutes: 12
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -37,8 +43,8 @@ jobs:
       AUTO_MERGE_ENABLED: ${{ vars.AUTO_MERGE_ENABLED }}
       PROTECTED_MAIN_VERIFIED: ${{ vars.PROTECTED_MAIN_VERIFIED }}
       DECISION_INBOX_ENABLED: ${{ vars.DECISION_INBOX_ENABLED }}
-      COPILOT_DISPATCH_TOKEN: ${{ secrets.COPILOT_DISPATCH_TOKEN }}
-      GH_TOKEN: ${{ secrets.AUTO_MERGE_USER_TOKEN }}
+      COPILOT_DISPATCH_TOKEN: ${{ secrets.DM_COPILOT_DISPATCH_TOKEN }}
+      GH_TOKEN: ${{ secrets.DM_AUTO_MERGE_USER_TOKEN }}
     steps:
       - name: Use trusted default-branch source only
         uses: actions/checkout@v4

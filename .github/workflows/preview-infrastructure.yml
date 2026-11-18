@@ -10,6 +10,8 @@ permissions:
 jobs:
   preview:
     name: Azure Bicep What-If
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    environment: dev-deployment
     runs-on: ubuntu-latest
 
     steps:

@@ -13,6 +13,7 @@ from api_access import (
 )
 from job_admin_auth import (
     admin_endpoints_enabled,
+    job_admin_token_configured,
 )
 from video_routes import downloads_enabled
 
@@ -29,6 +30,9 @@ def get_runtime_security_status():
         ),
         "admin_endpoints_enabled": (
             admin_endpoints_enabled()
+        ),
+        "admin_token_configured": (
+            job_admin_token_configured()
         ),
         "video_downloads_enabled": downloads_enabled(),
         "user_ownership_authorization_implemented": False,
