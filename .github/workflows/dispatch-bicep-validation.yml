@@ -26,7 +26,11 @@ jobs:
 
       - name: Install Bicep CLI
         run: |
-          curl -fL --retry 3 -o bicep https://github.com/Azure/bicep/releases/latest/download/bicep-linux-x64
+          set -euo pipefail
+          # Version and SHA-256 are pinned to the published Azure/bicep v0.48.1 asset.
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            --output bicep https://github.com/Azure/bicep/releases/download/v0.48.1/bicep-linux-x64
+          echo 'b09ec25a9d376c1f8e33ede6ed22b587f915ad68488d5db77a6f9541748c7f6e  bicep' | sha256sum --check --status
           chmod +x ./bicep
           sudo mv ./bicep /usr/local/bin/bicep
           bicep --version
