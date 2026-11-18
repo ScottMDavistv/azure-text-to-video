@@ -136,6 +136,9 @@ def main_only(expr):
     if not match or not src[match.end():].strip():
         return False
     tail = src[match.end():]
+    # Function calls are not recognized gate primitives (e.g. always()).
+    if re.search(r"\b[A-Za-z_]\w*\s*\(", tail):
+        return False
     depth, quote, escaped = 0, None, False
     for i, char in enumerate(tail):
         if quote:
