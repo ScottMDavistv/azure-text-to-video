@@ -714,6 +714,42 @@ t 'supervised mode refuses to run outside a Codespace (no unverifiable privacy)'
 t 'launcher never runs a verification as `cmd && check` (errexit-exempt, fail-open) (N-1)' bash -c '! grep -nE "^[^#]*&& check [a-z_]+" "$1"' _ "$HERE/../c1-session.sh"
 t 'launcher has no typed-confirmation privacy fallback' bash -c '! grep -q "Type PRIVATE" "$1" "$2"' _ "$HERE/../c1-session.sh" "$HERE/../lib/c1-lib.sh"
 
+# L-6 and L-9: test the production monitor setting and the actual fail-closed
+# propagation, not only a test helper's injectable one-second interval.
+t 'L-6: live launcher uses one-second monitoring, not a slow test-only cadence' bash -c \
+  'grep -Fq '\''c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "" 1 "$7" "$8"'\'' "$1" && ! grep -Fq '\''c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "" 15 "$7" "$8"'\'' "$1"' _ "$HERE/../c1-session.sh"
+
+monitor_teardown_failure_propagates() {
+  # No network or actual listener: force a public observation and a teardown
+  # that cannot verify port closure. The monitor MUST return a failure (rc 2).
+  c1_owned_pid() { return 0; }
+  c1_privacy_check() { C1_PRIVACY_STATE=public; return 1; }
+  c1_teardown_novnc() { return 1; }
+  sleep() { :; }
+  local rc=0
+  c1_privacy_monitor_loop "$TMP" example.invalid /nonexistent 999 1 '' 1 6080 0 || rc=$?
+  (( rc == 2 ))
+}
+t 'L-9: monitor propagates unverified teardown as rc 2, never success' monitor_teardown_failure_propagates
+
+watchdog_escalates_failed_teardown() {
+  local d="$TMP/watchdog-l9"; mkdir -p "$d/session" "$d/state"
+  printf 'now teardown-failed\\n' >"$d/session/privacy-failed"
+  printf '4242 5678 %s\\n' "$d/session" >"$d/state/active"
+  c1_proc_start() { printf '5678\\n'; }
+  c1_proc_stat_field() { printf 'S\\n'; }
+  c1_cleanup_session() { :; }
+  kill() { [[ "$1" == -TERM && "$2" == 4242 ]] && printf 'owner signalled\\n' >"$d/signalled"; }
+  c1_watchdog_loop "$d/state" "$d/session" 4242 5678
+  [[ "$(cat "$d/signalled")" == 'owner signalled' ]]
+  # Never signal a stale or mismatched active record.
+  rm "$d/signalled"
+  printf '4242 9999 %s\\n' "$d/session" >"$d/state/active"
+  c1_watchdog_loop "$d/state" "$d/session" 4242 5678
+  [[ ! -e "$d/signalled" ]]
+}
+t 'L-9: watchdog aborts only the exact recorded owner after teardown-failed marker' watchdog_escalates_failed_teardown
+
 echo '# pinned PR #60 integration (real repository history)'
 if [[ -n "${TOP:=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)}" ]] && git -C "$TOP" cat-file -e "$C1_PW_SHA_APPROVED^{commit}" 2>/dev/null \
    && git -C "$TOP" cat-file -e "$C1_AUTH_SHA_APPROVED^{commit}" 2>/dev/null; then
