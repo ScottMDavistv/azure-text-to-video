@@ -75,11 +75,11 @@ Environment: Anthropic cloud sandbox, Ubuntu 24.04.5, Node 22.23.4, x11vnc 0.9.1
 |---|---|
 | Baseline `cd33512` (before integration) | Node 30/30; shell **72 passed / 1 failed** (stale pin test) |
 | Shell suite `tests/test_c1_lib.sh` | **PASS, 115 / 0 / 0** |
-| Node `tests/c1-evidence.test.mjs` | **PASS, 43/43** |
-| Deliberate-break mutants (session tooling, scratch worktree) | **MUTSUM** |
+| Node `tests/c1-evidence.test.mjs` | **PASS, 44/44** |
+| Deliberate-break mutants (session tooling, scratch git worktree; covering every new protection, R13, the allowlist and pins, egress marking, and re-checks of H-2/M-3/L-1/N-1) | **38/38 detected**. The full run caught 36. The 2 survivors (N-2: a SKIPPED or unknown expected test next to an INCOMPLETE one was reported INCOMPLETE) exposed a missing test, which was added; both are now detected. |
 | ShellCheck `-S warning`; `scripts/security_invariants.py` | PASS; PASS |
 | Pinned `e187311` Vite 8.3.8 (`npm ci`), `--host 127.0.0.1`, stub backend on :8000 | Listener `127.0.0.1:5173` only. Loopback Host → 200, and `/projects/x` reaches the backend. Forwarded `Host: <name>-5173.app.github.dev` (± `:443`) → **403** for `/`, `/projects/x` (the backend is **not** reached), `/src/App.tsx` and `/@vite/client`; HMR WebSocket upgrade → 400 |
-| Exact-head GitHub CI | See the PR #74 comment for this head |
+| Exact-head GitHub CI | Security Checks, Backend Python Tests, Frontend Quality Gates (results in the PR #74 comment for this head). *Frontend Quality Gates* runs the **pinned PR #60 suite** (the frontend tree at this head equals `e187311`) on Chromium **159.0.8154.6**: lockfile integrity, 7/7 source mutations, 14 offline tests, 7/7 browser mutations. That is CI evidence for the suite. It is **not** harness-executed R2B/R3 evidence and does not exercise the harness. |
 | Offline Playwright via the harness | **UNVERIFIED**: ENVIRONMENT BLOCKED (no Chromium 159; CDN blocked) |
 | Browser-level mutations (R2B) via the harness | **UNVERIFIED**: ENVIRONMENT BLOCKED (same) |
 | End-to-end launcher in a simulated Codespace; launcher-level SIGINT/SIGTERM/SIGHUP/SIGKILL | **UNVERIFIED**: NOT RUN (the launcher cannot pass dependency install without Chromium; a substitute binary was refused). Covered by library-level and static tests only. |
