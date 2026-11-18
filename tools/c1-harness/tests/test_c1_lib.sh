@@ -816,15 +816,20 @@ if [[ -n "${TOP:=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)
   t 'the pinned PR #60 Vite/Playwright configuration passes the 5173 host-guard check (L-11)' pinned_vite_guard
 else skip 'pinned PR #60 integration (pinned commits not in local history)'; fi
 
-echo '# harness diff scope'
+echo '# harness diff scope after trusted-main workflow reconciliation'
 TOP=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)
-if [[ -n "$TOP" ]] && git -C "$TOP" cat-file -e "$C1_PW_SHA_APPROVED^{commit}" 2>/dev/null \
-   && git -C "$TOP" merge-base --is-ancestor "$C1_PW_SHA_APPROVED" HEAD 2>/dev/null; then
-  t 'harness branch changes only tools/c1-harness/** relative to approved Playwright SHA' \
-    bash -c '! git -C "$1" diff --name-only "$2" HEAD | grep -v "^tools/c1-harness/"' _ "$TOP" "$C1_PW_SHA_APPROVED"
-  t 'approved suite files are byte-identical at HEAD' \
-    git -C "$TOP" diff --quiet "$C1_PW_SHA_APPROVED" HEAD -- frontend backend scripts tests .github
-else skip 'diff scope (approved Playwright SHA not in local history)'; fi
+# This is the separate PR #60 trusted-main *integration* baseline. It is NOT
+# the pinned C1 test-suite head and must never widen C1_AUTH_TO_PW_FILES.
+C1_PR60_WORKFLOW_BASE='c0cc7254e4154fd15fedf33704ac8510bcec88a6'
+if [[ -n "$TOP" ]] && git -C "$TOP" cat-file -e "$C1_PR60_WORKFLOW_BASE^{commit}" 2>/dev/null \
+   && git -C "$TOP" merge-base --is-ancestor "$C1_PR60_WORKFLOW_BASE" HEAD 2>/dev/null; then
+  t 'harness branch changes only tools/c1-harness/** relative to trusted PR60 workflow base' \
+    bash -c '! git -C "$1" diff --name-only "$2" HEAD | grep -v "^tools/c1-harness/"' _ "$TOP" "$C1_PR60_WORKFLOW_BASE"
+  t 'approved frontend suite is byte-identical to pinned e187311 suite at HEAD' \
+    git -C "$TOP" diff --quiet "$C1_PW_SHA_APPROVED" HEAD -- frontend
+  t 'trusted PR60 workflow and backend files are unmodified by PR74 harness' \
+    git -C "$TOP" diff --quiet "$C1_PR60_WORKFLOW_BASE" HEAD -- backend scripts tests .github
+else skip 'diff scope (trusted workflow base not in local history)'; fi
 
 echo
 echo "c1 harness shell tests: $PASSED passed, $FAILED failed, $SKIPPED skipped"
