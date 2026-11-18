@@ -85,3 +85,13 @@ def test_disabled_mode_creates_no_scheduled_job_and_limits_cron_default():
     assert "param cronExpression string = '0 * * * *'" in JOB
     assert "activateReconciliation bool = false" in JOB
     assert "activateAlerts bool = false" in ALERT
+
+def test_bicep_cli_supply_chain_is_version_and_digest_pinned():
+    workflow = (ROOT / ".github/workflows/dispatch-bicep-validation.yml").read_text()
+    assert "releases/latest/" not in workflow
+    assert "releases/download/v0.48.1/bicep-linux-x64" in workflow
+    assert "b09ec25a9d376c1f8e33ede6ed22b587f915ad68488d5db77a6f9541748c7f6e" in workflow
+    assert "sha256sum --check --status" in workflow
+    assert workflow.index("sha256sum --check --status") < workflow.index("chmod +x ./bicep")
+    assert "persist-credentials: false" in workflow
+
