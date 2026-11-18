@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-quality-gates.yml'
   workflow_dispatch:
 
 permissions:
@@ -17,7 +20,7 @@ jobs:
   frontend-quality:
     name: Frontend tests, lint and build (Node 22)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
