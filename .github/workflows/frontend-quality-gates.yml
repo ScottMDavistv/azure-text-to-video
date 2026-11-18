@@ -2,9 +2,6 @@ name: Frontend Quality Gates
 
 on:
   pull_request:
-    paths:
-      - 'frontend/**'
-      - '.github/workflows/frontend-quality-gates.yml'
   push:
     branches: [main]
     paths:
@@ -58,6 +55,14 @@ jobs:
       - name: Typecheck and build frontend
         working-directory: frontend
         run: npm run build
+      - name: Headless Chromium account and project session-race regressions
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          CHROME_BIN="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          test -x "$CHROME_BIN"
+          CHROME_BIN="$CHROME_BIN" node e2e/run-browser-race.mjs
+
       - name: Confirm non-deploying security boundary
         run: |
           echo 'Local frontend quality checks only.'

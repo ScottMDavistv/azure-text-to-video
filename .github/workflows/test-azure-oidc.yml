@@ -10,6 +10,7 @@ permissions:
 jobs:
   test-authentication:
     name: Verify Azure Login
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: dev-deployment
 

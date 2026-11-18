@@ -12,7 +12,6 @@ permissions:
   actions: read
   pull-requests: read
   issues: write
-  id-token: write
 
 concurrency:
   group: design-management-audit
@@ -24,25 +23,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5 pinned
         with:
           python-version: '3.12'
       - name: Offline agent regression tests
         run: python -m unittest discover -s tests/design_management -p 'test_*.py' -v
-      - name: Authenticate to Azure only when read-only monitoring is enabled
-        if: vars.AZURE_AUDIT_ENABLED == 'true'
-        uses: azure/login@v2
-        with:
-          client-id: ${{ vars.AZURE_AUDIT_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_AUDIT_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_AUDIT_SUBSCRIPTION_ID }}
-      - name: Inventory Azure resources with a Reader identity
-        if: vars.AZURE_AUDIT_ENABLED == 'true'
-        env:
-          AZURE_AUDIT_RESOURCE_GROUP: ${{ vars.AZURE_AUDIT_RESOURCE_GROUP }}
-          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_AUDIT_SUBSCRIPTION_ID }}
-        run: python scripts/azure_readonly_inventory.py
+      # Azure OIDC inventory has moved to azure-readonly-operations.yml,
+      # with a protected environment and immutable repository OIDC subject.
+      # This governance publishing job must never request OIDC credentials.
       - name: Collect evidence and update issue 16
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -59,7 +48,7 @@ jobs:
         run: python scripts/design_agent_coordination.py
       - name: Upload audit snapshot
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: design-management-snapshot
           path: |

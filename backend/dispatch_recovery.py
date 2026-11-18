@@ -94,6 +94,15 @@ def dispatch_queued_job(job_id, *, table=None, send=None, now=None):
     send = send if send is not None else enqueue_job
 
     entity = table.get_entity(partition_key="video", row_key=job_id)
+    # The legacy recovery sweeper must never redispatch a synthetic job into
+    # the legacy queue, even after an uncertain first send/lease expiry.
+    queue_type = entity.get("dispatchQueueType", "legacy")
+    if queue_type not in {"legacy", "synthetic"}:
+        raise DispatchConflict("Unknown queue classification")
+    if queue_type == "synthetic":
+        from job_queue import enqueue_synthetic_job
+        if send is not enqueue_synthetic_job:
+            raise DispatchConflict("Synthetic job requires dedicated queue recovery")
     if not _eligible(entity, now):
         return {"job_id": job_id, "status": "already_dispatched",
                 "dispatched": False}
