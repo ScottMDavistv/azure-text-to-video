@@ -117,6 +117,17 @@ class IsolationTests(unittest.TestCase):
             obj["jobs"]["checks"]["if"] = expr
             self.assertTrue(self.evaluate(obj), expr)
 
+    def test_complex_main_guard_cannot_be_bypassed_by_or(self):
+        good = ("github.ref == 'refs/heads/main' && "
+                "github.event_name == 'workflow_dispatch' && "
+                "(inputs.operation == 'whatif' || inputs.operation == 'deploy')")
+        self.assertTrue(checker.main_only(good))
+        self.assertFalse(checker.main_only(good + " || true"))
+        self.assertFalse(checker.main_only("true || " + good))
+        self.assertFalse(checker.main_only("github.ref != 'refs/heads/main' && " + good))
+        self.assertFalse(checker.main_only("github.ref == 'refs/heads/main' && (true || false) || true"))
+        self.assertFalse(checker.main_only("github.ref == 'refs/heads/main' && (true || false"))
+
     def test_untrusted_feature_push_rejects_write_secrets_and_checkout_credentials(self):
         obj = copy.deepcopy(BASE)
         obj["on"] = {"push": {"branches": ["feature/**"]}}

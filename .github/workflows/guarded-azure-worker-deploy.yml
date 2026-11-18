@@ -68,6 +68,7 @@ jobs:
           MAIN_PROTECTED: ${{ vars.PROTECTED_MAIN_VERIFIED }}
   preview:
     needs: validate
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: dev-deployment
@@ -95,7 +96,7 @@ jobs:
             --query '{name:name,trigger:properties.configuration.triggerType,profile:properties.workloadProfileName}' -o json
   whatif:
     needs: preview
-    if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'whatif' || inputs.operation == 'deploy') && github.actor == 'ScottMDavistv' && vars.PROTECTED_MAIN_VERIFIED == 'true'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && (inputs.operation == 'whatif' || inputs.operation == 'deploy') && github.actor == 'ScottMDavistv' && vars.PROTECTED_MAIN_VERIFIED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: dev-deployment-apply
@@ -122,7 +123,7 @@ jobs:
           WORKER_IMAGE: acrtextvideo1794671698.azurecr.io/textvideo-worker@sha256:219ebbe03d9b1356a4091912b4955c1987ba8a0131a4e084953ab3796b5f0646
   deploy:
     needs: whatif
-    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy' && github.actor == 'ScottMDavistv' && inputs.approved_sha == github.sha && inputs.confirmation == 'DEPLOY-DEV-WORKER' && vars.AZURE_DEV_DEPLOY_ENABLED == 'true' && vars.PROTECTED_MAIN_VERIFIED == 'true'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy' && github.actor == 'ScottMDavistv' && inputs.approved_sha == github.sha && inputs.confirmation == 'DEPLOY-DEV-WORKER' && vars.AZURE_DEV_DEPLOY_ENABLED == 'true' && vars.PROTECTED_MAIN_VERIFIED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     environment: dev-deployment-apply

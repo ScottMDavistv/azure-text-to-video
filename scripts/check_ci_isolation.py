@@ -123,7 +123,40 @@ def condition_terms(expr):
 
 def main_only(expr):
     parts = condition_terms(expr)
-    return bool(parts and any(REF.fullmatch(p) for p in parts))
+    if parts:
+        return any(REF.fullmatch(p) for p in parts)
+    # Accept complex conditions only behind an independent, mandatory
+    # first AND term asserting the exact main branch.
+    if not isinstance(expr, str):
+        return False
+    src = expr.strip()
+    if src.startswith("${{") and src.endswith("}}"):
+        src = src[3:-2].strip()
+    match = re.match(r"""^github\.ref\s*==\s*(['"])refs/heads/main\1\s*&&\s*""", src)
+    if not match or not src[match.end():].strip():
+        return False
+    tail = src[match.end():]
+    depth, quote, escaped = 0, None, False
+    for i, char in enumerate(tail):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+        elif depth == 0 and tail[i:i + 2] == "||":
+            return False
+    return depth == 0 and quote is None
+
 
 def excludes_pr(expr):
     parts = condition_terms(expr)
