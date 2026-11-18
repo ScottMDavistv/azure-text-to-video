@@ -888,7 +888,7 @@ fixture_net() { mkdir -p "$1"; cp /proc/net/tcp "$1/tcp"; [[ ! -e /proc/net/tcp6
 # move_to_v6 DIR INODE PORT HEXADDR32: the real socket INODE now appears ONLY as an IPv6 listener.
 move_to_v6() {
   local d=$1 ino=$2 port=$3 addr=$4
-  awk -v ino="$ino" 'NR == 1 || $10 != ino' "$d/tcp" >"$d/tcp.new" && mv "$d/tcp.new" "$d/tcp"
+  awk -v ino="$ino" 'NR == 1 || $10 != ino' "$d/tcp" >"$d/tcp.new" && /usr/bin/mv -f -- "$d/tcp.new" "$d/tcp"
   [[ -e "$d/tcp6" ]] || printf '%s\n' "$TCP6_HDR" >"$d/tcp6"
   v6row 90 "$addr" "$(hex4 "$port")" "$ino" >>"$d/tcp6"
 }
