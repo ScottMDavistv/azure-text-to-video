@@ -250,9 +250,9 @@ start_private_desktop() {
   fi
   if (( REQ_GH )); then PORT_PRIVATE=verified-probe-gh; else PORT_PRIVATE=verified-probe-user-repo; fi
   # shellcheck disable=SC2016
-  # L-6: production cadence must match the one-second public-flip regression.
+  # L-6: 0.2 s poll plus bounded 0.4 s probes and fast teardown target <=2.5 s.
   # The monitor checks noVNC privacy before each supervised phase as well.
-  c1_spawn "$S" privacy-monitor bash -c 'source "$1"; c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "" 1 "$7" "$8"' \
+  c1_spawn "$S" privacy-monitor bash -c 'source "$1"; c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "" 0.2 "$7" "$8"' \
     _ "$LIB" "$S" "$BASE" "$HDR" "$WS" "$WSST" "$C1_NOVNC_PORT" "$REQ_GH" >/dev/null || { fail_desktop monitor-start; return 1; }
 }
 
