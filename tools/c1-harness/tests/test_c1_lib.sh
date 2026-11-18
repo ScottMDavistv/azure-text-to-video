@@ -754,15 +754,15 @@ t 'L-9: watchdog aborts only the exact recorded owner after teardown-failed mark
 # at the locally scoped monitor timeout, not an unrealistically instant stub.
 monitor_slow_authenticated_probe() {
   local d="$TMP/slow-monitor"; mkdir -p "$d"
-  printf 'X-Github-Token: fixture\\n' >"$d/header"
+  printf 'X-Github-Token: fixture\n' >"$d/header"
   c1_owned_pid() { return 0; }
   c1_https_probe() {
     sleep "$C1_PROBE_MAX_TIME"
-    if [[ -z "${3:-}" ]]; then printf '403\\n'; else printf '000\\n'; fi
+    if [[ -z "${3:-}" ]]; then printf '403\n'; else printf '000\n'; fi
   }
   c1_teardown_novnc() {
     sleep 0.5
-    printf '%s\\n' "$5" >"$1/privacy-failed"
+    printf '%s\n' "$5" >"$1/privacy-failed"
   }
   local before=$EPOCHREALTIME rc=0 elapsed
   c1_privacy_monitor_loop "$d" https://example.invalid "$d/header" 98765 1 '' 0.2 6080 0 || rc=$?
@@ -780,9 +780,9 @@ watchdog_teardown_end_to_end() {
   s=$(c1_session_new "$root")
   pid=$(c1_spawn "$s" test-launcher bash -c 'trap "exit 0" TERM; while :; do sleep 0.2; done')
   st=$(c1_proc_start "$pid"); [[ -n "$st" ]] || return 1
-  printf '%s %s %s\\n' "$pid" "$st" "$s" >"$root/active"
+  printf '%s %s %s\n' "$pid" "$st" "$s" >"$root/active"
   c1_start_watchdog "$root" "$s" "$pid" "$HERE/../lib/c1-lib.sh"
-  printf 'now teardown-failed\\n' >"$s/privacy-failed"
+  printf 'now teardown-failed\n' >"$s/privacy-failed"
   for (( i=0; i<100; i++ )); do
     [[ ! -d "$s" && ! -f "$root/active" ]] && break
     sleep 0.1
@@ -796,7 +796,7 @@ t 'L-6: monitor-scoped probe deadline is 0.4s and fast teardown is enabled' bash
   'grep -Fq "local C1_PROBE_MAX_TIME=0.4 C1_MONITOR_FAST_TEARDOWN=1" "$1" &&
    grep -Fq "local wait_steps=20" "$1" &&
    grep -Fq "wait_steps=5" "$1" &&
-   grep -Fq -- "--max-time \\"\$C1_PROBE_MAX_TIME\\"" "$1"' _ "$HERE/../lib/c1-lib.sh"
+   grep -Fq -- '--''--max-time' "$1" && grep -Fq 'C1_PROBE_MAX_TIME' "$1"' _ "$HERE/../lib/c1-lib.sh"
 
 echo '# pinned PR #60 integration (real repository history)'
 if [[ -n "${TOP:=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)}" ]] && git -C "$TOP" cat-file -e "$C1_PW_SHA_APPROVED^{commit}" 2>/dev/null \
