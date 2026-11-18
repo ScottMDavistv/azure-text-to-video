@@ -13,7 +13,7 @@ Connect ChatGPT's owner-supervised GitHub interactions to Claude Code cloud sess
 - No cost-incurring API or GitHub-hosted workflow execution authorized. No secrets or tokens copied into comments, logs or artifacts.
 
 ## Proposed record contract (version 1)
-Canonical JSON (UTF-8) is the payload; compute SHA-256 over deterministic serialization (sorted keys, compact separators, Unicode preserved). Required keys:
+Canonical JSON (UTF-8) is the payload; compute SHA-256 over deterministic serialization (sorted keys, compact separators, Unicode preserved, no NaN). **Exclude the entire mutable top-level `approval` and `execution` fields before serialization and hashing**; do not exclude any other keys. The hash binds the immutable request, not mutable state. Required keys:
 
 ```json
 {
@@ -124,3 +124,12 @@ The PR #63 test case was manually recorded at GitHub Issue #64, not by an active
 One inbox groups `branch_correction`, `remediation`, `claude_review`, and `security_merge` decisions. Each item is deduplicated by repository, kind, PR, exact head and linked issue, is `pending_owner_approval`, and has `dispatch_enabled=false` until authenticated owner attestation. Security remediation takes priority over ordinary work; at most two live agents. A newly changed SHA invalidates old review/merge approvals. An approving action must be one-time, scoped to the full frozen request digest, signed/authenticated with actor ID, expiry and nonce; no textual GitHub comment can grant it. Merge decisions remain distinct from dispatch approvals and require protected-main checks and independent reviewer gates.
 
 The offline queue implementation does not persist or continuously poll anything. Before activation, provision a trusted store, concurrency-safe idempotency, immutable audit trail and read-only source ingestion, then independently review authentication and billing. No automatic Claude dispatch, paid Actions, or Azure deployment is approved.
+
+
+## PR #58 post-review remediation — offline only (2026-11-17)
+
+The offline review-preparation policy now requires binding integration evidence to the exact assigned coding PR ID, coding head SHA and target PR ID/head, as verified by trusted Git ancestry. A target not based on protected `main` is blocked. The corrective-task dedupe identity contains *both* coding and target PR numbers, preventing collisions across assignments. The strict ancestry verifier has direct function and subprocess CLI fail-closed tests.
+
+The applicability of CI checks must be supplied by a protected, trusted task ledger based on actual workflow path filters and repository protections. The planner rejects absent, empty, duplicate, unknown, or untrusted applicability declarations; it checks all declared applicable workflows at the target exact head. Individual runs must carry independently attested GitHub workflow-file provenance (trusted workflow, path, protected-main revision and exact head). **A triggering actor is not workflow provenance.** Approved `workflow_dispatch` evidence may count only with separate trusted manual-run attestation; this does not authorize a dispatch. Do not use a caller-supplied snapshot or PR description as trusted evidence.
+
+These checks remain an offline proposal, **not an activated GitHub required check or active collector**. The future adapter must independently authenticate GitHub metadata, policy applicability, approval provenance, workflow revision, race-safe current heads and branch creation. Independent security review and exact-head CI are still required before any development-only merge. Existing manual workflow approvals, protected-main rules, no paid FAL/overage, and no automatic agents remain unchanged.
