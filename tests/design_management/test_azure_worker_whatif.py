@@ -285,11 +285,11 @@ class WorkerWhatIfTests(unittest.TestCase):
 
     def test_conflicting_multiline_cli_codes_fail_closed(self):
         samples = (
-            "ERROR: (AuthorizationFailed) first\\nERROR: (InvalidTemplate) second",
-            "ERROR: (InvalidTemplate) first\\n(AuthorizationFailed) second",
-            "(AuthorizationFailed) first\\n(AuthorizationFailed) duplicate",
-            "ERROR: (AuthorizationFailed) first\\n  ERROR: (LinkedAuthorizationFailed) second",
-            "ERROR: (AuthorizationFailed) first\\n(UnknownFutureCode) second",
+            "ERROR: (AuthorizationFailed) first\nERROR: (InvalidTemplate) second",
+            "ERROR: (InvalidTemplate) first\n(AuthorizationFailed) second",
+            "(AuthorizationFailed) first\n(AuthorizationFailed) duplicate",
+            "ERROR: (AuthorizationFailed) first\n  ERROR: (LinkedAuthorizationFailed) second",
+            "ERROR: (AuthorizationFailed) first\n(UnknownFutureCode) second",
         )
         for stderr in samples:
             with self.subTest(stderr=stderr):
