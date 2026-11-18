@@ -662,15 +662,19 @@ c1_verify_private_novnc() {
 # "teardown-failed") if the port is still open: callers must fail closed.
 c1_teardown_novnc() {
   local s=$1 port=$2 ws=$3 wsst=$4 reason=${5:-unverified}
+  # A monitor supplies a tighter local bound; other callers retain the 2 s
+  # TERM / KILL grace periods. Never accept arbitrary external step counts.
+  local wait_steps=20
+  [[ "${C1_MONITOR_FAST_TEARDOWN:-}" == 1 ]] && wait_steps=5
   [[ "$reason" =~ ^[a-z0-9_-]{1,40}$ ]] || reason=unverified
   printf '%s %s\n' "$(c1_utc)" "$reason" >>"$s/privacy-failed"
   c1_signal_owned TERM "$ws" "$s" "$wsst"
-  for _ in $(seq 1 20); do
+  for (( _=0; _<wait_steps; _++ )); do
     if c1_port_free "$port" && ! c1_owned_pid "$ws" "$s" "$wsst"; then break; fi
     sleep 0.1
   done
   c1_signal_owned KILL "$ws" "$s" "$wsst"
-  for _ in $(seq 1 20); do c1_port_free "$port" && break; sleep 0.1; done
+  for (( _=0; _<wait_steps; _++ )); do c1_port_free "$port" && break; sleep 0.1; done
   if ! c1_port_free "$port"; then
     printf '%s teardown-failed\n' "$(c1_utc)" >>"$s/privacy-failed"
     c1_err "port $port is still listening after the privacy teardown"
@@ -713,7 +717,11 @@ c1_privacy_gate() {
 # than "private" (e.g. org/public), or after 3 consecutive unverifiable checks
 # (an ambiguous probe or an unavailable gh read-back counts as unverifiable).
 c1_privacy_monitor_loop() {
-  local s=$1 base=$2 hdr=$3 ws=$4 wsst=$5 ca=${6:-} iv=${7:-15} port=${8:-$C1_NOVNC_PORT} req_gh=${9:-0}
+  local s=$1 base=$2 hdr=$3 ws=$4 wsst=$5 ca=${6:-} iv=${7:-0.2} port=${8:-$C1_NOVNC_PORT} req_gh=${9:-0}
+  # L-6: these are local to this monitor's shell/function calls; bootstrap
+  # privacy checks still use their full timeouts. One sweep is bounded to
+  # two HTTPS probes at <=0.4 s each; teardown gets <=1 s of grace.
+  local C1_PROBE_MAX_TIME=0.4 C1_MONITOR_FAST_TEARDOWN=1
   local misses=0 reason g
   trap 'exit 0' TERM
   while c1_owned_pid "$ws" "$s" "$wsst"; do
@@ -723,11 +731,13 @@ c1_privacy_monitor_loop() {
       if (( ! req_gh )); then misses=0; continue; fi
       g=0; c1_gh_private "$port" || g=$?
       if (( g == 0 )); then misses=0; continue; fi
-      if (( g == 1 )); then misses=99; reason="gh-visibility-$C1_GH_VIS"; else misses=$((misses + 1)); reason=gh-unavailable; fi
-    elif [[ $C1_PRIVACY_STATE == public ]]; then misses=99; reason=public
-    else misses=$((misses + 1)); reason=unverified
+      if (( g == 1 )); then reason="gh-visibility-$C1_GH_VIS"; else reason=gh-unavailable; fi
+    elif [[ $C1_PRIVACY_STATE == public ]]; then reason=public
+    else reason=unverified
     fi
-    if (( misses >= 3 )); then
+    # A stalled/ambiguous edge is not a positive privacy proof. Fail closed
+    # on its first observation: three retry cycles cannot meet L-6's bound.
+    if [[ -n "$reason" ]]; then
       # L-9: an unverifiable teardown must propagate failure to the watchdog.
       c1_teardown_novnc "$s" "$port" "$ws" "$wsst" "$reason" || return 2
       return 0
