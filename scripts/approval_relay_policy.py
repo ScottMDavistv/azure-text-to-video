@@ -55,6 +55,55 @@ def check_coding_pr(task, target, coding):
     return {"action": "block", "reason": "unexpected base branch"}
 
 
+def verify_exact_head_ci(policy_source, applicable, ci, head_sha):
+    """Return None when trusted exact-head CI evidence is complete, else a reason.
+
+    Shared by review preparation and the unified queue certifier so both apply
+    identical applicability, provenance, event and exact-head rules.
+    """
+    if not _sha(head_sha):
+        return "invalid target identity/head"
+    # Applicability must be attested by a protected, trusted adapter. The
+    # request's author cannot select a smaller required-check set.
+    required = applicable
+    if (policy_source != "trusted-protected-task-ledger" or
+            not isinstance(required, list) or not required or
+            not all(isinstance(name, str) for name in required) or
+            len(required) != len(set(required)) or
+            not set(required).issubset(REQUIRED)):
+        return "required CI applicability unverified"
+    if not isinstance(ci, list) or not ci:
+        return "no CI evidence"
+    observed = set()
+    for run in ci:
+        if not isinstance(run, dict):
+            return "malformed CI evidence"
+        # Actor is NOT provenance: a legitimate run may be triggered by a user.
+        # A trusted adapter must verify workflow file/path/ref from GitHub APIs.
+        if (run.get("head_sha") != head_sha or
+                run.get("status") != "completed" or run.get("conclusion") != "success" or
+                run.get("trusted_workflow") is not True or
+                run.get("provenance") != "verified-github-workflow-api" or
+                not isinstance(run.get("workflow_path"), str) or
+                not run["workflow_path"].startswith(".github/workflows/") or
+                not isinstance(run.get("workflow_ref"), str) or
+                not run["workflow_ref"].startswith("refs/heads/main@") or
+                not _sha(run["workflow_ref"].split("@", 1)[-1])):
+            return "CI missing/stale/failed or untrusted"
+        if run.get("event") == "workflow_dispatch":
+            if (run.get("manual_run_approved") is not True or
+                    run.get("manual_approval_provenance") != "trusted-protected-task-ledger"):
+                return "manual CI approval unverified"
+        elif run.get("event") != "pull_request":
+            return "unexpected CI event"
+        if not isinstance(run.get("name"), str) or run["name"] not in REQUIRED:
+            return "unexpected CI workflow"
+        observed.add(run["name"])
+    if not set(required).issubset(observed):
+        return "applicable required CI not verified"
+    return None
+
+
 def prepare_review(task, target, coding, ci):
     """Produce only a PENDING owner-approval review draft after exact-head CI.
 
@@ -85,43 +134,11 @@ def prepare_review(task, target, coding, ci):
     previous = task.get("previous_review_head_sha")
     if not _sha(previous) or previous == target["head_sha"]:
         return {"state": "blocked", "reason": "no new target head since previous review"}
-    # Applicability must be attested by a protected, trusted adapter. The
-    # request's author cannot select a smaller required-check set.
-    required = task.get("applicable_required_workflows")
-    if (task.get("ci_policy_source") != "trusted-protected-task-ledger" or
-            not isinstance(required, list) or not required or
-            len(required) != len(set(required)) or
-            not set(required).issubset(REQUIRED)):
-        return {"state": "blocked", "reason": "required CI applicability unverified"}
-    if not isinstance(ci, list) or not ci:
-        return {"state": "blocked", "reason": "no CI evidence"}
-    observed = set()
-    for run in ci:
-        if not isinstance(run, dict):
-            return {"state": "blocked", "reason": "malformed CI evidence"}
-        # Actor is NOT provenance: a legitimate run may be triggered by a user.
-        # A trusted adapter must verify workflow file/path/ref from GitHub APIs.
-        if (run.get("head_sha") != target["head_sha"] or
-                run.get("status") != "completed" or run.get("conclusion") != "success" or
-                run.get("trusted_workflow") is not True or
-                run.get("provenance") != "verified-github-workflow-api" or
-                not isinstance(run.get("workflow_path"), str) or
-                not run["workflow_path"].startswith(".github/workflows/") or
-                not isinstance(run.get("workflow_ref"), str) or
-                not run["workflow_ref"].startswith("refs/heads/main@") or
-                not _sha(run["workflow_ref"].split("@", 1)[-1])):
-            return {"state": "blocked", "reason": "CI missing/stale/failed or untrusted"}
-        if run.get("event") == "workflow_dispatch":
-            if (run.get("manual_run_approved") is not True or
-                    run.get("manual_approval_provenance") != "trusted-protected-task-ledger"):
-                return {"state": "blocked", "reason": "manual CI approval unverified"}
-        elif run.get("event") != "pull_request":
-            return {"state": "blocked", "reason": "unexpected CI event"}
-        if run.get("name") not in REQUIRED:
-            return {"state": "blocked", "reason": "unexpected CI workflow"}
-        observed.add(run["name"])
-    if not set(required).issubset(observed):
-        return {"state": "blocked", "reason": "applicable required CI not verified"}
+    ci_reason = verify_exact_head_ci(task.get("ci_policy_source"),
+                                     task.get("applicable_required_workflows"),
+                                     ci, target["head_sha"])
+    if ci_reason is not None:
+        return {"state": "blocked", "reason": ci_reason}
     return {"state": "pending_owner_approval",
             "target_agent": "claude", "target_pr": target["number"],
             "head_sha": target["head_sha"], "base_ref": target.get("base_branch"),
