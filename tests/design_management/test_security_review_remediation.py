@@ -35,7 +35,8 @@ ATTESTATION = {"verified": True, "head_sha": HEAD, "reviewer_login": BOT,
                "reviewer_session_id": "review-session-2",
                "all_commit_actors_verified": True,
                "all_sessions_verified": True, "pagination_verified": True,
-               "issue_authors_verified": True, "change_history_verified": True}
+               "issue_authors_verified": True, "change_history_verified": True,
+               "trusted_remediation_issue_ids": []}
 
 
 def protected_collector_test_stub(evidence, pr, reviews, issues, changed_files):
@@ -97,6 +98,7 @@ class SecurityRemediationTests(unittest.TestCase):
         self.assertEqual(assess(reviews=[])["state"], "hold")
         self.assertEqual(assess(reviews=[{**REVIEW, "comments": None}])["state"], "hold")
         self.assertEqual(assess(reviews=[{**REVIEW, "comments": []}])["state"], "no-new-findings")
+        self.assertEqual(assess(reviews=[{**REVIEW, "comments": [], "body": "Blocking issue"}])["state"], "hold")
         self.assertEqual(assess(reviews=[{**REVIEW, "state": "CHANGES_REQUESTED",
                                           "comments": []}])["state"], "hold")
         self.assertEqual(assess(reviews=[{**REVIEW, "comments": [{"body": "missing path"}]}])["state"], "hold")
@@ -117,7 +119,9 @@ class SecurityRemediationTests(unittest.TestCase):
         self.assertEqual(len(assess(issues=[{**poisoned, "state": "closed"}])["tasks"]), 1)
         trusted = {**poisoned, "trusted_remediation": True,
                    "author_assurance": "trusted-controller"}
-        self.assertEqual(assess(issues=[trusted])["tasks"], [])
+        self.assertEqual(len(assess(issues=[trusted])["tasks"]), 1)
+        self.assertEqual(assess(issues=[{**trusted, "id": 123}],
+                                attestation={**ATTESTATION, "trusted_remediation_issue_ids": [123]})["tasks"], [])
         self.assertEqual(len(assess(issues=[{**trusted, "marker": marker + "a"}])["tasks"]), 1)
 
     def test_duplicate_github_comments_create_one_candidate(self):
