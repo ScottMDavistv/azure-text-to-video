@@ -71,8 +71,14 @@ class GitHubHeadVerifier:
                 pr.get("merged_at") is not None or
                 type(pr.get("head")) is not dict or
                 pr["head"].get("sha") != expected_sha or
+                type(pr["head"].get("repo")) is not dict or
+                pr["head"]["repo"].get("full_name") !=
+                    "ScottMDavistv/azure-text-to-video" or
                 type(pr.get("base")) is not dict or
-                pr["base"].get("ref") != "main"):
+                pr["base"].get("ref") != "main" or
+                type(pr["base"].get("repo")) is not dict or
+                pr["base"]["repo"].get("full_name") !=
+                    "ScottMDavistv/azure-text-to-video"):
             raise ApprovalError("current PR head/state mismatch")
 
 
