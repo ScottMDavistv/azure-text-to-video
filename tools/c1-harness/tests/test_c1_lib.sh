@@ -734,17 +734,17 @@ t 'L-9: monitor propagates unverified teardown as rc 2, never success' monitor_t
 
 watchdog_escalates_failed_teardown() {
   local d="$TMP/watchdog-l9"; mkdir -p "$d/session" "$d/state"
-  printf 'now teardown-failed\\n' >"$d/session/privacy-failed"
-  printf '4242 5678 %s\\n' "$d/session" >"$d/state/active"
-  c1_proc_start() { printf '5678\\n'; }
-  c1_proc_stat_field() { printf 'S\\n'; }
+  printf 'now teardown-failed\n' >"$d/session/privacy-failed"
+  printf '4242 5678 %s\n' "$d/session" >"$d/state/active"
+  c1_proc_start() { printf '5678\n'; }
+  c1_proc_stat_field() { printf 'S\n'; }
   c1_cleanup_session() { :; }
-  kill() { [[ "$1" == -TERM && "$2" == 4242 ]] && printf 'owner signalled\\n' >"$d/signalled"; }
+  kill() { [[ "$1" == -TERM && "$2" == 4242 ]] && printf 'owner signalled\n' >"$d/signalled"; }
   c1_watchdog_loop "$d/state" "$d/session" 4242 5678
   [[ "$(cat "$d/signalled")" == 'owner signalled' ]]
   # Never signal a stale or mismatched active record.
   rm "$d/signalled"
-  printf '4242 9999 %s\\n' "$d/session" >"$d/state/active"
+  printf '4242 9999 %s\n' "$d/session" >"$d/state/active"
   c1_watchdog_loop "$d/state" "$d/session" 4242 5678
   [[ ! -e "$d/signalled" ]]
 }
