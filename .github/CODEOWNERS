@@ -1,0 +1,6 @@
+# Security-sensitive code ownership for review routing.
+# CODEOWNERS does not itself provide an independent approval or replace security certification.
+/.github/ @ScottMDavistv
+/scripts/check_ci_isolation.py @ScottMDavistv
+/tests/design_management/test_ci_isolation.py @ScottMDavistv
+/docs/ci-isolation-approval-readiness.md @ScottMDavistv
