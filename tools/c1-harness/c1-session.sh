@@ -75,6 +75,9 @@ install_deps() {
   mkdir -p "$CACHE"
   c1_install_apt_packages || return 1
   command -v ss >/dev/null || { c1_err 'ss (iproute2) is required for listener verification'; return 1; }
+  # M-3: a present but non-working ss, or unreadable IPv4/IPv6 kernel tables, must stop the run here.
+  c1_listen_tables || { c1_err 'IPv4/IPv6 listener evidence (kernel tables + ss) is unavailable or inconsistent'; return 1; }
+  check listener_evidence_available
   c1_install_node_deps "$FE" "$CACHE" || return 1
   c1_verify_clean_tree "$WT" "$PW" || return 1; check clean_after_dependency_install
 }
@@ -342,6 +345,16 @@ Test 2: a sign-in popup opens; CLOSE it without signing in, then Resume.'; then
     fi
   fi
   # --- sanitized evidence -----------------------------------------------------
+  # M-3: the desktop listener verdict is evidence in its own right; a missing or
+  # unreadable record in supervised mode is "unavailable", never "verified".
+  local lstate=not-started ldetail=''
+  if (( ! offline_only )); then
+    lstate=unavailable
+    if [[ -r "$S/listener-state" ]]; then { IFS= read -r lstate; IFS= read -r ldetail; } <"$S/listener-state" || true; fi
+    [[ "$lstate" =~ ^(verified|failed-unexpected|failed-unavailable)$ ]] || lstate=unavailable
+    # The record must describe exactly the loopback noVNC listener to stay "verified".
+    [[ "$lstate" != verified || "$ldetail" =~ ^127\.0\.0\.1:$C1_NOVNC_PORT\ pid=[0-9]+\ comm=[A-Za-z0-9._-]*\ ino=[0-9]+$ ]] || lstate=unavailable
+  fi
   {
     printf 'AUTH_SHA=%s\nPW_SHA=%s\nHARNESS_SHA=%s\nHARNESS_CLEAN=true\n' "$AUTH" "$PW" "$(git -C "$REPO" rev-parse HEAD)"
     printf 'CHECKOUT_VERIFIED=PASS\nCHECKS=%s\n' "$(IFS=,; echo "${CHECKS[*]}")"
@@ -353,6 +366,7 @@ Test 2: a sign-in popup opens; CLOSE it without signing in, then Resume.'; then
       "$( (( offline_only )) && echo offline-only || echo supervised)" "$([[ "${CODESPACES:-}" == true ]] && echo true || echo false)" "$PORT_PRIVATE"
     printf 'ATTEST_NO_PRIOR_CONSENT=%s\nATTEST_CONSENT_PROMPT_CANCELLED=%s\n' "$att_prior" "$att_prompt"
     printf 'PROD_REVIEW_PENDING=%s\n' "$PROD_PENDING"
+    printf 'LISTENER_EVIDENCE=%s\nLISTENER_DETAIL=%s\n' "$lstate" "$ldetail"
   } >"$S/meta"
   # Exact-head re-check AFTER the run: nothing may have changed the checkout or harness.
   c1_verify_clean_tree "$WT" "$PW" || sed -i 's/^CHECKOUT_VERIFIED=PASS$/CHECKOUT_VERIFIED=FAIL/' "$S/meta"

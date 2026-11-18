@@ -36,11 +36,11 @@ const offlineAllPass = () => report([
 const meta = {
   AUTH_SHA: AUTH, PW_SHA: SHA, HARNESS_SHA: 'a'.repeat(40), HARNESS_CLEAN: 'true',
   CHECKOUT_VERIFIED: 'PASS', LOCALHOST: 'PASS', MODE: 'supervised',
-  CHECKS: 'harness_clean,auth_ancestor_and_approved_diff,production_review_status_recorded,exact_head_clean_worktree,vite_host_guard,localhost_loopback_only,ports_free,clean_after_dependency_install',
+  CHECKS: 'harness_clean,auth_ancestor_and_approved_diff,production_review_status_recorded,exact_head_clean_worktree,vite_host_guard,localhost_loopback_only,ports_free,clean_after_dependency_install,listener_evidence_available',
   PLAYWRIGHT_VERSION: '1.65.1', EXPECTED_PLAYWRIGHT_VERSION: '1.65.1',
   BROWSER_VERSION: '159.0.8154.6', EXPECTED_BROWSER_VERSION: '159.0.8154.6',
   BROWSER_HEADED_VERSION: '159.0.8154.6', EXPECTED_HEADED_BROWSER_VERSION: '159.0.8154.6',
-  PORT_PRIVATE: 'verified-probe-user-repo', ATTEST_NO_PRIOR_CONSENT: 'yes', ATTEST_CONSENT_PROMPT_CANCELLED: 'yes',
+  PORT_PRIVATE: 'verified-probe-user-repo', LISTENER_EVIDENCE: 'verified', LISTENER_DETAIL: '127.0.0.1:6080 pid=4242 comm=websockify ino=9001', ATTEST_NO_PRIOR_CONSENT: 'yes', ATTEST_CONSENT_PROMPT_CANCELLED: 'yes',
   PROD_REVIEW_PENDING: 'none',
 }
 const ran = rc => ({ state: 'ran', start: '2026-11-17T00:00:00Z', end: '2026-11-17T00:01:00Z', rc: String(rc) })
@@ -283,6 +283,28 @@ test('M-1c: unverified or failed port privacy can never be READY', () => {
   }
   assert.equal(parseMeta('PORT_PRIVATE=operator-confirmed').PORT_PRIVATE, undefined) // legacy value is rejected
   assert.equal(row(ready({}), 'R11').verdict, 'PASS')
+})
+
+test('M-3: verified port privacy with missing, failed or unknown IPv4/IPv6 listener evidence is never PASS or READY', () => {
+  for (const LISTENER_EVIDENCE of [undefined, 'unavailable', 'failed-unexpected', 'failed-unavailable', 'not-started', '', 'VERIFIED', 'verified ']) {
+    const m = { ...meta }
+    if (LISTENER_EVIDENCE === undefined) delete m.LISTENER_EVIDENCE; else m.LISTENER_EVIDENCE = LISTENER_EVIDENCE
+    const r = ready({ meta: m })
+    assert.equal(row(r, 'R11').verdict, 'FAIL', String(LISTENER_EVIDENCE)); assert.equal(r.overall, 'FAIL', String(LISTENER_EVIDENCE))
+  }
+  // Values that are not on the allowlist never reach evaluate() at all.
+  assert.equal(parseMeta('LISTENER_EVIDENCE=verified-ish').LISTENER_EVIDENCE, undefined)
+  assert.equal(parseMeta('LISTENER_EVIDENCE=verified\nLISTENER_DETAIL=$(id)').LISTENER_DETAIL, undefined)
+  assert.equal(parseMeta('LISTENER_EVIDENCE=verified').LISTENER_EVIDENCE, 'verified')
+  // Verified listener evidence never rescues unverified privacy.
+  assert.equal(row(ready({ meta: { ...meta, PORT_PRIVATE: 'failed' } }), 'R11').verdict, 'FAIL')
+  assert.match(row(ready({}), 'R11').detail, /listeners: 127\.0\.0\.1:6080 pid=4242 comm=websockify ino=9001/)
+})
+
+test('M-3: the listener-evidence preflight check is required and recorded by the launcher', () => {
+  assert.ok(REQUIRED_CHECKS.includes('listener_evidence_available'))
+  const r = ready({ meta: { ...meta, CHECKS: meta.CHECKS.replace(',listener_evidence_available', '') } })
+  assert.equal(row(r, 'R1').verdict, 'FAIL'); assert.equal(r.overall, 'FAIL')
 })
 
 test('M-1d: browser or Playwright version mismatch FAILS the toolchain row', () => {

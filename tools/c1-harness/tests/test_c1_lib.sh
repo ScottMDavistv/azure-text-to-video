@@ -143,7 +143,7 @@ else skip 'port checks (ss/python3 missing)'; fi
 echo '# security flags of desktop commands'
 S0=/run/x/session.T
 t 'Xvfb disables TCP and abstract sockets and requires an X cookie' bash -c 'source "$1"; c=$(c1_cmd_xvfb :99 "$2" | tr "\n" " "); [[ "$c" == *"-nolisten tcp"* && "$c" == *"-nolisten local"* && "$c" == *"-auth $2/Xauthority"* ]]' _ "$HERE/../lib/c1-lib.sh" "$S0"
-t 'x11vnc: no TCP port, 0600 unix socket, one-time password file, no -nopw/-passwd' bash -c 'source "$1"; c=$(c1_cmd_x11vnc :99 "$2" | tr "\n" " "); [[ "$c" == *"-rfbport 0"* && "$c" == *"-unixsock $2/vnc.sock"* && "$c" == *"-passwdfile rm:$2/vncpass"* && "$c" != *"-localhost"* && "$c" != *"-nopw"* && "$c" != *"-passwd "* && "$c" != *"-shared"* ]]' _ "$HERE/../lib/c1-lib.sh" "$S0"
+t 'x11vnc: no IPv4 or IPv6 TCP port (-rfbport 0 -rfbportv6 0 -no6, H-1), 0600 unix socket, one-time password file, no -nopw/-passwd' bash -c 'source "$1"; c=$(c1_cmd_x11vnc :99 "$2" | tr "\n" " "); [[ "$c" == *"-rfbport 0 "* && "$c" == *"-rfbportv6 0 "* && "$c" == *" -no6 "* && "$c" == *"-unixsock $2/vnc.sock"* && "$c" == *"-passwdfile rm:$2/vncpass"* && "$c" != *"-localhost"* && "$c" != *"-nopw"* && "$c" != *"-passwd "* && "$c" != *"-shared"* ]]' _ "$HERE/../lib/c1-lib.sh" "$S0"
 t 'websockify binds loopback only and targets the unix socket' bash -c 'source "$1"; c=$(c1_cmd_websockify 6080 "$2" | tr "\n" " "); [[ "$c" == *" 127.0.0.1:6080 "* && "$c" == *"--unix-target=$2/vnc.sock"* && "$c" != *"0.0.0.0"* ]]' _ "$HERE/../lib/c1-lib.sh" "$S0"
 t 'one-time VNC password is 8 random alphanumerics and not reused' bash -c 'source "$1"; a=$(c1_gen_password); b=$(c1_gen_password); [[ "$a" =~ ^[A-Za-z0-9]{8}$ && "$b" =~ ^[A-Za-z0-9]{8}$ && "$a" != "$b" ]]' _ "$HERE/../lib/c1-lib.sh"
 sigpipe() { local a; for _ in $(seq 1 50); do a=$(c1_gen_password); [[ "$a" =~ ^[A-Za-z0-9]{8}$ ]]; done; }
@@ -421,8 +421,9 @@ if command -v Xvfb >/dev/null && command -v x11vnc >/dev/null && command -v webs
     [[ ! -e "$s/vncpass" ]]                                   # one-time password file consumed
     [[ $(stat -c %a "$s/vnc.sock") == 600 && $(stat -c %a "$s/Xauthority") == 600 ]]
     if grep -q "@/tmp/.X11-unix/X$d" /proc/net/unix; then return 1; fi   # no abstract X socket
-    # shellcheck disable=SC2046  # pid list is intentionally word-split
-    [[ "$(c1_listeners_for_pids $(c1_marked_pids "$s"))" == "127.0.0.1:$port" ]]
+    # Inode-attributed IPv4+IPv6 evidence: exactly one listener, loopback noVNC, owned by websockify.
+    local got; got=$(c1_harness_listeners "$s")
+    [[ "$got" =~ ^127\.0\.0\.1:$port\ pid=[0-9]+\ comm=websockify\ ino=[0-9]+$ ]]
     # Full RFB authentication over BOTH transports (H-2): only VNC auth offered,
     # none-auth refused, wrong password rejected, correct password accepted.
     python3 -I "$HERE/rfb_probe.py" unix "$s/vnc.sock" "$pass"
@@ -819,7 +820,520 @@ t 'L-6: monitor-scoped probe deadline is 0.4s and fast teardown is enabled' bash
   'grep -Fq "local C1_PROBE_MAX_TIME=0.4 C1_MONITOR_FAST_TEARDOWN=1" "$1" &&
    grep -Fq "local wait_steps=20" "$1" &&
    grep -Fq "wait_steps=5" "$1" &&
-   grep -Fq -- "--max-time" "$1" && grep -Fq 'C1_PROBE_MAX_TIME' "$1"' _ "$HERE/../lib/c1-lib.sh"
+   grep -Fq -- "--max-time" "$1" && grep -Fq "C1_PROBE_MAX_TIME" "$1"' _ "$HERE/../lib/c1-lib.sh"
+
+echo '# IPv4/IPv6 listener evidence: adversarial regressions (H-1, M-1..M-3, L-1..L-3)'
+# Every case drives the REAL parsers and enforcement functions. Real marked
+# processes hold real sockets with real inodes; only the kernel tables
+# (C1_PROC_NET) and ss (C1_SS_BIN) are replaced by fixtures or fakes where a
+# condition cannot be produced on demand (e.g. IPv6 on an IPv6-less runner).
+LIB="$HERE/../lib/c1-lib.sh"
+ADV="$TMP/adv"; mkdir -p "$ADV/bin"
+REAL_SS=$(command -v ss || true)
+PY3=$(command -v python3 || true)
+HAVE_V6=0
+python3 -I -c 'import socket; s=socket.socket(socket.AF_INET6); s.bind(("::1", 0)); s.close()' 2>/dev/null && HAVE_V6=1
+# Fake ss: modes fail | empty | file | rewrite (real ss with sed edits from FAKE_SS_SED).
+cat >"$ADV/bin/ss" <<'SS'
+#!/usr/bin/env bash
+case ${FAKE_SS_MODE:-real} in
+  fail)    echo 'Cannot open netlink socket: Permission denied' >&2; exit 1 ;;
+  empty)   exit 0 ;;
+  garbage) printf 'State Recv-Q Send-Q\nnot a socket row at all\n'; exit 0 ;;
+  file)    cat "$FAKE_SS_FILE" ;;
+  rewrite) "$REAL_SS" "$@" | sed -E "${FAKE_SS_SED:-}" ;;
+  *)       exec "$REAL_SS" "$@" ;;
+esac
+SS
+chmod 755 "$ADV/bin/ss"
+export REAL_SS
+TCP6_HDR='  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode'
+TCP4_HDR='  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode'
+# v6row SL HEXADDR32 PORTHEX INODE [STATE]
+v6row() { printf '%4s: %s:%s 00000000000000000000000000000000:0000 %s 00000000:00000000 00:00000000 00000000     0        0 %s 1 0000000000000000 100 0 0 10 0\n' "$1" "$2" "$3" "${5:-0A}" "$4"; }
+v4row() { printf '%4s: %s:%s 00000000:0000 %s 00000000:00000000 00:00000000 00000000     0        0 %s 1 0000000000000000 100 0 0 10 0\n' "$1" "$2" "$3" "${5:-0A}" "$4"; }
+hex4() { printf '%04X' "$1"; }
+
+# listen_on SESSION NAME HOST [spawn|marked|foreign] [PORT] -> "pid port inode"
+listen_on() {
+  local s=$1 name=$2 host=$3 how=${4:-spawn} want=${5:-0} pid log i port ino
+  log="$s/log/$name.log"
+  local code='import socket,sys,os,time
+h=sys.argv[1]; fam=socket.AF_INET6 if ":" in h else socket.AF_INET
+s=socket.socket(fam, socket.SOCK_STREAM)
+if fam==socket.AF_INET6: s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+s.bind((h, int(sys.argv[2]))); s.listen(1)
+print(s.getsockname()[1], os.fstat(s.fileno()).st_ino, flush=True)
+time.sleep(120)'
+  case $how in
+    spawn)   pid=$(c1_spawn "$s" "$name" python3 -I -c "$code" "$host" "$want") ;;
+    marked)  env C1_HARNESS_SESSION="$s" python3 -I -c "$code" "$host" "$want" >"$log" 2>&1 </dev/null & pid=$! ;;
+    foreign) env -u C1_HARNESS_SESSION setsid "$PY3" -I -c "$code" "$host" "$want" >"$log" 2>&1 </dev/null & pid=$! ;;
+  esac
+  for (( i = 0; i < 100; i++ )); do [[ -s "$log" ]] && break; sleep 0.05; done
+  read -r port ino <"$log"
+  [[ "$port" =~ ^[0-9]+$ && "$ino" =~ ^[0-9]+$ ]] || { echo "listener $name did not start" >&2; return 1; }
+  printf '%s %s %s\n' "$pid" "$port" "$ino"
+}
+# fixture_net DIR: snapshot of the real kernel tables (tcp6 only if present).
+fixture_net() { mkdir -p "$1"; cp /proc/net/tcp "$1/tcp"; [[ ! -e /proc/net/tcp6 ]] || cp /proc/net/tcp6 "$1/tcp6"; }
+# move_to_v6 DIR INODE PORT HEXADDR32: the real socket INODE now appears ONLY as an IPv6 listener.
+move_to_v6() {
+  local d=$1 ino=$2 port=$3 addr=$4
+  awk -v ino="$ino" 'NR == 1 || $10 != ino' "$d/tcp" >"$d/tcp.new" && mv "$d/tcp.new" "$d/tcp"
+  [[ -e "$d/tcp6" ]] || printf '%s\n' "$TCP6_HDR" >"$d/tcp6"
+  v6row 90 "$addr" "$(hex4 "$port")" "$ino" >>"$d/tcp6"
+}
+newsess() { local s; s=$(c1_session_new "$ROOT"); printf '%s' "$s"; }
+endsess() { unset C1_HARNESS_SESSION; c1_cleanup_session "$ROOT" "$1"; }
+
+# ---- parsers: kernel tables -------------------------------------------------
+parse_v6_rows() {
+  local f="$ADV/p6"; { printf '%s\n' "$TCP6_HDR"
+    v6row 0 00000000000000000000000000000000 170C 101           # [::]:5900
+    v6row 1 00000000000000000000000001000000 1F90 102           # [::1]:8080
+    v6row 2 0000000000000000FFFF00000100007F 0050 103           # [::ffff:127.0.0.1]:80
+    v6row 3 B80D0120000000000000000001000000 0016 104           # [2001:db8::1]:22
+    v6row 4 00000000000000000000000001000000 1F91 105 01        # ESTABLISHED: ignored
+  } >"$f"
+  local got; got=$(c1_parse_proc_net_listen 6 "$f")
+  [[ "$got" == $'101 [::]:5900\n102 [::1]:8080\n103 [::ffff:7f00:1]:80\n104 [2001:db8::1]:22' ]]
+}
+t 'tcp6 parser: wildcard [::], ::1, IPv4-mapped and global IPv6 LISTEN rows decoded; non-LISTEN ignored' parse_v6_rows
+parse_v4_rows() {
+  local f="$ADV/p4"; { printf '%s\n' "$TCP4_HDR"; v4row 0 00000000 170C 201; v4row 1 0100007F 17B0 202; v4row 2 0400000A 1F90 203 06; } >"$f"
+  [[ "$(c1_parse_proc_net_listen 4 "$f")" == $'201 0.0.0.0:5900\n202 127.0.0.1:6064' ]]
+}
+t 'tcp parser: 0.0.0.0 wildcard and loopback IPv4 LISTEN rows decoded; TIME_WAIT ignored' parse_v4_rows
+bad_table() {   # bad_table FAMILY CONTENT  -> parser must FAIL
+  printf '%s' "$2" >"$ADV/bad"; c1_parse_proc_net_listen "$1" "$ADV/bad" >/dev/null
+}
+f 'tcp6 parser: empty table is a failure, not "no listeners"' bad_table 6 ''
+f 'tcp6 parser: missing header is a failure' bad_table 6 "$(v6row 0 00000000000000000000000000000000 170C 1)"$'\n'
+f 'tcp6 parser: truncated address is a failure' bad_table 6 "$TCP6_HDR"$'\n'"   0: 0000000000000000:170C 00000000000000000000000000000000:0000 0A 0 0 0 0 0 77"$'\n'
+f 'tcp6 parser: non-numeric inode is a failure' bad_table 6 "$TCP6_HDR"$'\n'"$(v6row 0 00000000000000000000000000000000 170C x9)"$'\n'
+f 'tcp6 parser: LISTEN row without an inode (0) is a failure' bad_table 6 "$TCP6_HDR"$'\n'"$(v6row 0 00000000000000000000000000000000 170C 0)"$'\n'
+f 'tcp parser: IPv4 row in an IPv6 table (wrong family width) is a failure' bad_table 6 "$TCP6_HDR"$'\n'"$(v4row 0 00000000 170C 5)"$'\n'
+f 'tcp parser: unreadable table is a failure' c1_parse_proc_net_listen 4 "$ADV/does-not-exist"
+v6_table_missing_but_v6_present() {
+  local d="$ADV/nov6"; mkdir -p "$d"; cp /proc/net/tcp "$d/tcp"; : >"$d/if_inet6"
+  C1_PROC_NET=$d; c1_proc_listen_table >/dev/null
+}
+f 'IPv6 configured (if_inet6) but no tcp6 table: evidence unavailable, fail closed' v6_table_missing_but_v6_present
+if (( HAVE_V6 )); then
+  v6_table_hidden_on_v6_host() { local d="$ADV/hid6"; mkdir -p "$d"; cp /proc/net/tcp "$d/tcp"; C1_PROC_NET=$d; c1_proc_listen_table >/dev/null; }
+  f 'IPv6-capable kernel with the tcp6 table hidden: fail closed' v6_table_hidden_on_v6_host
+else skip 'IPv6-capable kernel with hidden tcp6 table (runner has no IPv6)'; fi
+
+# ---- parsers: ss --------------------------------------------------------------
+parse_ss_ok() {
+  local got; got=$(c1_parse_ss_listen <<'EOF'
+LISTEN 0      5      127.0.0.1:6080   0.0.0.0:* ino:11 sk:1 cgroup:/ <->
+LISTEN 0      5           [::]:5900      [::]:* uid:1000 ino:12 sk:2 v6only:1 <->
+LISTEN 0      5              *:5901         *:* ino:13 sk:3 <->
+LISTEN 0      4096 127.0.0.53%lo:53   0.0.0.0:* uid:101 ino:14 sk:4 <->
+LISTEN 0      5          [::1]:631     [::]:* ino:15 sk:5 <->
+EOF
+)
+  [[ "$got" == $'11 127.0.0.1:6080\n12 [::]:5900\n13 [::]:5901\n14 127.0.0.53:53\n15 [::1]:631' ]]
+}
+t 'ss parser: IPv4, [::], dual-stack "*", scoped and ::1 rows canonicalised with inodes' parse_ss_ok
+f 'ss parser: row without ino: is a failure' bash -c 'source "$1"; c1_parse_ss_listen <<<"LISTEN 0 5 127.0.0.1:6080 0.0.0.0:* sk:1"' _ "$LIB"
+f 'ss parser: row with two inodes is a failure' bash -c 'source "$1"; c1_parse_ss_listen <<<"LISTEN 0 5 [::]:5900 [::]:* ino:1 ino:2"' _ "$LIB"
+f 'ss parser: non-LISTEN state is a failure' bash -c 'source "$1"; c1_parse_ss_listen <<<"ESTAB 0 0 127.0.0.1:6080 127.0.0.1:5555 ino:9"' _ "$LIB"
+f 'ss parser: header/garbage row is a failure' bash -c 'source "$1"; c1_parse_ss_listen <<<"State Recv-Q Send-Q Local Peer"' _ "$LIB"
+f 'ss parser: malformed local address is a failure' bash -c 'source "$1"; c1_parse_ss_listen <<<"LISTEN 0 5 [:::]:5900 *:* ino:3"' _ "$LIB"
+f 'ss parser: truncated row is a failure' bash -c 'source "$1"; c1_parse_ss_listen <<<"LISTEN 0 5 127.0.0.1:6080"' _ "$LIB"
+f 'ss failing (non-zero exit) is a failure, not an empty listener set' bash -c 'source "$1"; C1_SS_BIN=$2; FAKE_SS_MODE=fail c1_ss_listen_table' _ "$LIB" "$ADV/bin/ss"
+f 'ss printing garbage is a failure' bash -c 'source "$1"; C1_SS_BIN=$2; FAKE_SS_MODE=garbage c1_ss_listen_table' _ "$LIB" "$ADV/bin/ss"
+f 'ss binary missing is a failure' bash -c 'source "$1"; C1_SS_BIN=/nonexistent/ss; c1_ss_listen_table' _ "$LIB"
+
+if [[ -n "$REAL_SS" ]] && command -v python3 >/dev/null; then
+  # ---- blindness and agreement --------------------------------------------
+  ss_blind_empty() {   # kernel shows listeners, ss shows none
+    local s; s=$(newsess); export C1_HARNESS_SESSION=$s
+    listen_on "$s" l1 127.0.0.1 spawn >/dev/null
+    C1_SS_BIN="$ADV/bin/ss"; export FAKE_SS_MODE=empty
+    local rc=0; c1_listen_tables || rc=$?
+    endsess "$s"; (( rc != 0 ))
+  }
+  t 'ss empty while kernel tables list listeners: evidence rejected (empty output is not success)' ss_blind_empty
+  real_tables_agree() { c1_listen_tables && [[ -n "$C1_LT_PROC" ]] && [[ "$(LC_ALL=C sort <<<"$C1_LT_PROC")" == "$(LC_ALL=C sort <<<"$C1_LT_SS")" ]]; }
+  t 'real kernel tables and real ss agree inode-for-inode on this runner' real_tables_agree
+
+  # ---- attribution: IPv4, IPv6, dual-stack, wildcard ------------------------
+  v4_loopback_attributed() {
+    local s pid port ino got; s=$(newsess); export C1_HARNESS_SESSION=$s
+    read -r pid port ino < <(listen_on "$s" pyl 127.0.0.1 spawn)
+    got=$(c1_harness_listeners "$s")
+    endsess "$s"
+    [[ "$got" == "127.0.0.1:$port pid=$pid comm=python3 ino=$ino" ]]
+  }
+  t 'IPv4 loopback listener attributed by socket inode to the exact pid/comm' v4_loopback_attributed
+  v4_wildcard_pre_novnc() {
+    local s pid port ino rc=0 err; s=$(newsess); export C1_HARNESS_SESSION=$s
+    read -r pid port ino < <(listen_on "$s" wild 0.0.0.0 spawn)
+    err=$(c1_assert_no_listeners_before_novnc "$s" 2>&1) || rc=$?
+    local st; st=$(sed -n 1p "$s/listener-state")
+    endsess "$s"
+    (( rc != 0 )) && [[ "$st" == failed-unexpected ]] \
+      && [[ "$err" == *"0.0.0.0:$port pid=$pid comm=python3 ino=$ino"* ]]   # M-2 diagnostic: addr, pid, comm, inode
+  }
+  t 'wildcard IPv4 (0.0.0.0) listener before noVNC aborts with addr/pid/comm/inode diagnostic (M-2)' v4_wildcard_pre_novnc
+  v6only_wildcard_pre_novnc() {   # x11vnc H-1 shape: [::]:5900 with IPV6_V6ONLY, IPv6-only
+    local s pid port ino d="$ADV/v6only" rc=0 err; s=$(newsess); export C1_HARNESS_SESSION=$s
+    read -r pid port ino < <(listen_on "$s" x11vnc-like 127.0.0.1 spawn)
+    fixture_net "$d"; move_to_v6 "$d" "$ino" 5900 00000000000000000000000000000000
+    C1_PROC_NET=$d C1_SS_BIN="$ADV/bin/ss"
+    export FAKE_SS_MODE=rewrite FAKE_SS_SED="s/^(LISTEN +[0-9]+ +[0-9]+ +)127\.0\.0\.1:$port( .* ino:$ino )/\1[::]:5900\2/"
+    err=$(c1_assert_no_listeners_before_novnc "$s" 2>&1) || rc=$?
+    endsess "$s"
+    (( rc != 0 )) && [[ "$err" == *"[::]:5900 pid=$pid comm=python3 ino=$ino"* ]]
+  }
+  t 'IPv6-only wildcard [::]:5900 listener (H-1 shape) is detected and aborts startup' v6only_wildcard_pre_novnc
+  dual_stack_both_reported() {
+    local s p1 o1 p2 o2 i2 d="$ADV/dual" got; s=$(newsess); export C1_HARNESS_SESSION=$s
+    read -r p1 o1 _ < <(listen_on "$s" v4 0.0.0.0 spawn)
+    read -r p2 o2 i2 < <(listen_on "$s" v6 127.0.0.1 spawn)
+    fixture_net "$d"; move_to_v6 "$d" "$i2" "$o1" 00000000000000000000000000000000
+    C1_PROC_NET=$d C1_SS_BIN="$ADV/bin/ss"
+    export FAKE_SS_MODE=rewrite FAKE_SS_SED="s/^(LISTEN +[0-9]+ +[0-9]+ +)127\.0\.0\.1:$o2( .* ino:$i2 )/\1[::]:$o1\2/"
+    got=$(c1_harness_listeners "$s")
+    endsess "$s"
+    [[ "$got" == *"0.0.0.0:$o1 pid=$p1 "* && "$got" == *"[::]:$o1 pid=$p2 "* ]] && (( $(wc -l <<<"$got") == 2 ))
+  }
+  t 'dual-stack (0.0.0.0 + [::] on one port) reports BOTH sockets' dual_stack_both_reported
+  v6_loopback_extra_rejected() {   # loopback, but not the single expected noVNC socket
+    local s pw ow iw o6 i6 d="$ADV/v6lo" rc=0; s=$(newsess); export C1_HARNESS_SESSION=$s
+    read -r pw ow iw < <(listen_on "$s" websockify 127.0.0.1 spawn)
+    read -r _ o6 i6 < <(listen_on "$s" extra 127.0.0.1 spawn)
+    fixture_net "$d"; move_to_v6 "$d" "$i6" "$ow" 00000000000000000000000001000000
+    C1_PROC_NET=$d C1_SS_BIN="$ADV/bin/ss"
+    export FAKE_SS_MODE=rewrite FAKE_SS_SED="s/^(LISTEN +[0-9]+ +[0-9]+ +)127\.0\.0\.1:$o6( .* ino:$i6 )/\1[::1]:$ow\2/"
+    c1_assert_desktop_listeners "$s" "$ow" 2>/dev/null || rc=$?
+    local st; st=$(sed -n 1p "$s/listener-state"); endsess "$s"
+    (( rc != 0 )) && [[ "$st" == failed-unexpected ]]
+  }
+  t 'expected 127.0.0.1 noVNC plus an extra [::1] listener on the same port: rejected' v6_loopback_extra_rejected
+  expected_only_verified() {
+    local s pw ow iw st det; s=$(newsess); export C1_HARNESS_SESSION=$s
+    read -r pw ow iw < <(listen_on "$s" websockify 127.0.0.1 spawn)
+    c1_assert_desktop_listeners "$s" "$ow"
+    { read -r st; read -r det; } <"$s/listener-state"; endsess "$s"
+    [[ "$st" == verified && "$det" == "127.0.0.1:$ow pid=$pw comm=python3 ino=$iw" ]]
+  }
+  t 'exactly the expected loopback socket: verified, with sanitized inode evidence recorded' expected_only_verified
+  unexpected_loopback_port() {
+    local s pw ow iw rc=0; s=$(newsess); export C1_HARNESS_SESSION=$s
+    read -r pw ow iw < <(listen_on "$s" other 127.0.0.1 spawn)
+    c1_assert_desktop_listeners "$s" $(( ow == 65535 ? 1 : ow + 1 )) 2>/dev/null || rc=$?
+    endsess "$s"; (( rc != 0 ))
+  }
+  t 'a loopback listener on an unexpected port is rejected' unexpected_loopback_port
+  no_listener_not_verified() {
+    local s rc=0; s=$(newsess); export C1_HARNESS_SESSION=$s
+    c1_assert_desktop_listeners "$s" 6080 2>/dev/null || rc=$?
+    endsess "$s"; (( rc != 0 ))
+  }
+  t 'no listener at all after noVNC start is never "verified"' no_listener_not_verified
+  if (( HAVE_V6 )); then
+    real_v6_wildcard() {   # REAL IPv6 socket, REAL kernel table, REAL ss
+      local s pid port ino got rc=0; s=$(newsess); export C1_HARNESS_SESSION=$s
+      read -r pid port ino < <(listen_on "$s" realv6 :: spawn)
+      got=$(c1_harness_listeners "$s")
+      c1_assert_no_listeners_before_novnc "$s" 2>/dev/null || rc=$?
+      endsess "$s"
+      [[ "$got" == "[::]:$port pid=$pid comm=python3 ino=$ino" ]] && (( rc != 0 ))
+    }
+    t 'REAL IPv6 wildcard listener: found in real tcp6 and real ss, startup aborted' real_v6_wildcard
+    real_v6_loopback() {
+      local s pid port ino got; s=$(newsess); export C1_HARNESS_SESSION=$s
+      read -r pid port ino < <(listen_on "$s" realv6lo ::1 spawn)
+      got=$(c1_harness_listeners "$s"); endsess "$s"
+      [[ "$got" == "[::1]:$port pid=$pid comm=python3 ino=$ino" ]]
+    }
+    t 'REAL IPv6 loopback listener attributed as [::1]' real_v6_loopback
+  else
+    skip 'REAL IPv6 wildcard/loopback sockets (runner has no IPv6; fixture-backed IPv6 cases above still ran)'
+  fi
+
+  # ---- fail-open regressions (M-3 POC) --------------------------------------
+  ss_fails_with_real_wildcard() {   # review POC: real marked 0.0.0.0 listener + failing ss gave [] rc=0
+    local s rc=0 st; s=$(newsess); export C1_HARNESS_SESSION=$s
+    listen_on "$s" wild 0.0.0.0 spawn >/dev/null
+    C1_SS_BIN="$ADV/bin/ss"; export FAKE_SS_MODE=fail
+    c1_assert_no_listeners_before_novnc "$s" 2>/dev/null || rc=$?
+    st=$(sed -n 1p "$s/listener-state"); endsess "$s"
+    (( rc != 0 )) && [[ "$st" == failed-unavailable ]]
+  }
+  t 'M-3 POC: real wildcard listener + failing ss -> fail closed (was: empty set, rc 0)' ss_fails_with_real_wildcard
+  ss_blind_to_harness_v6() {   # kernel shows the harness [::] socket, ss omits it
+    local s pid port ino d="$ADV/blind6" rc=0; s=$(newsess); export C1_HARNESS_SESSION=$s
+    read -r pid port ino < <(listen_on "$s" hid 127.0.0.1 spawn)
+    fixture_net "$d"; move_to_v6 "$d" "$ino" 5900 00000000000000000000000000000000
+    C1_PROC_NET=$d C1_SS_BIN="$ADV/bin/ss"; export FAKE_SS_MODE=rewrite FAKE_SS_SED="/ ino:$ino /d"
+    c1_harness_listeners "$s" >/dev/null 2>&1 || rc=$?
+    endsess "$s"; (( rc != 0 ))
+  }
+  t 'ss blind to a harness IPv6 listener the kernel reports: inconsistent evidence, fail closed' ss_blind_to_harness_v6
+  kernel_blind_to_harness() {   # ss reports a harness listener, kernel tables omit it
+    local s pid port ino d="$ADV/blindk" rc=0; s=$(newsess); export C1_HARNESS_SESSION=$s
+    read -r pid port ino < <(listen_on "$s" hidk 127.0.0.1 spawn)
+    fixture_net "$d"; awk -v ino="$ino" 'NR == 1 || $10 != ino' /proc/net/tcp >"$d/tcp"
+    C1_PROC_NET=$d
+    c1_harness_listeners "$s" >/dev/null 2>&1 || rc=$?
+    endsess "$s"; (( rc != 0 ))
+  }
+  t 'kernel table missing a harness listener that ss reports: fail closed' kernel_blind_to_harness
+  addr_mismatch() {
+    local s pid port ino rc=0; s=$(newsess); export C1_HARNESS_SESSION=$s
+    read -r pid port ino < <(listen_on "$s" mm 127.0.0.1 spawn)
+    C1_SS_BIN="$ADV/bin/ss"; export FAKE_SS_MODE=rewrite FAKE_SS_SED="s/127\.0\.0\.1:$port /127.0.0.1:1 /"
+    c1_harness_listeners "$s" >/dev/null 2>&1 || rc=$?
+    endsess "$s"; (( rc != 0 ))
+  }
+  t 'kernel and ss disagree on a harness socket address: fail closed' addr_mismatch
+  malformed_kernel_row() {
+    local s d="$ADV/malk" rc=0; s=$(newsess); export C1_HARNESS_SESSION=$s
+    fixture_net "$d"; printf '   9: ZZZZ:0000 00000000:0000 0A 0 0 0 0 0 1\n' >>"$d/tcp"; C1_PROC_NET=$d
+    c1_assert_no_listeners_before_novnc "$s" 2>/dev/null || rc=$?
+    endsess "$s"; (( rc != 0 ))
+  }
+  t 'malformed kernel table row: pre-noVNC check fails closed' malformed_kernel_row
+
+  # ---- attribution beyond the marker (L-1/L-2) -------------------------------
+  unmarked_child_attributed() {   # a child that dropped the marker (env -i) keeps its listener attributable
+    local s got port; s=$(newsess); export C1_HARNESS_SESSION=$s
+    c1_spawn "$s" parent bash -c 'env -i "$1" -I -c "import socket,time;s=socket.socket();s.bind((\"0.0.0.0\",0));s.listen();print(s.getsockname()[1],flush=True);time.sleep(60)" & wait' _ "$PY3" >/dev/null
+    for (( i = 0; i < 100; i++ )); do [[ -s "$s/log/parent.log" ]] && break; sleep 0.05; done
+    read -r port <"$s/log/parent.log"
+    got=$(c1_harness_listeners "$s"); endsess "$s"
+    [[ "$got" == "0.0.0.0:$port pid="*" comm=python3 ino="* ]]
+  }
+  t 'listener held by an unmarked child (env -i) of a harness process is still attributed' unmarked_child_attributed
+  leader_dropped_marker() {   # the recorded leader itself exec()s into an env-cleared listener: inconsistent, fail closed
+    local s rc=0 i; s=$(newsess); export C1_HARNESS_SESSION=$s
+    c1_spawn "$s" execer bash -c 'exec env -i "$1" -I -c "import socket,time;s=socket.socket();s.bind((\"0.0.0.0\",0));s.listen();print(1,flush=True);time.sleep(60)"' _ "$PY3" >/dev/null
+    for (( i = 0; i < 100; i++ )); do [[ -s "$s/log/execer.log" ]] && break; sleep 0.05; done
+    c1_assert_no_listeners_before_novnc "$s" 2>/dev/null || rc=$?
+    local st lp vc=0; st=$(sed -n 1p "$s/listener-state"); lp=$(awk '{print $1; exit}' "$s/pids"); endsess "$s"
+    # Cleanup cannot signal it (no marker = no ownership proof), so verification MUST report it.
+    c1_verify_cleanup "$s" 2>/dev/null || vc=$?
+    kill "$lp" 2>/dev/null || true; sleep 0.2
+    (( rc != 0 )) && [[ "$st" == failed-unavailable ]] && (( vc != 0 )) && c1_verify_cleanup "$s"
+  }
+  t 'recorded leader that exec()s into an env-cleared listener: fail closed, and cleanup verification reports it surviving' leader_dropped_marker
+  setsid_grandchild_attributed() {   # like fluxbox -> fbsetbg: the child calls setsid AND drops the marker
+    local s got port; s=$(newsess); export C1_HARNESS_SESSION=$s
+    c1_spawn "$s" fluxlike bash -c 'setsid env -i "$1" -I -c "import socket,time;s=socket.socket();s.bind((\"0.0.0.0\",0));s.listen();print(s.getsockname()[1],flush=True);time.sleep(60)" & wait' _ "$PY3" >/dev/null
+    for (( i = 0; i < 100; i++ )); do [[ -s "$s/log/fluxlike.log" ]] && break; sleep 0.05; done
+    read -r port <"$s/log/fluxlike.log"
+    got=$(c1_harness_listeners "$s"); endsess "$s"
+    local gp=${got#* pid=}; gp=${gp%% *}; [[ "$gp" =~ ^[0-9]+$ ]] && kill "$gp" 2>/dev/null || true
+    [[ "$got" == "0.0.0.0:$port pid="* ]]
+  }
+  t 'listener of a setsid+unmarked grandchild of a harness process is attributed (process tree)' setsid_grandchild_attributed
+  inherited_fd_closed() {   # L-1: a parent listening socket is never inherited by c1_spawn children
+    local s got fds; s=$(newsess); export C1_HARNESS_SESSION=$s
+    python3 -I -c 'import socket,os,sys
+s=socket.socket(); s.bind(("127.0.0.1",0)); s.listen()
+os.dup2(s.fileno(), 37); os.set_inheritable(37, True)
+os.execvp("bash", ["bash","-c","""source "$1"; pid=$(c1_spawn "$2" child sleep 30)
+for i in $(seq 100); do [[ "$(cat /proc/$pid/comm 2>/dev/null)" == sleep ]] && break; sleep 0.05; done
+ls -l /proc/$pid/fd/ > "$2/child-fds"; c1_harness_listeners "$2" > "$2/got"; echo "$$" > "$2/parent"; kill $pid""", "_", sys.argv[1], sys.argv[2]])' "$LIB" "$s"
+    got=$(cat "$s/got"); fds=$(cat "$s/child-fds"); local parent; parent=$(cat "$s/parent"); endsess "$s"
+    # The child holds no socket; the inherited listener IS attributed, to the parent that holds it.
+    [[ "$fds" != *socket:* ]] && [[ "$got" =~ ^127\.0\.0\.1:[0-9]+\ pid=$parent\ comm=bash\ ino=[0-9]+$ ]]
+  }
+  t 'L-1: c1_spawn children do not inherit a parent listening socket (fd 37); the holder is attributed' inherited_fd_closed
+  orphan_reported() {   # L-2: a marked leftover (not spawned by the desktop) is named in the report
+    local s pid i; s=$(newsess); export C1_HARNESS_SESSION=$s
+    ( setsid env C1_HARNESS_SESSION="$s" sh -c 'echo $$ >"$1/orphan.pid"; exec sleep 30' _ "$s" </dev/null >/dev/null 2>&1 & )
+    for (( i = 0; i < 100; i++ )); do [[ -s "$s/orphan.pid" ]] && break; sleep 0.05; done
+    pid=$(cat "$s/orphan.pid"); sleep 0.1
+    local o; o=$(c1_harness_orphans "$s"); endsess "$s"
+    [[ "$o" == *"pid=$pid comm=sleep"* ]]
+  }
+  t 'L-2: marked process not started by the desktop is reported as an orphan' orphan_reported
+  recorded_no_marker() {   # recorded live pid whose marker cannot be verified -> fail closed
+    local s pid rc=0; s=$(newsess); export C1_HARNESS_SESSION=$s
+    env -u C1_HARNESS_SESSION sleep 30 & pid=$!
+    printf '%s %s\n' "$pid" "$(c1_proc_start "$pid")" >>"$s/pids"
+    c1_harness_listeners "$s" >/dev/null 2>&1 || rc=$?
+    kill "$pid" 2>/dev/null; endsess "$s"; (( rc != 0 ))
+  }
+  t 'recorded live harness pid without a verifiable marker: inconsistent process state, fail closed' recorded_no_marker
+  malformed_record() {
+    local s rc=0; s=$(newsess); export C1_HARNESS_SESSION=$s
+    printf 'garbage line here\n' >>"$s/pids"
+    c1_harness_listeners "$s" >/dev/null 2>&1 || rc=$?
+    endsess "$s"; (( rc != 0 ))
+  }
+  t 'malformed harness pid record: fail closed' malformed_record
+  if (( $(id -u) == 0 )) && command -v setpriv >/dev/null; then
+    unreadable_evidence() {   # REAL permission denial: an unprivileged scanner cannot read a root harness process
+      local d; d=$(mktemp -d /tmp/c1-unread.XXXXXX); chmod 755 "$d"; cp "$LIB" "$d/lib.sh"; chmod 644 "$d/lib.sh"
+      local s="$d/sess"; mkdir -p "$s/log"; chmod 755 "$s"
+      env C1_HARNESS_SESSION="$s" sleep 30 & local pid=$!
+      sleep 0.1; printf '%s %s\n' "$pid" "$(c1_proc_start "$pid")" >"$s/pids"; chmod 644 "$s/pids"
+      local r1=0 r2=0
+      setpriv --reuid=65534 --regid=65534 --clear-groups bash -c 'source "$1"; c1_harness_listeners "$2"' _ "$d/lib.sh" "$s" >/dev/null 2>&1 || r1=$?
+      setpriv --reuid=65534 --regid=65534 --clear-groups bash -c 'source "$1"; c1_pid_socket_inodes "$2" "$(c1_proc_start "$2")"' _ "$d/lib.sh" "$pid" >/dev/null 2>&1 || r2=$?
+      kill "$pid"; rm -rf "$d"
+      (( r1 != 0 && r2 != 0 ))
+    }
+    t 'unreadable marker / fd table of a live harness process (real EACCES): fail closed' unreadable_evidence
+  else skip 'real EACCES evidence denial (needs root + setpriv)'; fi
+
+  # ---- ports, teardown and cleanup (L-3) ------------------------------------
+  port_free_fail_closed() {
+    local rc=0 p; p=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+    C1_SS_BIN="$ADV/bin/ss"; FAKE_SS_MODE=fail c1_port_free "$p" || rc=$?
+    (( rc == 2 ))
+  }
+  t 'c1_port_free: failing ss -> 2 (unknown), never "free"' port_free_fail_closed
+  port_free_sees_v6() {
+    local d="$ADV/pf6" rc=0 p=45991; fixture_net "$d"
+    [[ -e "$d/tcp6" ]] || printf '%s\n' "$TCP6_HDR" >"$d/tcp6"
+    v6row 91 00000000000000000000000000000000 "$(hex4 $p)" 999999 >>"$d/tcp6"
+    # shellcheck disable=SC2034  # read by the sourced library
+    C1_PROC_NET=$d; c1_port_free "$p" || rc=$?
+    (( rc != 0 ))
+  }
+  t 'c1_port_free: an IPv6-only listener on the port (kernel table) means NOT free' port_free_sees_v6
+  port_free_real() { local p; p=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'); c1_port_free "$p"; }
+  t 'c1_port_free: genuinely free port with full evidence -> free' port_free_real
+  teardown_unverifiable() {   # privacy teardown must not report success without evidence
+    local s pid port ino rc=0; s=$(newsess); export C1_HARNESS_SESSION=$s
+    read -r pid port ino < <(listen_on "$s" ws 127.0.0.1 spawn)
+    C1_SS_BIN="$ADV/bin/ss"; export FAKE_SS_MODE=fail
+    c1_teardown_novnc "$s" "$port" "$pid" "$(c1_proc_start "$pid")" test 2>/dev/null || rc=$?
+    local pf; pf=$(cat "$s/privacy-failed"); unset FAKE_SS_MODE; C1_SS_BIN=ss; endsess "$s"
+    (( rc != 0 )) && [[ "$pf" == *teardown-failed* ]]
+  }
+  t 'noVNC teardown with unavailable listener evidence records teardown-failed (fail closed)' teardown_unverifiable
+  cleanup_inode_survivor() {   # a recorded harness listener inode that survives cleanup FAILS verification
+    local s fpid fino rc=0 reg; s=$(newsess); export C1_HARNESS_SESSION=$s
+    read -r fpid _ fino < <(listen_on "$s" survivor 127.0.0.1 foreign)
+    printf '%s\n' "$fino" >>"$s/listen-inodes"
+    unset C1_HARNESS_SESSION; c1_cleanup_session "$ROOT" "$s"
+    reg="$ROOT/.${s##*/}.inodes"; [[ -s "$reg" ]]
+    c1_verify_cleanup "$s" 2>/dev/null || rc=$?
+    kill "$fpid"; sleep 0.2
+    (( rc != 0 )) && [[ -e "$reg" ]] && c1_verify_cleanup "$s" && [[ ! -e "$reg" ]]
+  }
+  t 'L-3: cleanup verification fails while a recorded listener inode still listens; passes once closed' cleanup_inode_survivor
+  cleanup_no_evidence() {
+    local s rc=0; s=$(newsess); unset C1_HARNESS_SESSION; c1_cleanup_session "$ROOT" "$s"
+    # shellcheck disable=SC2034  # read by the sourced library
+    C1_SS_BIN="$ADV/bin/ss"; FAKE_SS_MODE=fail c1_verify_cleanup "$s" 2>/dev/null || rc=$?
+    (( rc != 0 ))
+  }
+  t 'cleanup verification with unavailable listener evidence is a FAILURE' cleanup_no_evidence
+
+  # ---- startup paths with adversarial desktop binaries ------------------------
+  if command -v Xvfb >/dev/null && command -v fluxbox >/dev/null && command -v xauth >/dev/null; then
+    mkdir -p "$ADV/evil"
+    # An x11vnc stand-in that behaves like the H-1 build: serves the Unix socket,
+    # consumes the one-time password file, AND opens a wildcard TCP listener.
+    cat >"$ADV/evil/x11vnc" <<'X'
+#!/usr/bin/env python3
+import os, socket, sys, time
+a = sys.argv; sock = a[a.index('-unixsock') + 1]; pw = a[a.index('-passwdfile') + 1]
+fam, host = (socket.AF_INET6, '::') if os.environ.get('EVIL_V6') == '1' else (socket.AF_INET, '0.0.0.0')
+t = socket.socket(fam); t.bind((host, 0)); t.listen()
+u = socket.socket(socket.AF_UNIX); u.bind(sock); u.listen()
+if pw.startswith('rm:'): os.unlink(pw[3:])
+time.sleep(60)
+X
+    chmod 755 "$ADV/evil/x11vnc"
+    evil_x11vnc_aborts() {
+      local s rc=0 err; s=$(newsess); export C1_HARNESS_SESSION=$s
+      PATH="$ADV/evil:$PATH"; [[ "$HAVE_V6" == 1 ]] && export EVIL_V6=1
+      err=$(c1_start_display_vnc "$s" "$(c1_gen_password)" 2>&1) || rc=$?
+      local st; st=$(sed -n 1p "$s/listener-state" 2>/dev/null || true)
+      endsess "$s"; c1_verify_cleanup "$s"
+      (( rc != 0 )) && [[ "$st" == failed-unexpected ]] && [[ "$err" =~ (0\.0\.0\.0|\[::\]):[0-9]+\ pid=[0-9]+\ comm=[A-Za-z0-9._-]+\ ino=[0-9]+ ]]
+    }
+    t 'interrupted startup: x11vnc opening a wildcard TCP listener aborts before noVNC; cleanup verified' evil_x11vnc_aborts
+    cat >"$ADV/evil/x11vnc-dead" <<'X'
+#!/usr/bin/env bash
+exit 1
+X
+    chmod 755 "$ADV/evil/x11vnc-dead"
+    dead_x11vnc() {
+      local s rc=0; s=$(newsess); export C1_HARNESS_SESSION=$s
+      mkdir -p "$ADV/dead"; ln -sf "$ADV/evil/x11vnc-dead" "$ADV/dead/x11vnc"; PATH="$ADV/dead:$PATH"
+      c1_start_display_vnc "$s" "$(c1_gen_password)" 2>/dev/null || rc=$?
+      endsess "$s"; c1_verify_cleanup "$s" && (( rc != 0 ))
+    }
+    t 'interrupted startup: x11vnc dying before its socket appears fails and leaves nothing behind' dead_x11vnc
+  else skip 'adversarial x11vnc startup (Xvfb/fluxbox/xauth missing)'; fi
+  if command -v websockify >/dev/null; then
+    mkdir -p "$ADV/race"
+    # websockify stand-in: an UNRELATED, unmarked, re-parented process grabs the
+    # noVNC port on the wildcard address between the free check and the bind.
+    cat >"$ADV/race/websockify" <<'W'
+#!/usr/bin/env bash
+port=${*: -1}; port=${port##*:}
+( env -i setsid "$PY3" -I -c 'import socket,sys,time
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("0.0.0.0", int(sys.argv[1]))); s.listen(); open(sys.argv[2],"w").write(str(__import__("os").getpid())); time.sleep(30)' "$port" "$RACE_PIDFILE" </dev/null >/dev/null 2>&1 & )
+sleep 30
+W
+    chmod 755 "$ADV/race/websockify"
+    port_race() {
+      local s port rc=0 pf; s=$(newsess); export C1_HARNESS_SESSION=$s
+      port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+      export RACE_PIDFILE="$ADV/race.pid" PY3; rm -f "$RACE_PIDFILE"
+      PATH="$ADV/race:$PATH" c1_start_websockify "$s" "$port" >/dev/null 2>&1 || rc=$?
+      pf=$(cat "$s/privacy-failed" 2>/dev/null || true)
+      [[ -s "$RACE_PIDFILE" ]] && kill "$(cat "$RACE_PIDFILE")" 2>/dev/null
+      sleep 0.2; endsess "$s"
+      (( rc == 2 )) && [[ "$pf" == *teardown-failed* ]]
+    }
+    t 'port-listener race: foreign wildcard listener takes the noVNC port -> rejected, teardown-failed (rc 2)' port_race
+  else skip 'noVNC port race (websockify missing)'; fi
+
+  # ---- real binaries: no IPv4/IPv6 TCP socket is even attempted (M-1) -------
+  if command -v strace >/dev/null && strace -qq -e trace=socket true 2>/dev/null && command -v Xvfb >/dev/null && command -v x11vnc >/dev/null && command -v xauth >/dev/null; then
+    # strace_desktop MODE -> run REAL Xvfb + x11vnc with the exact harness argv
+    # (MODE=shipped strips -rfbportv6 0 / -no6, the ee6ded8 flags) under strace;
+    # traces in $ADV/strace.MODE.{xvfb,vnc}. rc 0 once the VNC Unix socket was served.
+    strace_desktop() {
+      local mode=$1 s disp tr="$ADV/strace.$1" i ok=1 skipn=0 a; local -a cmd c2=()
+      s=$(newsess); disp=$(c1_free_display)
+      touch "$s/Xauthority"; chmod 600 "$s/Xauthority"; xauth -q -f "$s/Xauthority" add "$disp" . "$(mcookie)"
+      mapfile -t cmd < <(c1_cmd_xvfb "$disp" "$s")
+      strace -f -qq -e trace=socket -o "$tr.xvfb" "${cmd[@]}" >/dev/null 2>&1 & local xp=$!
+      for (( i = 0; i < 50; i++ )); do [[ -S "/tmp/.X11-unix/X${disp#:}" ]] && break; sleep 0.1; done
+      printf 'pw\n' >"$s/vncpass"
+      mapfile -t cmd < <(c1_cmd_x11vnc "$disp" "$s")
+      if [[ $mode == shipped ]]; then
+        for a in "${cmd[@]}"; do
+          if (( skipn )); then skipn=0; continue; fi
+          [[ $a == -rfbportv6 ]] && { skipn=1; continue; }
+          [[ $a == -no6 ]] && continue
+          c2+=("$a")
+        done
+        cmd=("${c2[@]}")
+      fi
+      strace -f -qq -e trace=socket -o "$tr.vnc" "${cmd[@]}" >/dev/null 2>&1 & local vp=$!
+      for (( i = 0; i < 50; i++ )); do [[ -S "$s/vnc.sock" ]] && { ok=0; break; }; sleep 0.1; done
+      sleep 0.5
+      # Killing strace only detaches it: stop the traced programs themselves first.
+      pkill -KILL -P "$vp" 2>/dev/null || true; pkill -KILL -P "$xp" 2>/dev/null || true
+      kill "$vp" "$xp" 2>/dev/null || true; wait "$vp" "$xp" 2>/dev/null || true
+      rm -rf "$s"
+      return "$ok"
+    }
+    no_tcp_attempt() { strace_desktop fixed && [[ -s "$ADV/strace.fixed.vnc" ]] && ! grep -hE 'socket\(AF_INET6?, SOCK_STREAM' "$ADV/strace.fixed.xvfb" "$ADV/strace.fixed.vnc"; }
+    shipped_v6_attempt() { strace_desktop shipped && grep -qE 'socket\(AF_INET6, SOCK_STREAM' "$ADV/strace.shipped.vnc"; }
+    t 'M-1: real Xvfb + x11vnc with the exact harness argv attempt NO IPv4/IPv6 TCP socket (strace)' no_tcp_attempt
+    t 'M-1 control: the ee6ded8 x11vnc flags DO attempt an IPv6 TCP socket (the probe is not blind)' shipped_v6_attempt
+  else skip 'strace syscall check of real Xvfb/x11vnc (strace/Xvfb/x11vnc missing)'; fi
+else
+  skip 'IPv4/IPv6 listener evidence integration (ss/python3 missing)'
+fi
 
 echo '# pinned PR #60 integration (real repository history)'
 if [[ -n "${TOP:=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)}" ]] && git -C "$TOP" cat-file -e "$C1_PW_SHA_APPROVED^{commit}" 2>/dev/null \

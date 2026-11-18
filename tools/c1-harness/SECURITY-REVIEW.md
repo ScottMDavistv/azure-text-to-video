@@ -1,6 +1,6 @@
 # Independent security review handoff — C1 validation harness
 
-**Status: DRAFT. The consolidated round-2 remediation awaits a NEW independent full-diff review.** No implementing session listed below may review or approve it. This document is the implementer's account: treat it as claims, not evidence. **C1 REMAINS OPEN.**
+**Status: DRAFT. The consolidated round-2 remediation and the C1 desktop-blocker remediation (below) await a NEW independent full-diff review.** No implementing session listed below may review or approve it. This document is the implementer's account: treat it as claims, not evidence. **C1 REMAINS OPEN.**
 
 ## History
 
@@ -13,7 +13,30 @@
 | `8d92366`…`cd33512` | Partial M-2a/N-2 fixes, then a reconciliation with PR #60 `e187311` and re-pin (PR #74 comments 6964141085 and 6964399093) | Another implementing session (commits authored `ScottMDavistv`) |
 | this branch | **Consolidated round-2 remediation** (owner-authorized Option 1): integrates the stronger round-2 work from unpushed `55e1c63`/`e657ed2` onto `cd33512` without force-pushing | Session D (`session_01QdenYPt4giWiEjmFEVy9cD`) |
 
-**Reviewer independence:** sessions B and D and the `cd33512` session are implementers and **must not review**. Session C authored no code but proposed these fixes, so a **new** session is required.
+| `ee6ded8` | Round-2 head, plus PR #60 `c0cc725` trusted-main reconciliation | Implementing sessions |
+| — | Independent review of `ee6ded8` (C1 desktop initialization blocker): **FAIL** (H-1, M-1–M-3, L-1–L-4) | Independent read-only reviewer session |
+| this branch | **C1 desktop-blocker remediation** (P0, Issue #65): H-1, M-1–M-3, L-1–L-4 | Session E (`session_01QdenYPzwRjrGKn8DXdKNba`) |
+
+**Reviewer independence:** sessions B, D and E and the `cd33512` session are implementers and **must not review**. Session C authored no code but proposed these fixes, so a **new** session is required.
+
+## C1 desktop-blocker remediation (round 3, on `ee6ded8`)
+
+Implementer's claims; verify independently. Nothing in `frontend/`, `backend/`, `scripts/`, `tests/` or `.github/` changed, and the pins are unchanged.
+
+| Finding | Change | Regression coverage (`tests/test_c1_lib.sh`, `tests/c1-evidence.test.mjs`) |
+|---|---|---|
+| **H-1** x11vnc binds `[::]:5900` | `c1_cmd_x11vnc` adds `-rfbportv6 0 -no6`. The guard is unchanged in intent and stricter in evidence. | Flag test requires both flags. **Real** Xvfb + x11vnc with the exact argv under `strace`: no `AF_INET`/`AF_INET6` stream socket. Control: the `ee6ded8` flags **do** create `AF_INET6` (the probe is not blind on IPv6-less runners). |
+| **M-1** IPv6-blind regressions | Above, plus fixture-backed IPv6 rows on real inodes, plus real-IPv6 cases that run wherever the kernel has IPv6 | IPv6-only `[::]:5900` (H-1 shape), dual-stack `0.0.0.0`+`[::]`, extra `[::1]`, IPv4-mapped decoding; real `[::]`/`[::1]` sockets on IPv6 hosts |
+| **M-2** no diagnostic | Offending rows printed and recorded as `addr:port pid= comm= ino=` (sanitized; no environ/argv). `LISTENER_EVIDENCE`/`LISTENER_DETAIL` added to the meta allowlist. | Diagnostic content asserted; a forged detail is rejected by the allowlist |
+| **M-3** fail-open evidence | `c1_listeners_for_pids` (ss `users:` parsing) is **removed**. Attribution is by socket inode over marker carriers, live recorded leaders, their setsid sessions and descendants. Strict parsers for `/proc/net/tcp{,6}` and `ss -Hltne`. Both sources are required and must agree. A failed or missing `ss`, a malformed row, an empty table while the other source has rows, IPv6 present without `tcp6`, an unreadable fd table or marker of a live recorded process, a malformed pid record, or a recorded leader that has lost its marker are all **failures**. `c1_port_free` returns 2 (unknown) instead of "free" when evidence is missing, so teardown and cleanup also fail closed. The `/dev/tcp` fallback (IPv4 loopback only) is removed. A preflight check `listener_evidence_available` is added (required for R1). **R11 PASS now also requires `LISTENER_EVIDENCE=verified`.** | The review's POC (real `0.0.0.0` listener + failing `ss`) now fails closed. Failing, garbage, empty and missing `ss`. Kernel-only and ss-only harness sockets. Address disagreement. Malformed/empty/headerless tables. Real EACCES on marker and fd table (unprivileged scanner, root harness process). Evidence: R11 is FAIL for every non-`verified` value. |
+| **L-1** inherited fds | `c1_spawn` closes every fd above 2 before `exec` | A listening fd 37 in the parent is absent from the child. The parent holding it is still attributed. |
+| **L-2** orphans | Marked processes that no live recorded leader accounts for are reported before noVNC | Re-parented marked leftover is named |
+| **L-3** cleanup scope | Listener inodes **and** recorded `pid starttime` pairs observed during the session are kept past session-directory removal. `c1_verify_cleanup` fails while any recorded inode still listens, while any recorded process is still alive (including one that lost its marker and therefore cannot be signalled), or when evidence is unavailable. | Survivor inode fails verification and passes once closed. A marker-less recorded survivor is reported. Unavailable evidence fails. |
+| **L-4** ShellCheck | SC1078 fixed (`test_c1_lib.sh`) | `shellcheck -S warning` clean on lib, launcher and tests |
+| (new) tcp6 header | The kernel's `tcp6` header says `remote_address`. The strict header check accepts both spellings. | Fixture headers use the real `tcp6` spelling |
+| Startup paths | | Adversarial x11vnc (serves the Unix socket, consumes the password, opens a wildcard TCP listener) aborts before noVNC, and cleanup verifies. A dying x11vnc leaves nothing behind. A foreign wildcard listener racing onto the noVNC port gives rc 2, `teardown-failed`. |
+
+Known limits, for the reviewer: UDP listeners are not enumerated (no desktop component uses UDP). A harness process in another network namespace is invisible to these tables, and also unreachable through Codespaces forwarding. A listener created after the check is covered by the noVNC privacy re-checks and monitor, not by this check. An unrelated socket that reuses a recorded inode number after cleanup can produce a false cleanup FAILURE, never a false PASS.
 
 ## Pins and the production-code difference (owner condition 4)
 

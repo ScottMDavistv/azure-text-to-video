@@ -21,7 +21,7 @@ export const PHASES = {
 
 // N-1: R1 passes only if every mandatory preflight check actually ran and passed.
 export const REQUIRED_CHECKS = ['harness_clean', 'auth_ancestor_and_approved_diff', 'production_review_status_recorded', 'exact_head_clean_worktree',
-  'vite_host_guard', 'localhost_loopback_only', 'ports_free', 'clean_after_dependency_install']
+  'vite_host_guard', 'localhost_loopback_only', 'ports_free', 'clean_after_dependency_install', 'listener_evidence_available']
 
 // I-5: R10 requires these literal versions in addition to internal consistency
 // (Playwright 1.65.1 pins Chromium 159.0.8154.6, browsers.json revision 1255,
@@ -105,6 +105,9 @@ export function parseMeta(text) {
     EXPECTED_HEADED_BROWSER_VERSION: /^[0-9.]{1,32}$/, BROWSER_HEADED_VERSION: /^([0-9.]{1,32}|not-launched|unknown)$/,
     ATTEST_NO_PRIOR_CONSENT: /^(yes|no|not-asked)$/, ATTEST_CONSENT_PROMPT_CANCELLED: /^(yes|no|not-asked)$/,
     PROD_REVIEW_PENDING: /^(none|[A-Za-z0-9_./-]{1,200}@[0-9a-f]{40}(?:,[A-Za-z0-9_./-]{1,200}@[0-9a-f]{40}){0,19})$/,
+    // M-3: IPv4/IPv6 desktop listener verdict (addresses, pids, comm, inodes only).
+    LISTENER_EVIDENCE: /^(verified|failed-unexpected|failed-unavailable|unavailable|not-started)$/,
+    LISTENER_DETAIL: /^[A-Za-z0-9.:;=, _[\]-]{0,200}$/,
   }
   const meta = {}
   for (const line of text.split('\n')) {
@@ -233,8 +236,11 @@ export function evaluate({ meta, phases, reports, artifactHits }) {
         '; required ' + REQUIRED_PLAYWRIGHT_VERSION + ' / ' + REQUIRED_CHROMIUM_VERSION
     } else if (row.kind === 'privacy') {
       if (meta.MODE !== 'supervised') { verdict = 'INCOMPLETE'; detail = 'desktop not started (offline-only)' }
-      else if (/^verified-probe-(gh|user-repo)$/.test(meta.PORT_PRIVATE || '')) { verdict = 'PASS'; detail = meta.PORT_PRIVATE }
-      else { verdict = 'FAIL'; detail = 'privacy not verified: ' + (meta.PORT_PRIVATE ?? 'unknown') }
+      else if (!/^verified-probe-(gh|user-repo)$/.test(meta.PORT_PRIVATE || '')) { verdict = 'FAIL'; detail = 'privacy not verified: ' + (meta.PORT_PRIVATE ?? 'unknown') }
+      // M-3: forwarding privacy alone is not enough; the IPv4/IPv6 listener set
+      // must have been proven to be exactly loopback noVNC. Missing => FAIL.
+      else if (meta.LISTENER_EVIDENCE !== 'verified') { verdict = 'FAIL'; detail = meta.PORT_PRIVATE + '; listener evidence not verified: ' + (meta.LISTENER_EVIDENCE ?? 'unavailable') }
+      else { verdict = 'PASS'; detail = meta.PORT_PRIVATE + '; listeners: ' + (meta.LISTENER_DETAIL || 'unknown') }
     } else if (row.kind === 'prodreview') {
       // Separate security review required for uncertified production changes (owner condition 4).
       const p = meta.PROD_REVIEW_PENDING
@@ -325,7 +331,7 @@ export function renderEvidence({ meta, phases, result, generated }) {
   L.push('| Chromium (browser.version()) | ' + v(meta.BROWSER_VERSION) + ' |')
   L.push('| Node.js | ' + v(meta.NODE_VERSION) + ' |')
   L.push('| Session UTC | ' + v(meta.SESSION_START) + ' → ' + v(meta.SESSION_END) + ' |')
-  L.push('| Mode | ' + v(meta.MODE) + ' (Codespaces: ' + v(meta.CODESPACES) + ', noVNC port privacy: ' + v(meta.PORT_PRIVATE) + ') |', '')
+  L.push('| Mode | ' + v(meta.MODE) + ' (Codespaces: ' + v(meta.CODESPACES) + ', noVNC port privacy: ' + v(meta.PORT_PRIVATE) + ', IPv4/IPv6 listener evidence: ' + v(meta.LISTENER_EVIDENCE) + ') |', '')
   L.push('## Phases', '', '| Phase | Executed | Start UTC | End UTC | Exit |', '|---|---|---|---|---|')
   for (const [id, def] of Object.entries(PHASES)) {
     const p = phases[id]

@@ -164,35 +164,371 @@ c1_check_localhost() {
   (( ok ))
 }
 
-# c1_port_free PORT  -> 0 if nothing listens on the TCP port (any address)
-c1_port_free() {
-  local port=$1
-  if command -v ss >/dev/null 2>&1; then
-    [[ -z "$(ss -Hltn "sport = :$port" 2>/dev/null)" ]]
+# ------------------------------------------------ listener evidence (M-3) --
+# Every TCP-listener decision is FAIL-CLOSED and drawn from two independent
+# sources that must agree: the kernel tables /proc/net/tcp and /proc/net/tcp6
+# (IPv4 and IPv6) and `ss -Hltne`. Ownership is proved by socket inode
+# (/proc/PID/fd -> socket:[INODE]), never by parsing ss's users: text. Missing,
+# unreadable, malformed, empty-but-inconsistent or contradictory evidence is a
+# FAILURE (return 1 / 2), never "no listener".
+# Constants (not environment-overridable; the regression tests reassign them
+# after sourcing to feed fixture kernel tables and a fake ss through the REAL
+# parsers).
+C1_PROC_NET=/proc/net
+C1_SS_BIN=ss
+
+# c1_v6_canon TEXT -> RFC 5952 lowercase form of an IPv6 address (no brackets).
+# Accepts "::" compression and an embedded dotted IPv4 tail. rc 1 if malformed.
+# The _v variants assign C1_CANON instead of printing (no subshell: these run in
+# the bounded teardown loops through c1_port_free).
+c1_v6_canon() { _c1_v6_canon_v "$1" || return 1; printf '%s' "$C1_CANON"; }
+_c1_v6_canon_v() {
+  C1_CANON=''
+  local a=${1,,} head tail g i best=-1 bestlen=0 run=-1 runlen=0 res=''
+  local -a hg=() tg=() all=()
+  [[ "$a" =~ ^[0-9a-f:.]{2,45}$ ]] || return 1
+  if [[ "$a" =~ ^(.*:)([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+    for i in 2 3 4 5; do (( 10#${BASH_REMATCH[i]} <= 255 )) || return 1; done
+    printf -v g '%x:%x' $(( 10#${BASH_REMATCH[2]} * 256 + 10#${BASH_REMATCH[3]} )) $(( 10#${BASH_REMATCH[4]} * 256 + 10#${BASH_REMATCH[5]} ))
+    a=${BASH_REMATCH[1]}$g
+  fi
+  if [[ "$a" == *::* ]]; then
+    head=${a%%::*} tail=${a#*::}
+    [[ "$tail" != *::* ]] || return 1
+    if [[ -n "$head" ]]; then IFS=: read -ra hg <<<"$head"; fi
+    if [[ -n "$tail" ]]; then IFS=: read -ra tg <<<"$tail"; fi
+    (( ${#hg[@]} + ${#tg[@]} <= 7 )) || return 1
+    all=("${hg[@]}")
+    for (( i = ${#hg[@]} + ${#tg[@]}; i < 8; i++ )); do all+=(0); done
+    all+=("${tg[@]}")
   else
-    ! (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null
+    IFS=: read -ra all <<<"$a"
+    [[ "$a" != *: ]] || return 1
+  fi
+  (( ${#all[@]} == 8 )) || return 1
+  for (( i = 0; i < 8; i++ )); do
+    g=${all[i]}
+    [[ "$g" =~ ^[0-9a-f]{1,4}$ ]] || return 1
+    all[i]=$(( 16#$g ))
+  done
+  for (( i = 0; i < 8; i++ )); do       # longest run (>= 2) of zero groups, first wins
+    if (( all[i] == 0 )); then
+      (( run < 0 )) && { run=$i; runlen=0; }
+      runlen=$(( runlen + 1 ))
+      if (( runlen > bestlen )); then best=$run; bestlen=$runlen; fi
+    else run=-1; fi
+  done
+  (( bestlen >= 2 )) || best=-1
+  for (( i = 0; i < 8; i++ )); do
+    if (( i == best )); then res+='::'; i=$(( best + bestlen - 1 )); continue; fi
+    [[ -z "$res" || "$res" == *: ]] || res+=':'
+    printf -v g '%x' "${all[i]}"; res+=$g
+  done
+  C1_CANON=$res
+}
+
+# c1_canon_hostport TEXT -> canonical "a.b.c.d:PORT" or "[v6]:PORT" (ss syntax:
+# "*:P" is the dual-stack wildcard [::]; a "%iface" scope suffix is dropped).
+c1_canon_hostport() { _c1_canon_hostport_v "$1" || return 1; printf '%s' "$C1_CANON"; }
+_c1_canon_hostport_v() {
+  local t=$1 h p v6
+  if [[ "$t" =~ ^\*:([0-9]{1,5})$ ]]; then h='::'; p=${BASH_REMATCH[1]}; v6=1
+  elif [[ "$t" =~ ^\[([0-9A-Fa-f:.]+)(%[A-Za-z0-9_.@-]+)?\](%[A-Za-z0-9_.@-]+)?:([0-9]{1,5})$ ]]; then h=${BASH_REMATCH[1]}; p=${BASH_REMATCH[4]}; v6=1
+  elif [[ "$t" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(%[A-Za-z0-9_.@-]+)?:([0-9]{1,5})$ ]]; then
+    local i; for i in 1 2 3 4; do (( 10#${BASH_REMATCH[i]} <= 255 )) || return 1; done
+    h=$(( 10#${BASH_REMATCH[1]} )).$(( 10#${BASH_REMATCH[2]} )).$(( 10#${BASH_REMATCH[3]} )).$(( 10#${BASH_REMATCH[4]} )); p=${BASH_REMATCH[6]}; v6=0
+  else return 1; fi
+  (( 10#$p <= 65535 )) || return 1
+  if (( v6 )); then _c1_v6_canon_v "$h" || return 1; printf -v C1_CANON '[%s]:%d' "$C1_CANON" $(( 10#$p ))
+  else printf -v C1_CANON '%s:%d' "$h" $(( 10#$p )); fi
+}
+
+# c1_proc_hex_addr FAMILY HEXADDR:HEXPORT -> canonical host:port. The kernel
+# prints each 32-bit address word in host (little-endian) byte order.
+c1_proc_hex_addr() { _c1_proc_hex_addr_v "$1" "$2" || return 1; printf '%s' "$C1_CANON"; }
+_c1_proc_hex_addr_v() {
+  local fam=$1 x=$2 a p w i res=''
+  if [[ $fam == 4 ]]; then
+    [[ "$x" =~ ^([0-9A-Fa-f]{8}):([0-9A-Fa-f]{4})$ ]] || return 1
+    a=${BASH_REMATCH[1]} p=${BASH_REMATCH[2]}
+    printf -v C1_CANON '%d.%d.%d.%d:%d' $(( 16#${a:6:2} )) $(( 16#${a:4:2} )) $(( 16#${a:2:2} )) $(( 16#${a:0:2} )) $(( 16#$p ))
+  else
+    [[ "$x" =~ ^([0-9A-Fa-f]{32}):([0-9A-Fa-f]{4})$ ]] || return 1
+    a=${BASH_REMATCH[1]} p=${BASH_REMATCH[2]}
+    for i in 0 8 16 24; do
+      w=${a:i:8}
+      res+=${w:6:2}${w:4:2}:${w:2:2}${w:0:2}:
+    done
+    _c1_v6_canon_v "${res%:}" || return 1
+    printf -v C1_CANON '[%s]:%d' "$C1_CANON" $(( 16#$p ))
   fi
 }
 
-# c1_listeners_for_pids PIDS...  -> "addr:port" lines for TCP listeners of pids
-c1_listeners_for_pids() {
-  local p
-  ss -Hltnp 2>/dev/null | while read -r _ _ _ local _ users; do
-    for p in "$@"; do
-      if [[ "$users" == *"pid=$p,"* ]]; then printf '%s\n' "$local"; fi
+# c1_parse_proc_net_listen FAMILY FILE -> "INODE host:port" per TCP LISTEN row.
+# rc 1 on an unreadable/empty file, a missing or wrong header, or ANY malformed row.
+c1_parse_proc_net_listen() {
+  local fam=$1 file=$2 hdr sl la ra st _q _tr _rt _uid _to ino _rest addr
+  [[ -r "$file" && -f "$file" ]] || { c1_err "listener evidence: cannot read $file"; return 1; }
+  {
+    IFS= read -r hdr || { c1_err "listener evidence: $file is empty"; return 1; }
+    [[ "$hdr" =~ ^[[:space:]]*sl[[:space:]]+local_address[[:space:]]+(rem_address|remote_address)[[:space:]]+st[[:space:]] && "$hdr" == *inode* ]] \
+      || { c1_err "listener evidence: unexpected header in $file"; return 1; }
+    while read -r sl la ra st _q _tr _rt _uid _to ino _rest; do
+      [[ -z "$sl" ]] && continue
+      [[ "$sl" =~ ^[0-9]+:$ && "$st" =~ ^[0-9A-Fa-f]{2}$ && "$ino" =~ ^[0-9]+$ ]] \
+        || { c1_err "listener evidence: malformed row in $file"; return 1; }
+      _c1_proc_hex_addr_v "$fam" "$ra" || { c1_err "listener evidence: malformed address in $file"; return 1; }
+      _c1_proc_hex_addr_v "$fam" "$la" || { c1_err "listener evidence: malformed address in $file"; return 1; }
+      addr=$C1_CANON
+      [[ "${st^^}" == 0A ]] || continue
+      (( ino > 0 )) || { c1_err "listener evidence: LISTEN socket $addr without an inode in $file"; return 1; }
+      printf '%s %s\n' "$ino" "$addr"
     done
-  done | sort -u
+  } <"$file"
+}
+
+# c1_ipv6_unavailable -> 0 only if this network namespace demonstrably has no
+# IPv6: no tcp6 table, no if_inet6, and the kernel refuses AF_INET6 sockets.
+c1_ipv6_unavailable() {
+  [[ ! -e "$C1_PROC_NET/tcp6" && ! -e "$C1_PROC_NET/if_inet6" ]] || return 1
+  ! python3 -I -c 'import socket; socket.socket(socket.AF_INET6, socket.SOCK_STREAM).close()' 2>/dev/null
+}
+
+# c1_proc_listen_table -> "INODE host:port" for every IPv4 AND IPv6 TCP listener.
+c1_proc_listen_table() {
+  local t4 t6=''
+  t4=$(c1_parse_proc_net_listen 4 "$C1_PROC_NET/tcp") || return 1
+  if [[ -e "$C1_PROC_NET/tcp6" ]]; then t6=$(c1_parse_proc_net_listen 6 "$C1_PROC_NET/tcp6") || return 1
+  elif ! c1_ipv6_unavailable; then c1_err 'listener evidence: IPv6 is available but no IPv6 TCP table could be read'; return 1
+  fi
+  printf '%s\n' "$t4" "$t6" | sed '/^$/d'
+}
+
+# c1_parse_ss_listen -> "INODE host:port" from `ss -Hltne` text on stdin.
+# rc 1 on any line that is not a well-formed LISTEN row with exactly one ino:N.
+c1_parse_ss_listen() {
+  local line st q1 q2 la pa rest tok ino addr
+  while IFS= read -r line; do
+    [[ -n "${line//[[:space:]]/}" ]] || continue
+    read -r st q1 q2 la pa rest <<<"$line"
+    [[ "$st" == LISTEN && "$q1" =~ ^[0-9]+$ && "$q2" =~ ^[0-9]+$ && -n "$pa" ]] \
+      || { c1_err 'listener evidence: malformed ss row'; return 1; }
+    ino=''
+    for tok in $rest; do
+      if [[ "$tok" =~ ^ino:([0-9]+)$ ]]; then
+        [[ -z "$ino" ]] || { c1_err 'listener evidence: ss row with several inodes'; return 1; }
+        ino=${BASH_REMATCH[1]}
+      fi
+    done
+    [[ -n "$ino" ]] && (( ino > 0 )) || { c1_err 'listener evidence: ss row without a socket inode'; return 1; }
+    _c1_canon_hostport_v "$la" || { c1_err 'listener evidence: ss row with a malformed local address'; return 1; }
+    addr=$C1_CANON
+    printf '%s %s\n' "$ino" "$addr"
+  done
+}
+
+# c1_ss_listen_table -> parsed `ss -Hltne`; rc 1 if ss is missing, fails or is malformed.
+c1_ss_listen_table() {
+  local out
+  command -v "$C1_SS_BIN" >/dev/null 2>&1 || { c1_err 'listener evidence: ss (iproute2) is unavailable'; return 1; }
+  out=$("$C1_SS_BIN" -Hltne 2>/dev/null) || { c1_err 'listener evidence: ss failed'; return 1; }
+  c1_parse_ss_listen <<<"$out"
+}
+
+# c1_listen_tables -> sets C1_LT_PROC / C1_LT_SS (both validated, cross-checked
+# for blindness: one source empty while the other is not is a failure).
+c1_listen_tables() {
+  C1_LT_PROC='' C1_LT_SS=''
+  C1_LT_PROC=$(c1_proc_listen_table) || return 1
+  C1_LT_SS=$(c1_ss_listen_table) || return 1
+  if { [[ -z "$C1_LT_PROC" ]] && [[ -n "$C1_LT_SS" ]]; } || { [[ -n "$C1_LT_PROC" ]] && [[ -z "$C1_LT_SS" ]]; }; then
+    c1_err 'listener evidence: kernel tables and ss disagree (one reports no listeners at all)'; return 1
+  fi
+}
+
+# c1_port_free PORT -> 0 only if BOTH sources prove nothing listens on PORT on
+# any IPv4 or IPv6 address; 1 if something listens; 2 if that cannot be proven.
+# (Callers treat any non-zero as "not free", so missing evidence fails closed.)
+c1_port_free() {
+  local port=$1 ino addr hit=0
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] || return 2
+  c1_listen_tables 2>/dev/null || return 2
+  while read -r ino addr; do
+    [[ -n "$ino" ]] || continue
+    [[ "${addr##*:}" == "$((10#$port))" ]] && hit=1
+  done <<<"$C1_LT_PROC"$'\n'"$C1_LT_SS"
+  (( hit == 0 )) || return 1
+}
+
+# c1_self_chain -> this (sub)shell and its ancestors up to and including the
+# top-level script $$ (excluded from orphan reports only; never from listener scans).
+c1_self_chain() {
+  local p=${BASHPID:-$$} n=0
+  while [[ "$p" =~ ^[0-9]+$ ]] && (( p > 1 && n < 64 )); do
+    printf '%s\n' "$p"; n=$((n + 1))
+    [[ "$p" == "$$" ]] && break
+    p=$(awk '{sub(/^.*\) /, ""); print $2}' "/proc/$p/stat" 2>/dev/null) || break
+  done
+}
+
+# c1_proc_tree -> "PID PPID SID" for every readable process (comm may contain spaces/parens).
+c1_proc_tree() {
+  local d f
+  for d in /proc/[0-9]*; do
+    f=$(awk '{sub(/^.*\) /, ""); print $2, $4}' "$d/stat" 2>/dev/null) || continue
+    [[ -n "$f" ]] && printf '%s %s\n' "${d#/proc/}" "$f"
+  done
+}
+
+# c1_tree_attributed PID -> 0 if PID is a live recorded leader, in a leader's
+# setsid session, or descends from a leader (needs C1_TREE_PPID/SID, C1_TREE_LEAD).
+c1_tree_attributed() {
+  local p=$1 n=0
+  [[ -n "${C1_TREE_LEAD[$p]:-}" || -n "${C1_TREE_LEAD[${C1_TREE_SID[$p]:-x}]:-}" ]] && return 0
+  while (( n++ < 64 )); do
+    p=${C1_TREE_PPID[$p]:-}
+    [[ "$p" =~ ^[0-9]+$ ]] && (( p > 1 )) || return 1
+    [[ -n "${C1_TREE_LEAD[$p]:-}" ]] && return 0
+  done
+  return 1
+}
+
+# c1_load_tree SESSION -> fills C1_TREE_* (strict=1: a malformed record or a
+# live recorded process whose marker cannot be read is an error, rc 1).
+c1_load_tree() {
+  local s=$1 strict=${2:-0} pid st extra pp sd
+  declare -gA C1_TREE_LEAD=() C1_TREE_PPID=() C1_TREE_SID=()
+  if [[ -e "$s/pids" ]]; then
+    [[ -r "$s/pids" ]] || { (( ! strict )) || { c1_err 'listener evidence: harness pid record unreadable'; return 1; }; }
+    while read -r pid st extra; do
+      [[ -n "$pid" ]] || continue
+      if ! [[ "$pid" =~ ^[0-9]+$ && "$st" =~ ^[0-9]+$ && -z "$extra" ]]; then
+        (( ! strict )) || { c1_err 'listener evidence: malformed harness pid record'; return 1; }; continue
+      fi
+      [[ "$(c1_proc_start "$pid")" == "$st" ]] || continue            # exited
+      [[ "$(c1_proc_stat_field "$pid" 1)" =~ ^[ZX]$ ]] && continue     # zombie holds no sockets
+      if ! c1_pid_has_marker "$pid" "$s"; then
+        [[ "$(c1_proc_start "$pid")" == "$st" ]] || continue          # exited meanwhile
+        (( ! strict )) || { c1_err "listener evidence: recorded harness process $pid is running but its session marker cannot be verified"; return 1; }
+        continue
+      fi
+      C1_TREE_LEAD[$pid]=1
+    done <"$s/pids"
+  fi
+  while read -r pid pp sd; do C1_TREE_PPID[$pid]=$pp; C1_TREE_SID[$pid]=$sd; done < <(c1_proc_tree)
+}
+
+# c1_harness_pids SESSION -> every process attributable to the session: marker
+# carriers, live recorded c1_spawn leaders, members of their setsid sessions and
+# their descendants (a child that dropped the marker with env -i, or that called
+# setsid itself, as fluxbox does for fbsetbg, stays attributable).
+# rc 1 if the record is malformed or a live recorded process cannot be verified.
+c1_harness_pids() {
+  local s=$1 pid
+  local -A attrib=()
+  c1_load_tree "$s" 1 || return 1
+  for pid in "${!C1_TREE_PPID[@]}"; do
+    if c1_tree_attributed "$pid" || c1_pid_has_marker "$pid" "$s"; then attrib[$pid]=1; fi
+  done
+  (( ${#attrib[@]} )) && printf '%s\n' "${!attrib[@]}" | sort -n
   return 0
 }
 
-# c1_assert_loopback_only "addr:port" lines on stdin
+# c1_pid_socket_inodes PID START -> socket inodes held by PID. rc 1 if PID is
+# still the same live process but its fd table cannot be read (fail closed).
+c1_pid_socket_inodes() {
+  local pid=$1 st=$2 f l
+  local -a inos=()
+  if [[ ! -r "/proc/$pid/fd" || ! -x "/proc/$pid/fd" ]]; then
+    [[ "$(c1_proc_start "$pid")" == "$st" && ! "$(c1_proc_stat_field "$pid" 1)" =~ ^[ZX]$ ]] || return 0
+    c1_err "listener evidence: cannot read the fd table of harness process $pid"; return 1
+  fi
+  for f in "/proc/$pid/fd/"*; do
+    l=$(readlink "$f" 2>/dev/null) || continue          # fd closed meanwhile
+    [[ "$l" =~ ^socket:\[([0-9]+)\]$ ]] && inos+=("${BASH_REMATCH[1]}")
+  done
+  # PID reused while scanning: the original process is gone (holds nothing).
+  [[ "$(c1_proc_start "$pid")" == "$st" ]] || return 0
+  (( ${#inos[@]} )) && printf '%s\n' "${inos[@]}"
+  return 0
+}
+
+c1_safe_comm() { local c; c=$(head -c 64 "/proc/$1/comm" 2>/dev/null | tr -cd 'A-Za-z0-9._-'); printf '%s' "${c:0:16}"; }
+
+# c1_harness_listeners SESSION -> "host:port pid=N comm=C ino=I" per harness-
+# owned TCP listener (IPv4 and IPv6), sorted. rc 1 = evidence unavailable or
+# inconsistent: callers MUST fail closed; nothing is printed on rc 1.
+# Observed inodes are recorded in SESSION/listen-inodes for cleanup verification (L-3).
+c1_harness_listeners() {
+  local s=$1 pid st ino addr pidlist inos comm
+  local -A own=() kt=() sst=()
+  local -a rows=()
+  pidlist=$(c1_harness_pids "$s") || return 1
+  for pid in $pidlist; do
+    st=$(c1_proc_start "$pid"); [[ -n "$st" ]] || continue
+    inos=$(c1_pid_socket_inodes "$pid" "$st") || return 1
+    comm=$(c1_safe_comm "$pid")
+    for ino in $inos; do own[$ino]+="$pid:${comm:-unknown} "; done
+  done
+  c1_listen_tables || return 1
+  while read -r ino addr; do [[ -n "$ino" ]] && kt[$ino]=$addr; done <<<"$C1_LT_PROC"
+  while read -r ino addr; do [[ -n "$ino" ]] && sst[$ino]=$addr; done <<<"$C1_LT_SS"
+  for ino in "${!own[@]}"; do
+    if [[ -n "${kt[$ino]:-}" ]]; then
+      [[ "${sst[$ino]:-}" == "${kt[$ino]}" ]] \
+        || { c1_err "listener evidence: harness socket $ino is listening on ${kt[$ino]} in the kernel table but ss reports '${sst[$ino]:-nothing}'"; return 1; }
+      for pid in ${own[$ino]}; do rows+=("${kt[$ino]} pid=${pid%%:*} comm=${pid#*:} ino=$ino"); done
+      printf '%s\n' "$ino" >>"$s/listen-inodes" 2>/dev/null || true
+    elif [[ -n "${sst[$ino]:-}" ]]; then
+      c1_err "listener evidence: ss reports harness socket $ino listening on ${sst[$ino]} but the kernel tables do not"; return 1
+    fi
+  done
+  (( ${#rows[@]} )) && printf '%s\n' "${rows[@]}" | LC_ALL=C sort -u
+  return 0
+}
+
+# c1_harness_orphans SESSION -> "pid=N comm=C" for marked processes that are
+# neither this shell's chain nor attributable to a live recorded c1_spawn leader
+# (e.g. a Vite or browser left over from an earlier phase; L-2). Report only.
+c1_harness_orphans() {
+  local s=$1 pid
+  local -A self=()
+  for pid in $(c1_self_chain); do self[$pid]=1; done
+  c1_load_tree "$s" 0 || return 0
+  local p n
+  for pid in "${!C1_TREE_PPID[@]}"; do
+    [[ -n "${self[$pid]:-}" ]] && continue
+    c1_tree_attributed "$pid" && continue
+    p=$pid n=0                                   # live descendants of this script (its own subshells, a running phase)
+    while (( n++ < 64 )) && [[ "${C1_TREE_PPID[$p]:-}" =~ ^[0-9]+$ ]] && (( ${C1_TREE_PPID[$p]} > 1 )); do
+      p=${C1_TREE_PPID[$p]}; [[ -n "${self[$p]:-}" ]] && continue 2
+    done
+    c1_pid_has_marker "$pid" "$s" || continue
+    printf 'pid=%s comm=%s\n' "$pid" "$(c1_safe_comm "$pid")"
+  done | sort -t= -k2 -n
+}
+
+# c1_listener_state SESSION STATE DETAIL -> records the listener verdict for the
+# evidence (STATE: verified | failed-unexpected | failed-unavailable). The detail
+# is sanitized: addresses, pids, comm names and inodes only (no environ/argv).
+c1_listener_state() {
+  local d=${3//$'\n'/; }
+  d=$(printf '%s' "$d" | tr -cd 'A-Za-z0-9.:;=, _[]-'); d=${d:0:200}
+  printf '%s\n%s\n' "$2" "$d" >"$1/listener-state" 2>/dev/null || true
+}
+
+# c1_assert_loopback_only "host:port" lines on stdin (canonical forms, or the
+# rows of c1_harness_listeners). IPv4 127/8 and IPv6 ::1 only; wildcards
+# (0.0.0.0, [::], *), external and IPv4-mapped addresses are all rejected.
 c1_assert_loopback_only() {
-  local l bad=0
-  while read -r l; do
+  local l a bad=0
+  while read -r l _; do
     [[ -z "$l" ]] && continue
-    case "$l" in
+    _c1_canon_hostport_v "$l" || { c1_err "unparseable listener address: $l"; bad=1; continue; }
+    a=$C1_CANON
+    case "$a" in
       127.*:*|'[::1]':*) ;;
-      *) c1_err "non-loopback listener detected: $l"; bad=1 ;;
+      *) c1_err "non-loopback listener detected: $a"; bad=1 ;;
     esac
   done
   (( bad == 0 ))
@@ -403,6 +739,14 @@ c1_cleanup_session() {
       sleep 0.5
     done
   done
+  # L-3: keep the observed listener inodes so c1_verify_cleanup can prove none
+  # of them is still listening after the session directory is gone.
+  if [[ -s "$s/listen-inodes" ]]; then
+    ( umask 077; LC_ALL=C sort -u "$s/listen-inodes" >>"$root/.${s##*/}.inodes" ) || true
+  fi
+  # ...and the recorded "pid starttime" pairs, so a recorded process that cannot
+  # be signalled (it lost its marker) is still reported as surviving.
+  if [[ -s "$s/pids" ]]; then ( umask 077; cat -- "$s/pids" >>"$root/.${s##*/}.pids" ) || true; fi
   if [[ -d "$s" ]]; then c1_safe_rm "$s" "$root" || return 1; fi
   if [[ -f "$root/active" ]]; then
     local as; as=$(c1_session_dir "$root" || true)
@@ -416,16 +760,46 @@ c1_cleanup_all() {
   local root=$1 s
   [[ -d "$root" ]] || return 0
   for s in "$root"/session.*; do if [[ -d "$s" ]]; then c1_cleanup_session "$root" "$s"; fi; done
-  rm -f -- "$root/active"
+  rm -f -- "$root/active" "$root"/.session.*.inodes "$root"/.session.*.pids
 }
 
-# c1_verify_cleanup SESSION -> 0 if no marked processes and no harness listeners
+# c1_verify_cleanup SESSION -> 0 if no marked processes, no session files, ports
+# 6080/5173 provably closed and no listener inode recorded during the session
+# still listening (L-3). Unavailable listener evidence is a cleanup FAILURE.
 c1_verify_cleanup() {
-  local s=$1 ok=0
+  local s=$1 ok=0 rc reg ino addr
+  local -A live=()
   [[ -z "$(c1_marked_pids "$s")" ]] || { c1_err 'harness processes still running'; ok=1; }
   [[ ! -e "$s" ]] || { c1_err 'session directory still present'; ok=1; }
-  c1_port_free "$C1_NOVNC_PORT" || { c1_err "port $C1_NOVNC_PORT still listening"; ok=1; }
-  c1_port_free "$C1_APP_PORT" || { c1_err "port $C1_APP_PORT still listening"; ok=1; }
+  rc=0; c1_port_free "$C1_NOVNC_PORT" || rc=$?
+  (( rc == 0 )) || { if (( rc == 2 )); then c1_err "cannot prove port $C1_NOVNC_PORT is closed (listener evidence unavailable)"; else c1_err "port $C1_NOVNC_PORT still listening"; fi; ok=1; }
+  rc=0; c1_port_free "$C1_APP_PORT" || rc=$?
+  (( rc == 0 )) || { if (( rc == 2 )); then c1_err "cannot prove port $C1_APP_PORT is closed (listener evidence unavailable)"; else c1_err "port $C1_APP_PORT still listening"; fi; ok=1; }
+  local preg pid st
+  preg="$(dirname -- "$s")/.${s##*/}.pids"
+  if [[ -e "$preg" ]]; then
+    local alive=0
+    while read -r pid st _; do
+      [[ "$pid" =~ ^[0-9]+$ && "$st" =~ ^[0-9]+$ ]] || continue
+      if [[ "$(c1_proc_start "$pid")" == "$st" && ! "$(c1_proc_stat_field "$pid" 1)" =~ ^[ZX]$ ]]; then
+        c1_err "recorded harness process $pid ($(c1_safe_comm "$pid")) is still running"; alive=1
+      fi
+    done <"$preg"
+    if (( alive )); then ok=1; else rm -f -- "$preg"; fi
+  fi
+  reg="$(dirname -- "$s")/.${s##*/}.inodes"
+  if [[ -e "$reg" ]]; then
+    if c1_listen_tables; then
+      while read -r ino addr; do [[ -n "$ino" ]] && live[$ino]=$addr; done <<<"$C1_LT_PROC"$'\n'"$C1_LT_SS"
+      while read -r ino; do
+        [[ "$ino" =~ ^[0-9]+$ ]] || continue
+        [[ -z "${live[$ino]:-}" ]] || { c1_err "harness listener inode $ino is still listening on ${live[$ino]}"; ok=1; }
+      done <"$reg"
+    else
+      c1_err 'cannot prove recorded harness listeners are closed (listener evidence unavailable)'; ok=1
+    fi
+    (( ok )) || rm -f -- "$reg"
+  fi
   return $ok
 }
 
@@ -448,14 +822,30 @@ c1_gen_password() {
 
 # Command builders are separate so the security flags can be regression-tested.
 c1_cmd_xvfb()   { printf '%s\n' Xvfb "$1" -screen 0 1600x1000x24 -nolisten tcp -nolisten local -auth "$2/Xauthority"; }
-c1_cmd_x11vnc() { printf '%s\n' x11vnc -display "$1" -auth "$2/Xauthority" -rfbport 0 -unixsock "$2/vnc.sock" \
+# H-1: `-rfbport 0` disables only the IPv4 listener. LibVNCServer defaults
+# ipv6port=5900 and binds the wildcard [::]:5900 unless `-rfbportv6 0` is also
+# given (`-no6`/`-noipv6` alone were verified insufficient). Both are passed.
+c1_cmd_x11vnc() { printf '%s\n' x11vnc -display "$1" -auth "$2/Xauthority" -rfbport 0 -rfbportv6 0 -no6 -unixsock "$2/vnc.sock" \
                     -passwdfile "rm:$2/vncpass" -forever -noxdamage -nolookup -norc -nossl -quiet -o "$2/log/x11vnc.log"; }
 c1_cmd_websockify() { printf '%s\n' websockify --web "$C1_NOVNC_WEB" --unix-target="$2/vnc.sock" "127.0.0.1:$1"; }
+
+# c1_close_inherited_fds -> close every fd above 2 in the CURRENT shell (L-1).
+# Used only inside c1_spawn's child subshell, so a harness process can never
+# inherit (and be misattributed with, or expose) a listening socket of its parent.
+c1_close_inherited_fds() {
+  local f n
+  local -a fds=()
+  for f in "/proc/${BASHPID:-$$}/fd/"*; do fds+=("${f##*/}"); done
+  for n in "${fds[@]}"; do
+    [[ "$n" =~ ^[0-9]+$ ]] && (( n > 2 )) || continue
+    exec {n}>&-
+  done
+}
 
 # c1_spawn SESSION NAME CMD...  start detached in own process group, record pid
 c1_spawn() {
   local s=$1 name=$2; shift 2
-  env C1_HARNESS_SESSION="$s" setsid "$@" >"$s/log/$name.log" 2>&1 </dev/null &
+  ( c1_close_inherited_fds; exec env C1_HARNESS_SESSION="$s" setsid "$@" ) >"$s/log/$name.log" 2>&1 </dev/null &
   local pid=$! st=''
   disown "$pid" 2>/dev/null || true   # no job-status noise when cleanup kills it
   for _ in 1 2 3 4 5 6 7 8 9 10; do st=$(c1_proc_start "$pid"); [[ -n "$st" ]] && break; sleep 0.02; done
@@ -487,9 +877,29 @@ c1_start_display_vnc() {
   chmod 600 "$s/vnc.sock" 2>/dev/null || true
   for _ in $(seq 1 30); do [[ ! -e "$s/vncpass" ]] && break; sleep 0.1; done
   [[ ! -e "$s/vncpass" ]] || { c1_err 'x11vnc did not consume the one-time password file'; return 1; }
-  # Nothing in the session may listen on TCP yet.
-  # shellcheck disable=SC2046
-  [[ -z "$(c1_listeners_for_pids $(c1_marked_pids "$s"))" ]] || { c1_err 'unexpected TCP listener before noVNC start'; return 1; }
+  c1_assert_no_listeners_before_novnc "$s"
+}
+
+# c1_assert_no_listeners_before_novnc SESSION -> nothing attributable to the
+# session may listen on TCP (IPv4 or IPv6, any address) before noVNC starts.
+# Fails closed when the evidence is unavailable. Offending rows (address, pid,
+# comm, inode; never environ/argv) go to the terminal and the evidence (M-2);
+# marked processes not started by the desktop are reported (L-2).
+c1_assert_no_listeners_before_novnc() {
+  local s=$1 got orph
+  orph=$(c1_harness_orphans "$s")
+  if [[ -n "$orph" ]]; then c1_warn "marked processes not started by the desktop: ${orph//$'\n'/; }"; fi
+  if ! got=$(c1_harness_listeners "$s"); then
+    c1_err 'listener evidence unavailable before noVNC start; failing closed'
+    c1_listener_state "$s" failed-unavailable 'pre-novnc evidence unavailable'
+    return 1
+  fi
+  if [[ -n "$got" ]]; then
+    c1_err 'unexpected TCP listener before noVNC start:'
+    printf '[c1]   %s\n' "${got//$'\n'/$'\n'[c1]   }" >&2
+    c1_listener_state "$s" failed-unexpected "pre-novnc: $got${orph:+; orphans: $orph}"
+    return 1
+  fi
 }
 
 # c1_start_websockify SESSION PORT -> noVNC/websockify on 127.0.0.1:PORT only; prints pid.
@@ -522,11 +932,20 @@ c1_start_desktop() {
 # Every harness TCP listener must be exactly the loopback noVNC port: Xvfb and
 # x11vnc must expose none (X uses a Unix socket, VNC a 0600 Unix socket).
 c1_assert_desktop_listeners() {
-  local s=$1 port=$2 got
-  # shellcheck disable=SC2046
-  got=$(c1_listeners_for_pids $(c1_marked_pids "$s"))
-  printf '%s\n' "$got" | c1_assert_loopback_only || return 1
-  [[ "$got" == "127.0.0.1:$port" ]] || { c1_err "unexpected harness listener set: ${got//$'\n'/ }"; return 1; }
+  local s=$1 port=$2 got addrs
+  if ! got=$(c1_harness_listeners "$s"); then
+    c1_err 'listener evidence unavailable after noVNC start; failing closed'
+    c1_listener_state "$s" failed-unavailable 'desktop evidence unavailable'
+    return 1
+  fi
+  addrs=$(awk 'NF {print $1}' <<<"$got" | LC_ALL=C sort -u)
+  if ! c1_assert_loopback_only <<<"$addrs" || [[ "$addrs" != "127.0.0.1:$port" ]]; then
+    c1_err "unexpected harness listener set (expected exactly 127.0.0.1:$port):"
+    printf '[c1]   %s\n' "${got:-none}" | sed '2,$s/^/[c1]   /' >&2
+    c1_listener_state "$s" failed-unexpected "desktop: ${got:-none}"
+    return 1
+  fi
+  c1_listener_state "$s" verified "$got"
 }
 
 # ------------------------------------------------- Codespaces port privacy --
