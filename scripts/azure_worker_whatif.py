@@ -66,21 +66,26 @@ AZURE_CLI_CODE = re.compile(r'^\s*(?:ERROR:\s*)?\(([A-Za-z][A-Za-z0-9]*)\)', re.
 def classify_azure_failure(stderr):
     if not isinstance(stderr, str) or len(stderr) > 65536:
         return 'unknown'
-    first = next((line for line in stderr.splitlines() if line.strip()), '')
-    match = AZURE_CLI_CODE.match(first)
-    codes = []
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return 'unknown'
+    match = AZURE_CLI_CODE.match(lines[0])
     if match:
-        codes.append(match.group(1))
-    else:
-        try:
-            payload = json.loads(stderr)
-        except (TypeError, ValueError):
-            payload = None
-        if isinstance(payload, dict) and isinstance(payload.get('error'), dict):
-            code = payload['error'].get('code')
-            if isinstance(code, str) and re.fullmatch(r'[A-Za-z][A-Za-z0-9]*', code):
-                codes.append(code)
-    return AZURE_ERROR_CODES.get(codes[0], 'unknown') if len(codes) == 1 else 'unknown'
+        # A second leading CLI error token is ambiguous even if it repeats the
+        # first code. Only inspect line prefixes, never narrative substrings.
+        if any(AZURE_CLI_CODE.match(line) for line in lines[1:]):
+            return 'unknown'
+        return AZURE_ERROR_CODES.get(match.group(1), 'unknown')
+    try:
+        payload = json.loads(stderr)
+    except (TypeError, ValueError):
+        return 'unknown'
+    if not isinstance(payload, dict) or not isinstance(payload.get('error'), dict):
+        return 'unknown'
+    code = payload['error'].get('code')
+    if not isinstance(code, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9]*', code):
+        return 'unknown'
+    return AZURE_ERROR_CODES.get(code, 'unknown')
 
 
 def blocked_at(message, *, stage, category='not-classified'):
