@@ -93,11 +93,21 @@ class LedgerTests(unittest.TestCase):
                 if not self_assert:
                     raise AssertionError(path)
                 return ({"number": 81, "state": "open", "draft": True,
-                         "merged_at": None, "head": {"sha": self.sha},
-                         "base": {"ref": "main"}}, {})
+                         "merged_at": None,
+                         "head": {"sha": self.sha,
+                                  "repo": {"full_name": "ScottMDavistv/azure-text-to-video"}},
+                         "base": {"ref": "main",
+                                  "repo": {"full_name": "ScottMDavistv/azure-text-to-video"}}}, {})
         GitHubHeadVerifier(API()).assert_current(81, SHA)
         with self.assertRaises(ApprovalError):
             GitHubHeadVerifier(API("b"*40)).assert_current(81, SHA)
+        class Foreign(API):
+            def get(self, path):
+                result, headers = super().get(path)
+                result["head"]["repo"]["full_name"] = "attacker/fork"
+                return result, headers
+        with self.assertRaises(ApprovalError):
+            GitHubHeadVerifier(Foreign()).assert_current(81, SHA)
 
     def test_untrusted_head_provider_missing(self):
         with self.assertRaises(ApprovalError):
