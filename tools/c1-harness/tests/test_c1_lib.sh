@@ -1231,6 +1231,42 @@ ls -l /proc/$pid/fd/ > "$2/child-fds"; c1_harness_listeners "$2" > "$2/got"; ech
   }
   t 'cleanup verification with unavailable listener evidence is a FAILURE' cleanup_no_evidence
 
+  inode_record_write_denied() {  # a real owned listener cannot be declared clean when its inode cannot be recorded
+    local s pid port ino rc=0; s=$(newsess); export C1_HARNESS_SESSION=$s
+    read -r pid port ino < <(listen_on "$s" inode-write 127.0.0.1 spawn)
+    mkdir "$s/listen-inodes"  # redirection fails even when a real listener was observed
+    c1_harness_listeners "$s" >/dev/null 2>&1 || rc=$?
+    rmdir "$s/listen-inodes"
+    endsess "$s"
+    (( rc != 0 ))
+  }
+  t 'F-1: unwritable listener-inode record fails closed against a real harness socket' inode_record_write_denied
+
+  inode_preserve_denied() {  # cleanup may kill processes, but must retain source evidence when archival fails
+    local s rc=0; s=$(newsess)
+    printf '123456789\n' >"$s/listen-inodes"
+    mkdir "$ROOT/.${s##*/}.inodes"  # cannot append archived inodes to a directory
+    c1_cleanup_session "$ROOT" "$s" 2>/dev/null || rc=$?
+    (( rc != 0 )) && [[ -d "$s" && -s "$s/listen-inodes" ]] || return 1
+    rmdir "$ROOT/.${s##*/}.inodes"
+    c1_cleanup_session "$ROOT" "$s" && c1_verify_cleanup "$s"
+  }
+  t 'F-1: failed inode preservation retains session evidence and requires verified retry' inode_preserve_denied
+
+  cleanup_all_retains_survivor() {  # bulk recovery must not delete records of a surviving nonstandard listener
+    local s pid port ino rc=0 reg; s=$(newsess); export C1_HARNESS_SESSION=$s
+    read -r pid port ino < <(listen_on "$s" bulk-survivor 127.0.0.1 foreign)
+    printf '%s\n' "$ino" >"$s/listen-inodes"
+    unset C1_HARNESS_SESSION
+    c1_cleanup_all "$ROOT" 2>/dev/null || rc=$?
+    reg="$ROOT/.${s##*/}.inodes"
+    (( rc != 0 )) && [[ -s "$reg" ]] && alive "$pid" || { kill "$pid" 2>/dev/null || true; return 1; }
+    kill "$pid"; sleep 0.2
+    c1_cleanup_all "$ROOT" && [[ ! -e "$reg" ]]
+  }
+  t 'F-1: bulk cleanup preserves survivor evidence until listener closure is verified' cleanup_all_retains_survivor
+
+
   # ---- startup paths with adversarial desktop binaries ------------------------
   if command -v Xvfb >/dev/null && command -v fluxbox >/dev/null && command -v xauth >/dev/null; then
     mkdir -p "$ADV/evil"
