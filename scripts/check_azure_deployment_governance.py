@@ -35,6 +35,11 @@ assert "AZURE_DEPLOY_CLIENT_ID" not in preview
 assert "az deployment group what-if" in whatif
 assert "AZURE_DEPLOY_CLIENT_ID" in whatif
 assert "az deployment group create" in deploy
+for step in (whatif, deploy):
+    assert "--result-format FullResourcePayloads --output json" in step
+    assert "python scripts/verify_worker_image_whatif.py" in step
+    assert "umask 077" in step and "trap 'rm -f" in step
+assert deploy.index("python scripts/verify_worker_image_whatif.py") < deploy.index("az deployment group create")
 assert "AZURE_DEPLOY_CLIENT_ID" in deploy
 assert "AZURE_CLIENT_ID" not in deploy
 assert "az deployment group create" not in legacy, "Legacy broad deployment must remain disabled"
