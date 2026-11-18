@@ -11,19 +11,26 @@ B = "b" * 40
 def sample():
     task = {"repository": "ScottMDavistv/azure-text-to-video",
             "pinned_target_sha": A, "target_pr": 46, "coding_pr": 63,
-            "approved_remediation_issue": 62, "previous_review_head_sha": B}
+            "approved_remediation_issue": 62, "previous_review_head_sha": B,
+            "ci_policy_source": "trusted-protected-task-ledger",
+            "applicable_required_workflows": ["Backend Python Tests", "Security Checks"]}
     target = {"repository": task["repository"], "number": 46, "head_sha": A,
               "head_branch": "security/claude-nf02-nf08-nov16",
               "base_branch": "main", "state": "open", "draft": True}
     coding = {"repository": task["repository"], "number": 63,
               "origin_sha": A, "origin_provenance": "verified-creation-event",
+              "head_sha": B, "integrated_coding_head_sha": B,
+              "integration_target_pr": 46,
               "base_branch": "main", "state": "open", "draft": True,
               "integrated_in_target": True,
               "integration_provenance": "verified-git-ancestry",
               "integrated_head_sha": A}
     ci = [{"name": name, "head_sha": A, "status": "completed",
            "conclusion": "success", "event": "pull_request",
-           "actor": "github-actions"} for name in sorted(REQUIRED)]
+           "actor": "user", "trusted_workflow": True,
+           "provenance": "verified-github-workflow-api",
+           "workflow_path": ".github/workflows/tests.yml",
+           "workflow_ref": "refs/heads/main@" + B} for name in sorted(REQUIRED)]
     return task, target, coding, ci
 
 
@@ -104,10 +111,48 @@ class ReReviewChecks(unittest.TestCase):
         ci[0]["conclusion"] = "failure"
         self.assertEqual(prepare_review(t, p, c, ci)["state"], "blocked")
 
-    def test_non_github_actor_blocks(self):
+    def test_actor_not_used_as_workflow_provenance(self):
         t, p, c, ci = sample()
         ci[0]["actor"] = "user"
+        self.assertEqual(prepare_review(t, p, c, ci)["state"], "pending_owner_approval")
+
+    def test_wrong_coding_pr_and_target_binding_block(self):
+        for field, value in [("number", 999), ("integration_target_pr", 777),
+                             ("integrated_coding_head_sha", A), ("head_sha", "short"),
+                             ("repository", "attacker/repo")]:
+            with self.subTest(field=field):
+                t, p, c, ci = sample()
+                c[field] = value
+                self.assertEqual(prepare_review(t, p, c, ci)["state"], "blocked")
+
+    def test_non_main_target_blocks(self):
+        t, p, c, ci = sample()
+        p["base_branch"] = "feature"
         self.assertEqual(prepare_review(t, p, c, ci)["state"], "blocked")
+
+    def test_wrong_or_unattested_workflow_blocks(self):
+        for field, value in [("trusted_workflow", False), ("provenance", "PR-comment"),
+                             ("workflow_path", "malicious.yml"), ("workflow_ref", "refs/heads/evil@" + B),
+                             ("event", "push")]:
+            with self.subTest(field=field):
+                t, p, c, ci = sample()
+                ci[0][field] = value
+                self.assertEqual(prepare_review(t, p, c, ci)["state"], "blocked")
+
+    def test_path_filtered_applicable_checks(self):
+        t, p, c, ci = sample()
+        ci = [r for r in ci if r["name"] in t["applicable_required_workflows"]]
+        self.assertEqual(prepare_review(t, p, c, ci)["state"], "pending_owner_approval")
+        t["ci_policy_source"] = "PR-comment"
+        self.assertEqual(prepare_review(t, p, c, ci)["state"], "blocked")
+
+    def test_manual_dispatch_requires_attested_approval(self):
+        t, p, c, ci = sample()
+        ci[0]["event"] = "workflow_dispatch"
+        self.assertEqual(prepare_review(t, p, c, ci)["state"], "blocked")
+        ci[0]["manual_run_approved"] = True
+        ci[0]["manual_approval_provenance"] = "trusted-protected-task-ledger"
+        self.assertEqual(prepare_review(t, p, c, ci)["state"], "pending_owner_approval")
 
     def test_closed_target_blocks(self):
         t, p, c, ci = sample()
