@@ -347,17 +347,17 @@ installer_calls() {     # I-3 behavioural: npm ci / npm install / playwright ins
   # The behavioral fixture never needs root. Mock only sudo -n to preserve
   # the real c1_ienv -> sudo -> env -> npx argument and credential boundary.
   # Real installer behavior and no_new_privileges are not changed.
-  printf '#!/usr/bin/env bash\\n' >"$bin/sudo"
+  printf '#!/usr/bin/env bash\n' >"$bin/sudo"
+  printf 'C1_SUDO_ARGS_LOG=%q\n' "$TMP/sudo.args" >>"$bin/sudo"
   cat >>"$bin/sudo" <<'C1_MOCK_SUDO'
 [[ "${1:-}" == -n ]] || { echo 'mock sudo: missing -n' >&2; exit 91; }
 shift
 [[ "${1:-}" == env ]] || { echo 'mock sudo: expected env' >&2; exit 92; }
-printf '%s\\n' "$@" >"$C1_SUDO_ARGS_LOG"
+printf '%s\n' "$@" >"$C1_SUDO_ARGS_LOG"
 exec "$@"
 C1_MOCK_SUDO
   chmod +x "$bin/sudo"
   export PATH="$bin:$PATH" GITHUB_TOKEN=ghu_fakefakefake GH_TOKEN=x NODE_OPTIONS=--require=/evil MY_SECRET=x
-  export C1_SUDO_ARGS_LOG="$TMP/sudo.args"
   c1_install_node_deps "$fe" "$cache"
   [[ -s "$TMP/npm.env" && -s "$TMP/npx.env" ]]
   [[ $(grep -c '^PATH=' "$TMP/npm.env") -ge 2 && $(grep -c '^PATH=' "$TMP/npx.env") -ge 2 ]]   # npm ci+install; npx install+install-deps
