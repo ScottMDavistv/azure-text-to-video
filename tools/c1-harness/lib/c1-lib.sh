@@ -478,7 +478,10 @@ c1_harness_listeners() {
       [[ "${sst[$ino]:-}" == "${kt[$ino]}" ]] \
         || { c1_err "listener evidence: harness socket $ino is listening on ${kt[$ino]} in the kernel table but ss reports '${sst[$ino]:-nothing}'"; return 1; }
       for pid in ${own[$ino]}; do rows+=("${kt[$ino]} pid=${pid%%:*} comm=${pid#*:} ino=$ino"); done
-      printf '%s\n' "$ino" >>"$s/listen-inodes" 2>/dev/null || true
+      if ! printf '%s\n' "$ino" >>"$s/listen-inodes" 2>/dev/null; then
+        c1_err 'listener evidence: cannot persist observed listener inode; failing closed'
+        return 1
+      fi
     elif [[ -n "${sst[$ino]:-}" ]]; then
       c1_err "listener evidence: ss reports harness socket $ino listening on ${sst[$ino]} but the kernel tables do not"; return 1
     fi
@@ -742,11 +745,19 @@ c1_cleanup_session() {
   # L-3: keep the observed listener inodes so c1_verify_cleanup can prove none
   # of them is still listening after the session directory is gone.
   if [[ -s "$s/listen-inodes" ]]; then
-    ( umask 077; LC_ALL=C sort -u "$s/listen-inodes" >>"$root/.${s##*/}.inodes" ) || true
+    if ! ( umask 077; LC_ALL=C sort -u "$s/listen-inodes" >>"$root/.${s##*/}.inodes" ); then
+      c1_err 'cleanup evidence: cannot preserve listener inode record; session retained'
+      return 1
+    fi
   fi
   # ...and the recorded "pid starttime" pairs, so a recorded process that cannot
   # be signalled (it lost its marker) is still reported as surviving.
-  if [[ -s "$s/pids" ]]; then ( umask 077; cat -- "$s/pids" >>"$root/.${s##*/}.pids" ) || true; fi
+  if [[ -s "$s/pids" ]]; then
+    if ! ( umask 077; cat -- "$s/pids" >>"$root/.${s##*/}.pids" ); then
+      c1_err 'cleanup evidence: cannot preserve recorded process identities; session retained'
+      return 1
+    fi
+  fi
   if [[ -d "$s" ]]; then c1_safe_rm "$s" "$root" || return 1; fi
   if [[ -f "$root/active" ]]; then
     local as; as=$(c1_session_dir "$root" || true)
@@ -757,12 +768,27 @@ c1_cleanup_session() {
 
 # c1_cleanup_all ROOT  remove every session directory under ROOT
 c1_cleanup_all() {
-  local root=$1 s
+  local root=$1 s record name failed=0
+  local -A checked=()
   [[ -d "$root" ]] || return 0
-  for s in "$root"/session.*; do if [[ -d "$s" ]]; then c1_cleanup_session "$root" "$s"; fi; done
-  rm -f -- "$root/active" "$root"/.session.*.inodes "$root"/.session.*.pids
+  for s in "$root"/session.*; do
+    [[ -d "$s" ]] || continue
+    if ! c1_cleanup_session "$root" "$s"; then failed=1; continue; fi
+    c1_verify_cleanup "$s" || failed=1
+    checked[$s]=1
+  done
+  # A crash may leave only the post-cleanup inode/PID registers. Verify them,
+  # never discard them to make a subsequent cleanup appear successful.
+  for record in "$root"/.session.*.inodes "$root"/.session.*.pids; do
+    [[ -e "$record" ]] || continue
+    name=${record##*/}; name=${name#.}; s="$root/${name%.*}"
+    [[ -n "${checked[$s]:-}" ]] && continue
+    c1_verify_cleanup "$s" || failed=1
+    checked[$s]=1
+  done
+  (( failed == 0 )) || { c1_err 'cleanup evidence: verification failed; records retained'; return 1; }
+  rm -f -- "$root/active"
 }
-
 # c1_verify_cleanup SESSION -> 0 if no marked processes, no session files, ports
 # 6080/5173 provably closed and no listener inode recorded during the session
 # still listening (L-3). Unavailable listener evidence is a cleanup FAILURE.
