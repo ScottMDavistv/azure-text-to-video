@@ -796,7 +796,7 @@ t 'L-6: monitor-scoped probe deadline is 0.4s and fast teardown is enabled' bash
   'grep -Fq "local C1_PROBE_MAX_TIME=0.4 C1_MONITOR_FAST_TEARDOWN=1" "$1" &&
    grep -Fq "local wait_steps=20" "$1" &&
    grep -Fq "wait_steps=5" "$1" &&
-   grep -Fq -- '--''--max-time' "$1" && grep -Fq 'C1_PROBE_MAX_TIME' "$1"' _ "$HERE/../lib/c1-lib.sh"
+   grep -Fq -- "--max-time" "$1" && grep -Fq 'C1_PROBE_MAX_TIME' "$1"' _ "$HERE/../lib/c1-lib.sh"
 
 echo '# pinned PR #60 integration (real repository history)'
 if [[ -n "${TOP:=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)}" ]] && git -C "$TOP" cat-file -e "$C1_PW_SHA_APPROVED^{commit}" 2>/dev/null \
