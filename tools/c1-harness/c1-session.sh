@@ -273,10 +273,9 @@ session() {
     return 1
   fi
   scrub_env
-  case $(c1_session_status "$ROOT") in
-    active) c1_err "another C1 session is active; finish it or run: $0 cleanup"; return 1 ;;
-    stale)  c1_warn 'recovering from an interrupted session'; c1_cleanup_all "$ROOT" ;;
-  esac
+  # N-1: preserved PID/inode records can outlive the active launcher lock.
+  # Resolve or refuse them before preflight or any new C1 session.
+  c1_recover_before_start "$ROOT" || return 1
   local start; start=$(c1_utc)
   preflight || { c1_err 'preflight failed; nothing was started'; return 1; }
   install_deps || { c1_err 'dependency installation or post-install verification failed'; return 1; }
@@ -392,7 +391,7 @@ main() {
   [[ "${2:-}" == --offline-only ]] && offline=1
   case $sub in
     run) session "$offline" ;;
-    preflight) scrub_env; preflight || return 1; install_deps || return 1; c1_log "preflight PASS: ${CHECKS[*]}" ;;
+    preflight) scrub_env; c1_recover_before_start "$ROOT" || return 1; preflight || return 1; install_deps || return 1; c1_log "preflight PASS: ${CHECKS[*]}" ;;
     cleanup) c1_cleanup_all "$ROOT"; c1_port_free "$C1_NOVNC_PORT" && c1_log 'no harness sessions remain' ;;
     purge) c1_cleanup_all "$ROOT"
            if [[ -e "$WT" ]]; then git -C "$REPO" worktree remove --force "$WT" 2>/dev/null || c1_safe_rm "$WT" "$CACHE"; fi
