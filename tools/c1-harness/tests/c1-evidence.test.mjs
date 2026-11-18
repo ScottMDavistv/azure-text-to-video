@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import {
   assertSanitized, parseMeta, parsePhases, summarizeReport, evaluate,
   renderEvidence, renderReviewPackage, scanArtifacts, OFFLINE_EXPECTED,
-  filterLines, summaryLines,
+  filterLines, summaryLines, safeLine, REQUIRED_CHECKS, REQUIRED_PLAYWRIGHT_VERSION, REQUIRED_CHROMIUM_VERSION,
 } from '../lib/c1-evidence.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -36,11 +36,12 @@ const offlineAllPass = () => report([
 const meta = {
   AUTH_SHA: AUTH, PW_SHA: SHA, HARNESS_SHA: 'a'.repeat(40), HARNESS_CLEAN: 'true',
   CHECKOUT_VERIFIED: 'PASS', LOCALHOST: 'PASS', MODE: 'supervised',
-  CHECKS: 'harness_clean,auth_ancestor_and_approved_diff,exact_head_clean_worktree,localhost_loopback_only,ports_free,clean_after_dependency_install',
+  CHECKS: 'harness_clean,auth_ancestor_and_approved_diff,production_review_status_recorded,exact_head_clean_worktree,vite_host_guard,localhost_loopback_only,ports_free,clean_after_dependency_install',
   PLAYWRIGHT_VERSION: '1.65.1', EXPECTED_PLAYWRIGHT_VERSION: '1.65.1',
   BROWSER_VERSION: '159.0.8154.6', EXPECTED_BROWSER_VERSION: '159.0.8154.6',
   BROWSER_HEADED_VERSION: '159.0.8154.6', EXPECTED_HEADED_BROWSER_VERSION: '159.0.8154.6',
   PORT_PRIVATE: 'verified-probe-user-repo', ATTEST_NO_PRIOR_CONSENT: 'yes', ATTEST_CONSENT_PROMPT_CANCELLED: 'yes',
+  PROD_REVIEW_PENDING: 'none',
 }
 const ran = rc => ({ state: 'ran', start: '2026-11-17T00:00:00Z', end: '2026-11-17T00:01:00Z', rc: String(rc) })
 const allPhases = () => ({
@@ -336,10 +337,169 @@ test('L-2: per-test summary lines are sanitized and title-allowlisted', () => {
 })
 
 test('N-1: R1 FAILS when any mandatory preflight check is missing from the evidence', () => {
-  for (const drop of ['auth_ancestor_and_approved_diff', 'exact_head_clean_worktree', 'harness_clean', 'clean_after_dependency_install']) {
+  for (const drop of ['auth_ancestor_and_approved_diff', 'exact_head_clean_worktree', 'harness_clean', 'clean_after_dependency_install', 'vite_host_guard']) {
     const CHECKS = meta.CHECKS.split(',').filter(c => c !== drop).join(',')
     const r = ready({ meta: { ...meta, CHECKS } })
     assert.equal(row(r, 'R1').verdict, 'FAIL', drop); assert.match(row(r, 'R1').detail, new RegExp('MISSING: ' + drop))
     assert.equal(r.overall, 'FAIL')
   }
+})
+
+// ---------------------------------------------------------------- N-2 --
+const withOffline = specs => { const r = allReports(); r.offline = summarizeReport(report(specs)); return r }
+const incomplete = { annotations: [{ type: 'skip', description: 'INCOMPLETE: prerequisite not available' }] }
+
+test('N-2: an INCOMPLETE-annotated expected offline test makes R3 INCOMPLETE and the session can never be READY', () => {
+  const n = OFFLINE_EXPECTED.length
+  const reports = withOffline(OFFLINE_EXPECTED.map((t, i) => spec(t, i === 2 ? 'skipped' : 'passed', i === 2 ? incomplete : {})))
+  assert.equal(reports.offline[2].verdict, 'INCOMPLETE')
+  const r = evaluate({ meta, phases: allPhases(), reports, artifactHits: 0 })
+  assert.equal(row(r, 'R3').verdict, 'INCOMPLETE'); assert.equal(row(r, 'R3').detail, (n - 1) + '/' + n + ' passed; incomplete 1')
+  assert.notEqual(r.overall, 'READY FOR INDEPENDENT REVIEW'); assert.equal(r.overall, 'INCOMPLETE')
+})
+
+test('N-2: every non-PASS outcome of an expected test (FAIL, SKIPPED, INCOMPLETE, absent, unknown) is non-PASS', () => {
+  const cases = {
+    FAIL: OFFLINE_EXPECTED.map((t, i) => spec(t, i === 0 ? 'failed' : 'passed')),
+    SKIPPED: OFFLINE_EXPECTED.map((t, i) => spec(t, i === 0 ? 'skipped' : 'passed')),
+    INCOMPLETE: OFFLINE_EXPECTED.map((t, i) => spec(t, i === 0 ? 'skipped' : 'passed', i === 0 ? incomplete : {})),
+    absent: OFFLINE_EXPECTED.slice(1).map(t => spec(t, 'passed')),
+    'no results': OFFLINE_EXPECTED.map((t, i) => spec(t, i === 0 ? 'none' : 'passed')),
+    'unknown status': OFFLINE_EXPECTED.map((t, i) => spec(t, i === 0 ? 'bogus-status' : 'passed')),
+  }
+  for (const [name, specs] of Object.entries(cases)) {
+    const r = evaluate({ meta, phases: allPhases(), reports: withOffline(specs), artifactHits: 0 })
+    assert.equal(row(r, 'R3').verdict, name === 'INCOMPLETE' ? 'INCOMPLETE' : 'FAIL', name)
+    assert.notEqual(r.overall, 'READY FOR INDEPENDENT REVIEW', name)
+  }
+  // an unknown verdict injected directly (defence against future summarizer changes)
+  const reports = allReports(); reports.offline = reports.offline.map((t, i) => i === 0 ? { ...t, verdict: 'MAYBE' } : t)
+  const ru = evaluate({ meta, phases: allPhases(), reports, artifactHits: 0 })
+  assert.equal(row(ru, 'R3').verdict, 'FAIL'); assert.match(row(ru, 'R3').detail, /unknown outcome 1/); assert.equal(ru.overall, 'FAIL')
+})
+
+test('N-2 (positive): all expected offline tests PASS -> R3 PASS and READY', () => {
+  const r = evaluate({ meta, phases: allPhases(), reports: withOffline(OFFLINE_EXPECTED.map(t => spec(t + ' x', 'passed'))), artifactHits: 0 })
+  assert.equal(row(r, 'R3').verdict, 'PASS'); assert.equal(row(r, 'R3').detail, OFFLINE_EXPECTED.length + '/' + OFFLINE_EXPECTED.length + ' passed')
+  assert.equal(r.overall, 'READY FOR INDEPENDENT REVIEW')
+})
+
+// ---------------------------------------------------------------- L-7 --
+test('L-7: display names and "Signed in:" DOM text never reach the terminal', () => {
+  const raw = [
+    '    - locator resolved to <span>Signed in: Jane Q. Tester</span>',
+    'Expected: "Signed out"  Received: "Signed in: Jane Q. Tester"',
+    'signed-in as Jane Q. Tester', 'account.name = Jane Q. Tester', 'displayName: Jane', "name: 'Jane Q. Tester'",
+    'preferred_username=jane', '  2 passed (3.1s)',
+  ].join('\n')
+  const out = filterLines(raw).join('\n')
+  assert.doesNotMatch(out, /Jane|jane/)
+  assert.match(out, /2 passed/)
+  for (const l of ['Signed in: Jane', 'username: x']) assert.equal(safeLine(l), false, l)
+  assert.equal(safeLine('M5 browser: signOut invokes MSAL logoutPopup'), true)
+  // titles of the approved suite remain printable in the summary view
+  for (const t of OFFLINE_EXPECTED) assert.equal(safeLine('  PASS      ' + t), true, t)
+})
+
+test('L-7: on a failing phase with a report the launcher shows only the summary (no raw lines)', () => {
+  const sess = readFileSync(join(here, '../c1-session.sh'), 'utf8')
+  const fn = sess.slice(sess.indexOf('show_phase() {'), sess.indexOf('\n}\n', sess.indexOf('show_phase() {')))
+  assert.match(fn, /if \[\[ -f "\$S\/reports\/\$id\.json" \]\]; then\n\s+clean_node "\$HERE\/lib\/c1-evidence\.mjs" --summarize=/)
+  assert.match(fn, /\n\s+else\n\s+clean_node "\$HERE\/lib\/c1-evidence\.mjs" --filter=/)
+  assert.equal((fn.match(/--filter=/g) || []).length, 1)
+})
+
+// ---------------------------------------------------------------- L-8 --
+// Fake tokens are assembled at runtime; no real token appears in this file.
+const fakeTok = (p, n) => p + 'A1b2C3d4E5'.repeat(Math.ceil(n / 10)).slice(0, n)
+const TOKENS = [fakeTok('ghu_', 36), fakeTok('ghp_', 36), fakeTok('gho_', 36), fakeTok('ghs_', 36), fakeTok('ghr_', 36),
+  'github_pat_' + fakeTok('', 22) + '_' + fakeTok('', 59)]
+
+test('L-8: GitHub tokens are rejected from evidence', () => {
+  for (const tok of TOKENS) {
+    assert.throws(() => assertSanitized('X-Github-Token: ' + tok), /GitHub token/, tok.slice(0, 4))
+    assert.throws(() => assertSanitized('| R11 | ' + tok + ' |'), /Sanitizer rejected/, tok.slice(0, 4))
+  }
+  assert.doesNotThrow(() => assertSanitized('ghu_short and the word github_pat alone'))
+  // a full evidence render containing a token in a phase detail is refused
+  const r = ready({})
+  r.rows[0].detail = 'leak ' + TOKENS[0]
+  assert.throws(() => assertSanitized(renderEvidence({ meta, phases: allPhases(), result: r, generated: '2026-11-17T00:00:00Z' })), /GitHub token/)
+})
+
+test('L-8: GitHub tokens are withheld from terminal output (filter CLI end to end)', () => {
+  const d = mkdtempSync(join(tmpdir(), 'c1l8-'))
+  try {
+    const f = join(d, 'phase.out')
+    writeFileSync(f, TOKENS.map(t => 'curl -H "X-Github-Token: ' + t + '"').join('\n') + '\nsafe line\n')
+    const out = execFileSync(process.execPath, [join(here, '../lib/c1-evidence.mjs'), '--filter=' + f], { encoding: 'utf8' })
+    for (const t of TOKENS) assert.ok(!out.includes(t.slice(4, 20)), 'token fragment printed')
+    assert.match(out, /safe line/); assert.match(out, /line withheld by sanitizer/)
+  } finally { rmSync(d, { recursive: true, force: true }) }
+})
+
+// ---------------------------------------------------------------- I-5 --
+test('I-5: R10 requires the literal Playwright 1.65.1 and Chromium 159.0.8154.6, not just consistency', () => {
+  assert.equal(REQUIRED_PLAYWRIGHT_VERSION, '1.65.1'); assert.equal(REQUIRED_CHROMIUM_VERSION, '159.0.8154.6')
+  assert.equal((libText.match(/^C1_PLAYWRIGHT_VERSION='([0-9.]+)'$/m) || [])[1], REQUIRED_PLAYWRIGHT_VERSION)
+  assert.equal((libText.match(/^C1_CHROMIUM_VERSION='([0-9.]+)'$/m) || [])[1], REQUIRED_CHROMIUM_VERSION)
+  const c153 = { BROWSER_VERSION: '153.0.8010.12', EXPECTED_BROWSER_VERSION: '153.0.8010.12',
+    BROWSER_HEADED_VERSION: '153.0.8010.12', EXPECTED_HEADED_BROWSER_VERSION: '153.0.8010.12' }
+  for (const m of [c153, { PLAYWRIGHT_VERSION: '1.66.0', EXPECTED_PLAYWRIGHT_VERSION: '1.66.0' },
+    { BROWSER_HEADED_VERSION: '160.0.1.1', EXPECTED_HEADED_BROWSER_VERSION: '160.0.1.1' }]) {
+    const r = ready({ meta: { ...meta, ...m } })
+    assert.equal(row(r, 'R10').verdict, 'FAIL', JSON.stringify(m)); assert.equal(r.overall, 'FAIL')
+  }
+  assert.equal(row(ready({}), 'R10').verdict, 'PASS')
+  assert.equal(row(ready({ meta: { ...meta, MODE: 'offline-only', ...c153 } }), 'R10').verdict, 'FAIL')
+})
+
+test('REQUIRED_CHECKS includes the L-11 Vite host-guard check, and the launcher records it', () => {
+  assert.ok(REQUIRED_CHECKS.includes('vite_host_guard'))
+  const sess = readFileSync(join(here, '../c1-session.sh'), 'utf8')
+  assert.match(sess, /c1_check_vite_host_guard "\$WT" \|\| return 1; check vite_host_guard/)
+  for (const c of REQUIRED_CHECKS) assert.match(sess, new RegExp('check ' + c + '\\b'), c)
+})
+
+// ------------------------------------------------- pinned PR #60 integration --
+test('R3 inventory covers every offline test of the pinned PR #60 suite (C1 + Tier1), and nothing else', () => {
+  const top = execFileSync('git', ['-C', here, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim()
+  const titles = ['frontend/e2e/entra-c1.spec.mjs', 'frontend/e2e/entra-tier1.spec.mjs'].flatMap(f =>
+    [...execFileSync('git', ['-C', top, 'show', SHA + ':' + f], { encoding: 'utf8' }).matchAll(/^test\('([^']+)'/gm)].map(m => [f, m[1]]))
+  const offline = titles.filter(([f, t]) => f.endsWith('tier1.spec.mjs') || !/^(LIVE: |M-1: missing SPA configuration)/.test(t)).map(([, t]) => t)
+  assert.equal(offline.length, 14)
+  for (const t of offline) assert.equal(OFFLINE_EXPECTED.filter(p => t.startsWith(p)).length, 1, 'exactly one prefix for: ' + t)
+  for (const p of OFFLINE_EXPECTED) assert.equal(offline.filter(t => t.startsWith(p)).length, 1, 'prefix matches exactly one test: ' + p)
+  for (const t of titles.map(([, x]) => x)) assert.equal(safeLine('  PASS      ' + t), true, 'printable: ' + t)
+})
+
+test('R13: uncertified production files keep the session INCOMPLETE (separate review required); unrecorded status FAILS', () => {
+  const pending = 'frontend/src/App.tsx@' + 'a0b753b533165bb12bc516478c8036645f2f292a'
+  assert.equal(parseMeta('PROD_REVIEW_PENDING=' + pending).PROD_REVIEW_PENDING, pending)
+  const r = ready({ meta: { ...meta, PROD_REVIEW_PENDING: pending } })
+  assert.equal(row(r, 'R13').verdict, 'INCOMPLETE'); assert.match(row(r, 'R13').detail, /frontend\/src\/App\.tsx at blob a0b753b/)
+  assert.equal(r.overall, 'INCOMPLETE')
+  const r2 = ready({ meta: { ...meta, PROD_REVIEW_PENDING: undefined } })
+  assert.equal(row(r2, 'R13').verdict, 'FAIL'); assert.equal(r2.overall, 'FAIL')
+  for (const bad of ['frontend/src/App.tsx', 'App.tsx@xyz', 'a b@' + 'a'.repeat(40), 'unknown']) assert.equal(parseMeta('PROD_REVIEW_PENDING=' + bad).PROD_REVIEW_PENDING, undefined, bad)
+  assert.equal(row(ready({}), 'R13').verdict, 'PASS')
+  const ev = assertSanitized(renderEvidence({ meta: { ...meta, PROD_REVIEW_PENDING: pending }, phases: allPhases(), result: r, generated: '2026-11-17T00:00:00Z' }))
+  assert.match(ev, /Production files pending separate review \| frontend\/src\/App\.tsx@a0b753b/)
+})
+
+test('R13: the launcher records the pending-review list from the pinned library constant', () => {
+  const sess = readFileSync(join(here, '../c1-session.sh'), 'utf8')
+  assert.match(sess, /PROD_PENDING=\$\(c1_verify_prod_pending "\$REPO" "\$AUTH" "\$PW" "\$C1_AUTH_TO_PW_FILES" "\$C1_PROD_REVIEW_PENDING"\) \|\| return 1/)
+  assert.match(sess, /printf 'PROD_REVIEW_PENDING=%s\\n' "\$PROD_PENDING"/)
+  assert.match(libText, /^C1_PROD_REVIEW_PENDING='frontend\/src\/App\.tsx'$/m)
+})
+
+test('egress markers recognise the pinned guards\' exact-origin diagnostics', () => {
+  for (const msg of ['Unexpected request origin https://evil.example', 'Blocked unauthorized HTTP origin http://127.0.0.1:9999',
+    'Unauthorized WebSocket origin ws://evil.example:81', 'Blocked unauthorized WebSocket origin wss://x.example']) {
+    const [t] = summarizeReport(report([spec('LIVE: popup login, validated claims x', 'failed', { errors: [msg] })]))
+    assert.equal(t.egressMarker, true, msg); assert.equal(t.hosts.length, 1, msg)
+  }
+  const [c] = summarizeReport(report([spec('LIVE: x', 'failed', { errors: ['Authorization header to unauthorized origin https://evil.example'] })]))
+  assert.equal(c.credentialMarker, true)
 })

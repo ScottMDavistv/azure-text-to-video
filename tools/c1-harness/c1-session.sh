@@ -30,6 +30,7 @@ FE="$WT/frontend"
 ROOT=$(c1_state_root)
 S=''
 CHECKS=()
+PROD_PENDING=unknown
 
 usage() { sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
@@ -39,7 +40,7 @@ scrub_env() {
   unset C1_LIVE C1_UNCONFIGURED C1_MUTATION_MODE C1_EXPECTED_SHA C1_SUPERVISED_CASE \
     VITE_ENTRA_SPA_CLIENT_ID VITE_C1_SHA VITE_C1_DIRTY PWDEBUG DEBUG \
     PLAYWRIGHT_JSON_OUTPUT_NAME PLAYWRIGHT_JSON_OUTPUT_FILE PWTEST_SKIP_TEST_OUTPUT \
-    PLAYWRIGHT_HTML_REPORT NODE_OPTIONS NODE_PATH CI 2>/dev/null || true
+    PLAYWRIGHT_HTML_REPORT NODE_OPTIONS NODE_PATH CI __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS 2>/dev/null || true
   local v
   for v in $(compgen -e); do
     case $v in PLAYWRIGHT_*|PW_*|npm_config_*|NPM_CONFIG_*) unset "$v" ;; esac
@@ -60,7 +61,10 @@ preflight() {
   c1_verify_harness_clean "$REPO" "$HARNESS_REL" || return 1; check harness_clean
   c1_fetch_commit "$REPO" "$AUTH" && c1_fetch_commit "$REPO" "$PW" || { c1_err 'cannot obtain approved commits'; return 1; }
   c1_verify_commits "$REPO" "$AUTH" "$PW" "$C1_AUTH_TO_PW_FILES" || return 1; check auth_ancestor_and_approved_diff
+  PROD_PENDING=$(c1_verify_prod_pending "$REPO" "$AUTH" "$PW" "$C1_AUTH_TO_PW_FILES" "$C1_PROD_REVIEW_PENDING") || return 1
+  check production_review_status_recorded
   c1_prepare_worktree "$REPO" "$PW" "$WT" || return 1; check exact_head_clean_worktree
+  c1_check_vite_host_guard "$WT" || return 1; check vite_host_guard
   c1_check_localhost || return 1; check localhost_loopback_only
   c1_port_free "$C1_APP_PORT" || { c1_err "port $C1_APP_PORT in use; stop the existing dev server (fresh server is mandatory)"; return 1; }
   c1_port_free "$C1_NOVNC_PORT" || { c1_err "port $C1_NOVNC_PORT in use; run: c1-session.sh cleanup"; return 1; }
@@ -100,12 +104,18 @@ pw_env() {
 
 clean_node() { local -a e; mapfile -d '' -t e < <(c1_clean_env); "${e[@]}" TMPDIR="$S/tmp" node "$@"; }
 
-# Terminal output is never raw Playwright/MSAL text (L-2/Q7): phase output goes
-# to the 0700 session directory and only sanitizer-approved lines are shown.
+# Terminal output is never raw Playwright/MSAL text (L-2/Q7, L-7): phase output
+# goes to the 0700 session directory. When a JSON report exists (pass OR fail)
+# only the per-test summary is shown, so failing locator/DOM text (e.g. an
+# app's "Signed in: <display name>") never reaches the terminal. Only a phase
+# without a report (startup/config failure, non-Playwright step) shows
+# sanitizer-approved lines, with identity-bearing lines withheld.
 show_phase() {
   local id=$1 rc=$2 out=$3
-  if [[ -f "$S/reports/$id.json" ]]; then clean_node "$HERE/lib/c1-evidence.mjs" --summarize="$S/reports/$id.json" >&2 || true; fi
-  if [[ "$rc" != 0 || ! -f "$S/reports/$id.json" ]]; then
+  if [[ -f "$S/reports/$id.json" ]]; then
+    clean_node "$HERE/lib/c1-evidence.mjs" --summarize="$S/reports/$id.json" >&2 || true
+    [[ "$rc" == 0 ]] || c1_log "phase $id: failure details stay in the private session directory (summary only, L-7)"
+  else
     clean_node "$HERE/lib/c1-evidence.mjs" --filter="$out" --max=40 >&2 || true
   fi
 }
@@ -167,13 +177,31 @@ print_access() {
   printf '====================================================\n' >&2
 }
 
-# privacy_gate -> 0 only if the noVNC port is still verified private
+# privacy_gate -> 0 only if the noVNC port is still verified private (and, on
+# the gh path, gh still reads back "private"). Otherwise the shared teardown
+# (L-9: marker, TERM -> wait -> KILL, port 6080 verified closed) runs; if the
+# port cannot be verified closed the session aborts and full cleanup runs.
 privacy_gate() {
-  [[ "$PORT_PRIVATE" == verified-* && ! -e "$S/privacy-failed" ]] || return 1
-  if c1_verify_private_novnc "$BASE" "$HDR"; then return 0; fi
-  c1_err "port $C1_NOVNC_PORT privacy could no longer be verified ($C1_PRIVACY_STATE); stopping the desktop"
+  [[ "$PORT_PRIVATE" == verified-* ]] || return 1
+  local rc=0
+  c1_privacy_gate "$S" "$C1_NOVNC_PORT" "$BASE" "$HDR" "$WS" "$WSST" "$REQ_GH" || rc=$?
+  (( rc == 0 )) && return 0
+  c1_err "port $C1_NOVNC_PORT privacy could no longer be verified (${C1_GATE_REASON:-unverified}); the desktop was stopped"
   PORT_PRIVATE=failed
-  c1_signal_owned TERM "$WS" "$S" "$WSST"
+  if (( rc == 2 )); then
+    c1_err 'noVNC teardown could not be verified; aborting the session (full cleanup and verification follow)'
+    exit 4
+  fi
+  return 1
+}
+
+# fail_desktop -> stop noVNC (if started) and mark the desktop failed; aborts on an unverified teardown
+fail_desktop() {
+  PORT_PRIVATE=failed
+  if [[ -n "$WS" ]] && ! c1_teardown_novnc "$S" "$C1_NOVNC_PORT" "$WS" "$WSST" "${1:-unverified}"; then
+    c1_err 'noVNC teardown could not be verified; aborting the session (full cleanup and verification follow)'
+    exit 4
+  fi
   return 1
 }
 
@@ -201,21 +229,34 @@ start_private_desktop() {
     owner=$(c1_repo_owner_type "${GITHUB_REPOSITORY:-}" "$S/api-token.hdr" || true)
     [[ "$owner" == User ]] || { c1_err "cannot exclude organization-wide port visibility (repository owner type '${owner:-unknown}', gh read-back unavailable)"; PORT_PRIVATE=failed; return 1; }
   fi
-  WS=$(c1_start_websockify "$S" "$C1_NOVNC_PORT") || { PORT_PRIVATE=failed; return 1; }
-  WSST=$(c1_proc_start "$WS"); [[ -n "$WSST" ]] || { PORT_PRIVATE=failed; return 1; }
-  if ! c1_verify_private_novnc "$BASE" "$HDR"; then
-    c1_err "noVNC privacy re-check failed ($C1_PRIVACY_STATE)"
-    c1_signal_owned TERM "$WS" "$S" "$WSST"; PORT_PRIVATE=failed; return 1
+  # L-10: on the gh path, gh must keep reading back "private" (org visibility
+  # still demands GitHub sign-in, so only gh can see a later change to it).
+  if [[ "$vis" == private ]]; then REQ_GH=1; else REQ_GH=0; fi
+  local wrc=0
+  WS=$(c1_start_websockify "$S" "$C1_NOVNC_PORT") || wrc=$?
+  if (( wrc )); then
+    WS=''
+    (( wrc != 2 )) || { c1_err 'noVNC teardown could not be verified; aborting the session (full cleanup and verification follow)'; exit 4; }
+    PORT_PRIVATE=failed; return 1
   fi
-  if [[ "$vis" == private ]]; then PORT_PRIVATE=verified-probe-gh; else PORT_PRIVATE=verified-probe-user-repo; fi
+  WSST=$(c1_proc_start "$WS"); [[ -n "$WSST" ]] || { fail_desktop websockify-start; return 1; }
+  if ! c1_verify_private_novnc "$BASE" "$HDR"; then
+    c1_err "noVNC privacy re-check failed ($C1_PRIVACY_STATE: $C1_PRIVACY_DETAIL)"
+    fail_desktop "$C1_PRIVACY_STATE"; return 1
+  fi
+  if (( REQ_GH )) && ! c1_gh_private "$C1_NOVNC_PORT"; then
+    c1_err "gh no longer reads back port $C1_NOVNC_PORT as private (${C1_GH_VIS:-unavailable})"
+    fail_desktop gh-visibility; return 1
+  fi
+  if (( REQ_GH )); then PORT_PRIVATE=verified-probe-gh; else PORT_PRIVATE=verified-probe-user-repo; fi
   # shellcheck disable=SC2016
-  c1_spawn "$S" privacy-monitor bash -c 'source "$1"; c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6"' \
-    _ "$LIB" "$S" "$BASE" "$HDR" "$WS" "$WSST" >/dev/null || { c1_signal_owned TERM "$WS" "$S" "$WSST"; PORT_PRIVATE=failed; return 1; }
+  c1_spawn "$S" privacy-monitor bash -c 'source "$1"; c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "" 15 "$7" "$8"' \
+    _ "$LIB" "$S" "$BASE" "$HDR" "$WS" "$WSST" "$C1_NOVNC_PORT" "$REQ_GH" >/dev/null || { fail_desktop monitor-start; return 1; }
 }
 
 session() {
   local offline_only=$1 interactive=0 pass answer
-  PORT_PRIVATE=not-started BASE='' HDR='' WS='' WSST=''
+  PORT_PRIVATE=not-started BASE='' HDR='' WS='' WSST='' REQ_GH=0
   local att_prior=not-asked att_prompt=not-asked bhver=not-launched
   [[ -t 0 && -t 2 ]] && interactive=1
   if (( ! offline_only && ! interactive )); then
@@ -309,6 +350,7 @@ Test 2: a sign-in popup opens; CLOSE it without signing in, then Resume.'; then
     printf 'MODE=%s\nCODESPACES=%s\nPORT_PRIVATE=%s\nLOCALHOST=PASS\n' \
       "$( (( offline_only )) && echo offline-only || echo supervised)" "$([[ "${CODESPACES:-}" == true ]] && echo true || echo false)" "$PORT_PRIVATE"
     printf 'ATTEST_NO_PRIOR_CONSENT=%s\nATTEST_CONSENT_PROMPT_CANCELLED=%s\n' "$att_prior" "$att_prompt"
+    printf 'PROD_REVIEW_PENDING=%s\n' "$PROD_PENDING"
   } >"$S/meta"
   # Exact-head re-check AFTER the run: nothing may have changed the checkout or harness.
   c1_verify_clean_tree "$WT" "$PW" || sed -i 's/^CHECKOUT_VERIFIED=PASS$/CHECKOUT_VERIFIED=FAIL/' "$S/meta"

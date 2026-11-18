@@ -12,8 +12,12 @@
 C1_AUTH_SHA_APPROVED='81c352b2c6f7fdae4e94f2ff4e98a7e1c2bdf6c5'
 C1_PW_SHA_APPROVED='e1873111e2304a7a739e0f35e2ecdca1d43de44d'
 C1_PLAYWRIGHT_VERSION='1.65.1'
-# Exact verified diff from main baseline to the accepted exact-head PR #60 tree.
-# Includes the reviewed logout UI change, not merely the historical six test files.
+# I-5: the Chromium build Playwright 1.65.1 pins (browsers.json rev 1255, both
+# chromium and chromium-headless-shell). R10 requires this literal value too.
+C1_CHROMIUM_VERSION='159.0.8154.6'
+# Exact verified diff from the main baseline to the tested PR #60 head. Anything
+# else (e.g. src/entraAuth.ts) => reject. This list must equal
+# `git diff --no-renames --name-only AUTH PW`; it is never widened to pass.
 C1_AUTH_TO_PW_FILES='.github/workflows/frontend-quality-gates.yml
 frontend/.gitignore
 frontend/e2e/README.md
@@ -29,6 +33,16 @@ frontend/e2e/run-browser-mutations.mjs
 frontend/playwright.config.mjs
 frontend/src/App.tsx
 frontend/src/c1BuildInfo.ts'
+# Production (non-test) files inside C1_AUTH_TO_PW_FILES whose AUTH -> PW change
+# has NOT been independently security-certified. Each is recorded in the
+# evidence with its exact blob SHA at PW, and row R13 stays INCOMPLETE (so the
+# session can never be READY) until a separate review certifies it and this
+# list is emptied in a reviewed commit. frontend/src/App.tsx: e187311 adds the
+# "Signed out locally. Microsoft SSO session may remain active." status.
+C1_PROD_REVIEW_PENDING='frontend/src/App.tsx'
+# Allowlisted paths that are test/CI infrastructure, not production runtime code.
+# Any other allowlisted path must appear in C1_PROD_REVIEW_PENDING.
+C1_TEST_INFRA_RE='^(frontend/e2e/|frontend/\.gitignore$|frontend/playwright\.config\.mjs$|frontend/src/c1BuildInfo\.ts$|\.github/workflows/frontend-quality-gates\.yml$)'
 C1_APT_PACKAGES='xvfb x11vnc novnc websockify fluxbox xauth iproute2'
 C1_NOVNC_PORT=6080
 C1_APP_PORT=5173
@@ -55,6 +69,27 @@ c1_verify_commits() {
     diff <(printf '%s\n' "$expected" | LC_ALL=C sort) <(printf '%s\n' "$actual") >&2 || true
     return 1
   fi
+}
+
+# c1_verify_prod_pending REPO AUTH PW ALLOWED PENDING -> every allowlisted
+# non-test path is listed as pending review, and every pending path really is
+# an allowlisted file that differs between AUTH and PW. Prints one
+# "path@blobsha" per pending file (blob at PW), or "none".
+c1_verify_prod_pending() {
+  local repo=$1 auth=$2 pw=$3 allowed=$4 pending=$5 f
+  local -a recs=()
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    [[ "$f" =~ $C1_TEST_INFRA_RE ]] && continue
+    grep -qxF -- "$f" <<<"$pending" || { c1_err "production file $f is allowlisted but not marked pending independent review"; return 1; }
+  done <<<"$allowed"
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    grep -qxF -- "$f" <<<"$allowed" || { c1_err "pending-review file $f is not in the approved diff"; return 1; }
+    git -C "$repo" diff --quiet "$auth" "$pw" -- "$f" && { c1_err "pending-review file $f does not differ between AUTH and PW"; return 1; }
+    recs+=("$f@$(git -C "$repo" rev-parse "$pw:$f")") || return 1
+  done <<<"$pending"
+  if (( ${#recs[@]} )); then (IFS=,; printf '%s\n' "${recs[*]}"); else echo none; fi
 }
 
 # c1_fetch_commit REPO SHA  (fetch an exact commit only if it is missing)
@@ -163,6 +198,48 @@ c1_assert_loopback_only() {
   (( bad == 0 ))
 }
 
+# c1_installer_env -> NUL-separated `env -u ...` prefix for dependency installers
+# (I-3). Removes GitHub/Codespaces credentials and any token/secret-like
+# variable, plus variables that redirect or alter npm, Node, Vite or Playwright
+# (and NODE_TLS_REJECT_UNAUTHORIZED, which disables TLS verification).
+# Preserved as required installation settings: PATH, HOME, locale, proxy /
+# no-proxy settings and the CA-trust variables a TLS-intercepting proxy needs
+# (NODE_EXTRA_CA_CERTS, SSL_CERT_FILE, SSL_CERT_DIR). Package content is
+# protected independently by the lockfile's sha512 integrity and by R10.
+c1_installer_env() {
+  local v
+  printf '%s\0' env
+  for v in $(compgen -e); do
+    case $v in
+      HTTP_PROXY|HTTPS_PROXY|NO_PROXY|http_proxy|https_proxy|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR) ;;
+      GITHUB_*|GH_*|*TOKEN*|*token*|*SECRET*|*secret*|*PASSWORD*|*password*|*_PAT|*CREDENTIAL*|\
+      CODESPACE_*|ACTIONS_*|npm_config_*|NPM_CONFIG_*|PLAYWRIGHT_*|PW_*|NODE_OPTIONS|NODE_PATH|\
+      NODE_TLS_REJECT_UNAUTHORIZED|VITE_*|__VITE_*)
+        printf '%s\0' -u "$v" ;;
+    esac
+  done
+}
+
+# c1_ienv CMD...  run CMD under the installer environment
+c1_ienv() { local -a e; mapfile -d '' -t e < <(c1_installer_env); "${e[@]}" "$@"; }
+
+# c1_check_vite_host_guard WORKTREE (L-11) -> the approved Vite dev server on 5173
+# keeps Vite's Host-header check: exactly one vite config, bound to 127.0.0.1,
+# no allowedHosts anywhere in the approved frontend config/launch path, and the
+# approved Playwright config starts it with `--host 127.0.0.1`. A forwarded 5173
+# request carries Host: <codespace>-5173.<domain>, which that check rejects.
+c1_check_vite_host_guard() {
+  local fe=$1/frontend f cfg='' n=0
+  for f in "$fe"/vite.config.{ts,mts,cts,js,mjs,cjs}; do [[ -e "$f" ]] && { n=$((n + 1)); cfg=$f; }; done
+  (( n == 1 )) || { c1_err "expected exactly one frontend/vite.config.* (found $n)"; return 1; }
+  if grep -Eq 'allowedHosts|allowed-hosts|__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS' -- "$cfg" "$fe/package.json" "$fe/playwright.config.mjs"; then
+    c1_err 'approved Vite/Playwright configuration sets allowedHosts: the 5173 Host-header check would be disabled'; return 1
+  fi
+  grep -Eq "host:[[:space:]]*'127\.0\.0\.1'" -- "$cfg" || { c1_err 'approved Vite dev server is not bound to 127.0.0.1'; return 1; }
+  grep -Fq "command: 'npm run dev -- --host 127.0.0.1'" -- "$fe/playwright.config.mjs" \
+    || { c1_err 'approved Playwright webServer does not start Vite with --host 127.0.0.1'; return 1; }
+}
+
 c1_missing_apt_packages() {
   local p
   for p in $C1_APT_PACKAGES; do
@@ -176,8 +253,8 @@ c1_install_apt_packages() {
   c1_log "installing approved development packages: $missing"
   local sudo=''; [[ $(id -u) -eq 0 ]] || sudo='sudo -n'
   # shellcheck disable=SC2086
-  { $sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $missing \
-    || { $sudo apt-get update -qq && $sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $missing; }; } >/dev/null
+  { c1_ienv $sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $missing \
+    || { c1_ienv $sudo apt-get update -qq && c1_ienv $sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $missing; }; } >/dev/null
   missing=$(c1_missing_apt_packages)
   [[ -z "$missing" ]] || { c1_err "packages still missing: $missing"; return 1; }
 }
@@ -189,7 +266,7 @@ c1_install_node_deps() {
   marker="$fe/node_modules/.c1-harness-lock-sha256"
   if [[ ! -f "$marker" || "$(cat "$marker")" != "$lockhash" ]]; then
     c1_log 'installing frontend dependencies from approved lockfile (npm ci)'
-    (cd "$fe" && npm ci --no-audit --no-fund --loglevel=error) || return 1
+    (cd "$fe" && c1_ienv npm ci --no-audit --no-fund --loglevel=error) || return 1
     printf '%s' "$lockhash" >"$marker"
   else
     c1_log 'frontend dependencies match approved lockfile'
@@ -197,13 +274,14 @@ c1_install_node_deps() {
   ver=$(node -p "require('$fe/node_modules/@playwright/test/package.json').version" 2>/dev/null || true)
   if [[ "$ver" != "$C1_PLAYWRIGHT_VERSION" ]]; then
     c1_log "installing @playwright/test@$C1_PLAYWRIGHT_VERSION (no-save, ignore-scripts, as approved README)"
-    (cd "$fe" && npm install --no-save --ignore-scripts --no-audit --no-fund --loglevel=error "@playwright/test@$C1_PLAYWRIGHT_VERSION") || return 1
+    (cd "$fe" && c1_ienv npm install --no-save --ignore-scripts --no-audit --no-fund --loglevel=error "@playwright/test@$C1_PLAYWRIGHT_VERSION") || return 1
   fi
-  (cd "$fe" && npx --no-install playwright install chromium) || return 1
+  (cd "$fe" && c1_ienv npx --no-install playwright install chromium) || return 1
   if [[ ! -f "$cache/deps-ok-$C1_PLAYWRIGHT_VERSION" ]]; then
     c1_log 'installing Chromium system dependencies'
     local sudo=''; [[ $(id -u) -eq 0 ]] || sudo='sudo -n'
-    (cd "$fe" && $sudo env "PATH=$PATH" npx --no-install playwright install-deps chromium >/dev/null) || return 1
+    # shellcheck disable=SC2086  # $sudo is intentionally empty or two words
+    (cd "$fe" && c1_ienv $sudo env "PATH=$PATH" npx --no-install playwright install-deps chromium >/dev/null) || return 1
     touch "$cache/deps-ok-$C1_PLAYWRIGHT_VERSION"
   fi
   # Restore any tree changes npm might make (it must not touch tracked files).
@@ -414,17 +492,22 @@ c1_start_display_vnc() {
   [[ -z "$(c1_listeners_for_pids $(c1_marked_pids "$s"))" ]] || { c1_err 'unexpected TCP listener before noVNC start'; return 1; }
 }
 
-# c1_start_websockify SESSION PORT -> noVNC/websockify on 127.0.0.1:PORT only; prints pid
+# c1_start_websockify SESSION PORT -> noVNC/websockify on 127.0.0.1:PORT only; prints pid.
+# On failure after the spawn, the spawned websockify is torn down (returns 1),
+# or 2 if the port could not be verified closed afterwards.
 c1_start_websockify() {
-  local s=$1 port=$2 pid
+  local s=$1 port=$2 pid st
   local -a cmd
   c1_port_free "$port" || { c1_err "port $port is already in use; run: c1-session.sh cleanup"; return 1; }
   mapfile -t cmd < <(c1_cmd_websockify "$port" "$s")
   pid=$(c1_spawn "$s" websockify "${cmd[@]}")
+  st=$(c1_proc_start "$pid")
   for _ in $(seq 1 50); do c1_port_free "$port" || break; sleep 0.1; done
-  c1_port_free "$port" && { c1_err 'noVNC/websockify failed to listen'; return 1; }
-  c1_assert_desktop_listeners "$s" "$port" || return 1
-  printf '%s' "$pid"
+  if c1_port_free "$port"; then c1_err 'noVNC/websockify failed to listen'
+  elif c1_assert_desktop_listeners "$s" "$port"; then printf '%s' "$pid"; return 0
+  fi
+  c1_teardown_novnc "$s" "$port" "$pid" "$st" websockify-start || return 2
+  return 1
 }
 
 # c1_start_desktop SESSION PORT PASSWORD  (local/test helper: display+VNC+noVNC;
@@ -457,7 +540,10 @@ c1_assert_desktop_listeners() {
 # There is no typed-confirmation fallback.
 
 C1_PRIVACY_TIMEOUT=120
+C1_PROBE_MAX_TIME=15
+C1_NOVNC_RETRIES=10
 C1_NOVNC_SIGNATURE='noVNC'
+C1_PRIVACY_DETAIL=''
 
 # c1_codespace_base PORT -> https://NAME-PORT.DOMAIN (Codespaces variables only)
 c1_codespace_base() {
@@ -472,36 +558,56 @@ c1_codespace_url() { printf '%s/vnc.html?autoconnect=1&resize=remote' "$(c1_code
 # c1_write_header_file FILE NAME VALUE  (0600; keeps tokens out of argv/env of curl)
 c1_write_header_file() { ( umask 077; printf '%s: %s\n' "$2" "$3" >"$1" ); }
 
-# c1_https_probe URL OUTFILE [HEADERFILE] [CACERT] -> prints the HTTP status code
-# (000 on transport failure). HTTPS only, no redirects followed, no proxy,
-# minimal environment (no inherited CURL_CA_BUNDLE/HTTPS_PROXY).
+# c1_https_probe URL OUTFILE [HEADERFILE] [CACERT] -> prints "CODE REDIRECT_URL"
+# (CODE 000 on transport failure; REDIRECT_URL empty unless a 3xx carried one).
+# HTTPS only, no redirects followed, no proxy, minimal environment (no
+# inherited CURL_CA_BUNDLE/HTTPS_PROXY).
 c1_https_probe() {
   local url=$1 out=$2 hdr=${3:-} ca=${4:-}
-  local -a a=(--silent --max-time 15 --proto '=https' --noproxy '*' -o "$out" -w '%{http_code}')
+  local -a a=(--silent --max-time "$C1_PROBE_MAX_TIME" --proto '=https' --noproxy '*' -o "$out" -w '%{http_code} %{redirect_url}')
   if [[ -n "$hdr" ]]; then a+=(-H "@$hdr"); fi
   if [[ -n "$ca" ]]; then a+=(--cacert "$ca"); fi
   : >"$out"
   env -i PATH="$PATH" curl "${a[@]}" -- "$url" 2>/dev/null || true
 }
 
+# c1_unauth_denied CODE [REDIRECT_URL] -> 0 only for a POSITIVE denial (M-2a):
+# HTTP 401/403, or a 30x redirect to https://github.com or an https subdomain
+# of github.com (GitHub sign-in), default port, no userinfo. Everything else
+# (000 reset/timeout/DNS/TLS failure, 5xx, other 4xx, a redirect anywhere else,
+# a malformed or missing Location) is ambiguous and NOT a denial.
+c1_unauth_denied() {
+  local code=$1 loc=${2:-} host
+  case $code in
+    401|403) return 0 ;;
+    301|302|303|307|308)
+      [[ "$loc" =~ ^https://([A-Za-z0-9.-]+)(:443)?(/[^[:space:]]*)?$ ]] || return 1
+      host=${BASH_REMATCH[1],,}
+      [[ "$host" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)*github\.com$ ]] ;;
+    *) return 1 ;;
+  esac
+}
+
 # c1_privacy_check BASE PATH MARKER TOKENHDR [CACERT]
-# 0 = verified private. Sets C1_PRIVACY_STATE to private | public | unverified.
+# 0 = verified private. Sets C1_PRIVACY_STATE to private | public | unverified
+# (and C1_PRIVACY_DETAIL to a short, token-free reason). Private requires BOTH a
+# positive unauthenticated denial AND an authenticated 200 carrying the marker.
 c1_privacy_check() {
-  local base=$1 path=$2 marker=$3 hdr=$4 ca=${5:-} f code
-  C1_PRIVACY_STATE=unverified
+  local base=$1 path=$2 marker=$3 hdr=$4 ca=${5:-} f code loc
+  C1_PRIVACY_STATE=unverified C1_PRIVACY_DETAIL='bad arguments'
   [[ -n "$base" && -n "$marker" && -s "$hdr" ]] || return 1
   f=$(mktemp "${TMPDIR:-/tmp}/c1probe.XXXXXXXX") || return 1
-  code=$(c1_https_probe "$base$path" "$f" "" "$ca")
-  if grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=public; rm -f "$f"; return 1; fi
-  # Only a definite sign-in denial proves that the unauthenticated probe
-  # did not reach the forwarded service. Transport errors, 5xx, 404, and
-  # unexpected responses are ambiguous: fail closed even if token access works.
-  if [[ "$code" == 2?? ]]; then C1_PRIVACY_STATE=public; rm -f "$f"; return 1; fi
-  if [[ "$code" != 302 && "$code" != 303 && "$code" != 401 && "$code" != 403 ]]; then
-    rm -f "$f"; return 1
+  read -r code loc <<<"$(c1_https_probe "$base$path" "$f" "" "$ca")" || true
+  code=${code:-000}
+  if grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe received the marker (HTTP $code)"; rm -f "$f"; return 1; fi
+  # Any 2xx to an unauthenticated client is treated as exposure (fail closed).
+  if [[ "$code" == 2?? ]]; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe got HTTP $code"; rm -f "$f"; return 1; fi
+  if ! c1_unauth_denied "$code" "${loc:-}"; then
+    C1_PRIVACY_DETAIL="unauthenticated probe was not positively denied (HTTP $code)"; rm -f "$f"; return 1
   fi
-  code=$(c1_https_probe "$base$path" "$f" "$hdr" "$ca")
-  if [[ "$code" == 200 ]] && grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=private; rm -f "$f"; return 0; fi
+  read -r code loc <<<"$(c1_https_probe "$base$path" "$f" "$hdr" "$ca")" || true
+  if [[ "${code:-}" == 200 ]] && grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=private C1_PRIVACY_DETAIL='denied unauthenticated; authenticated probe reached the marker'; rm -f "$f"; return 0; fi
+  C1_PRIVACY_DETAIL="authenticated probe did not reach the marker (HTTP ${code:-000})"
   rm -f "$f"; return 1
 }
 
@@ -541,7 +647,7 @@ c1_verify_private_with_decoy() {
 # c1_verify_private_novnc BASE TOKENHDR [CACERT] -> privacy check against the real noVNC page
 c1_verify_private_novnc() {
   local i
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for (( i = 0; i < C1_NOVNC_RETRIES; i++ )); do
     c1_privacy_check "$1" '/vnc.html' "$C1_NOVNC_SIGNATURE" "$2" "${3:-}" && return 0
     [[ $C1_PRIVACY_STATE == public ]] && return 1
     sleep 2
@@ -549,19 +655,80 @@ c1_verify_private_novnc() {
   return 1
 }
 
-# c1_privacy_monitor_loop SESSION BASE TOKENHDR WSPID WSSTART [CACERT] [INTERVAL]
+# c1_teardown_novnc SESSION PORT WSPID WSSTART [REASON]
+# Shared by the monitor and the launcher's privacy gate (L-9). Writes the
+# privacy-failed marker FIRST, then TERM -> wait -> KILL (ownership-verified),
+# and verifies that PORT no longer listens. Returns 1 (and records
+# "teardown-failed") if the port is still open: callers must fail closed.
+c1_teardown_novnc() {
+  local s=$1 port=$2 ws=$3 wsst=$4 reason=${5:-unverified}
+  [[ "$reason" =~ ^[a-z0-9_-]{1,40}$ ]] || reason=unverified
+  printf '%s %s\n' "$(c1_utc)" "$reason" >>"$s/privacy-failed"
+  c1_signal_owned TERM "$ws" "$s" "$wsst"
+  for _ in $(seq 1 20); do
+    if c1_port_free "$port" && ! c1_owned_pid "$ws" "$s" "$wsst"; then break; fi
+    sleep 0.1
+  done
+  c1_signal_owned KILL "$ws" "$s" "$wsst"
+  for _ in $(seq 1 20); do c1_port_free "$port" && break; sleep 0.1; done
+  if ! c1_port_free "$port"; then
+    printf '%s teardown-failed\n' "$(c1_utc)" >>"$s/privacy-failed"
+    c1_err "port $port is still listening after the privacy teardown"
+    return 1
+  fi
+}
+
+# c1_gh_private PORT -> 0 if gh reads back "private"; 1 if gh reports anything
+# else (C1_GH_VIS=<sanitized value>); 2 if the read-back is unavailable.
+c1_gh_private() {
+  local v; C1_GH_VIS=''
+  v=$(c1_gh_visibility "$1") || v=''
+  [[ -n "$v" ]] || return 2
+  [[ "$v" =~ ^[a-z_-]{1,24}$ ]] || v=unknown
+  C1_GH_VIS=$v
+  [[ "$v" == private ]] || return 1
+}
+
+# c1_privacy_gate SESSION PORT BASE TOKENHDR WSPID WSSTART REQUIRE_GH [CACERT]
+# 0 = noVNC still verified private (and, when REQUIRE_GH=1, gh still reads back
+# "private"). Otherwise noVNC is torn down: 1 = torn down and port verified
+# closed; 2 = teardown could NOT be verified (caller must abort the session).
+c1_privacy_gate() {
+  local s=$1 port=$2 base=$3 hdr=$4 ws=$5 wsst=$6 req_gh=${7:-0} ca=${8:-} reason='' g=0
+  if [[ -e "$s/privacy-failed" ]]; then reason=monitor-flagged
+  elif ! c1_verify_private_novnc "$base" "$hdr" "$ca"; then reason=$C1_PRIVACY_STATE
+  elif (( req_gh )); then
+    c1_gh_private "$port" || g=$?
+    if (( g == 1 )); then reason="gh-visibility-$C1_GH_VIS"; elif (( g == 2 )); then reason=gh-unavailable; fi
+  fi
+  [[ -n "$reason" ]] || return 0
+  C1_GATE_REASON=$reason
+  c1_teardown_novnc "$s" "$port" "$ws" "$wsst" "$reason" || return 2
+  return 1
+}
+
+# c1_privacy_monitor_loop SESSION BASE TOKENHDR WSPID WSSTART [CACERT] [INTERVAL] [PORT] [REQUIRE_GH]
 # Background, marker-scoped: tears noVNC down (and flags the session) as soon as
-# the port is seen public, or after 3 consecutive unverifiable checks.
+# the port is seen public or gh (REQUIRE_GH=1, L-10) reads back anything other
+# than "private" (e.g. org/public), or after 3 consecutive unverifiable checks
+# (an ambiguous probe or an unavailable gh read-back counts as unverifiable).
 c1_privacy_monitor_loop() {
-  local s=$1 base=$2 hdr=$3 ws=$4 wsst=$5 ca=${6:-} iv=${7:-15} misses=0
+  local s=$1 base=$2 hdr=$3 ws=$4 wsst=$5 ca=${6:-} iv=${7:-15} port=${8:-$C1_NOVNC_PORT} req_gh=${9:-0}
+  local misses=0 reason g
   trap 'exit 0' TERM
   while c1_owned_pid "$ws" "$s" "$wsst"; do
     sleep "$iv"
-    if c1_privacy_check "$base" '/vnc.html' "$C1_NOVNC_SIGNATURE" "$hdr" "$ca"; then misses=0; continue; fi
-    if [[ $C1_PRIVACY_STATE == public ]]; then misses=99; else misses=$((misses + 1)); fi
+    reason=''
+    if c1_privacy_check "$base" '/vnc.html' "$C1_NOVNC_SIGNATURE" "$hdr" "$ca"; then
+      if (( ! req_gh )); then misses=0; continue; fi
+      g=0; c1_gh_private "$port" || g=$?
+      if (( g == 0 )); then misses=0; continue; fi
+      if (( g == 1 )); then misses=99; reason="gh-visibility-$C1_GH_VIS"; else misses=$((misses + 1)); reason=gh-unavailable; fi
+    elif [[ $C1_PRIVACY_STATE == public ]]; then misses=99; reason=public
+    else misses=$((misses + 1)); reason=unverified
+    fi
     if (( misses >= 3 )); then
-      printf '%s %s\n' "$(c1_utc)" "$C1_PRIVACY_STATE" >"$s/privacy-failed"
-      c1_signal_owned TERM "$ws" "$s" "$wsst"; sleep 1; c1_signal_owned KILL "$ws" "$s" "$wsst"
+      c1_teardown_novnc "$s" "$port" "$ws" "$wsst" "$reason" || true
       return 0
     fi
   done
@@ -573,8 +740,8 @@ c1_repo_owner_type() {
   local repo=$1 hdr=$2 ca=${3:-} api=${4:-https://api.github.com} f code
   [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && -s "$hdr" ]] || return 1
   f=$(mktemp "${TMPDIR:-/tmp}/c1api.XXXXXXXX") || return 1
-  code=$(c1_https_probe "$api/repos/$repo" "$f" "$hdr" "$ca")
-  if [[ "$code" == 200 ]]; then
+  read -r code _ <<<"$(c1_https_probe "$api/repos/$repo" "$f" "$hdr" "$ca")" || true
+  if [[ "${code:-}" == 200 ]]; then
     node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(String((j.owner&&j.owner.type)||""))' "$f" 2>/dev/null || true
   fi
   rm -f "$f"

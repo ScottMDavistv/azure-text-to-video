@@ -11,6 +11,20 @@ STATE_DIR/mode (re-read on every request) selects the behaviour:
   wrongport    token -> a fixed unrelated page (forwarding to the wrong port)
   ambiguous    unauthenticated -> 503, authenticated -> proxied (unsafe to assume private)
   slow         like private, but each response is delayed 2 s
+  Ambiguous unauthenticated outcomes (M-2a; authenticated requests are proxied):
+  flaky        unauthenticated -> connection closed without a response (reset)
+  unauth5xx    unauthenticated -> 503
+  unauth404    unauthenticated -> 404
+  hang         unauthenticated -> no response for 6 s (probe timeout)
+  badredirect  unauthenticated -> 302 to https://evil.example/login
+  lookalike    unauthenticated -> 302 to https://github.com.evil.example/login
+  userinfo     unauthenticated -> 302 to https://github.com@evil.example/login
+  httpredirect unauthenticated -> 302 to http://github.com/login (not HTTPS)
+  noloc        unauthenticated -> 302 without a Location header
+  Positive denials:
+  unauth401    unauthenticated -> 401
+  unauth403    unauthenticated -> 403
+  subdomain    unauthenticated -> 307 to https://auth.github.com/login
 GET /repos/OWNER/REPO with "Authorization: token <token>" returns
 {"owner": {"type": <STATE_DIR/owner>}} (GitHub API stand-in).
 """
@@ -65,6 +79,28 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.reply(200, b'some other service') if authed else self.reply(302, b'', {'Location': 'https://github.com/login'})
         if authed:
             return self.proxy()
+        if mode == 'flaky':
+            self.close_connection = True
+            return
+        if mode == 'hang':
+            time.sleep(6)
+            self.close_connection = True
+            return
+        simple = {'unauth5xx': 503, 'unauth404': 404, 'unauth401': 401, 'unauth403': 403}
+        if mode in simple:
+            return self.reply(simple[mode], b'denied')
+        redirects = {
+            'badredirect': (302, 'https://evil.example/login'),
+            'lookalike': (302, 'https://github.com.evil.example/login'),
+            'userinfo': (302, 'https://github.com@evil.example/login'),
+            'httpredirect': (302, 'http://github.com/login'),
+            'subdomain': (307, 'https://auth.github.com/login?return_to=x'),
+        }
+        if mode in redirects:
+            code, loc = redirects[mode]
+            return self.reply(code, b'', {'Location': loc})
+        if mode == 'noloc':
+            return self.reply(302, b'')
         if mode == 'interstitial':
             return self.reply(200, b'<html>Sign in to GitHub to continue</html>')
         return self.reply(302, b'', {'Location': 'https://github.com/login'})

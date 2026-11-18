@@ -20,10 +20,19 @@ export const PHASES = {
 }
 
 // N-1: R1 passes only if every mandatory preflight check actually ran and passed.
-export const REQUIRED_CHECKS = ['harness_clean', 'auth_ancestor_and_approved_diff', 'exact_head_clean_worktree',
-  'localhost_loopback_only', 'ports_free', 'clean_after_dependency_install']
+export const REQUIRED_CHECKS = ['harness_clean', 'auth_ancestor_and_approved_diff', 'production_review_status_recorded', 'exact_head_clean_worktree',
+  'vite_host_guard', 'localhost_loopback_only', 'ports_free', 'clean_after_dependency_install']
 
+// I-5: R10 requires these literal versions in addition to internal consistency
+// (Playwright 1.65.1 pins Chromium 159.0.8154.6, browsers.json revision 1255,
+// for both chromium and chromium-headless-shell). Kept equal to c1-lib.sh.
+export const REQUIRED_PLAYWRIGHT_VERSION = '1.65.1'
+export const REQUIRED_CHROMIUM_VERSION = '159.0.8154.6'
+
+// Every test the pinned PR #60 suite (e187311) executes in the offline phase
+// (entra-c1.spec.mjs + entra-tier1.spec.mjs); each must PASS for R3 (N-2).
 export const OFFLINE_EXPECTED = [
+  'C1 exact-host regression',
   'M-1/M-4/M-5: configured auth runtime',
   'M-1/M-2: attempted login sends correct tenant',
   'M2 browser: loopback-origin redirect',
@@ -31,13 +40,19 @@ export const OFFLINE_EXPECTED = [
   'M5 browser: signOut invokes MSAL logoutPopup',
   'M6-B/M6-C browser: egress firewall',
   'Static source invariants',
+  'Tier1 synthetic sign-in',
+  'Tier1 denied login',
+  'Tier1 delegated API permission failure',
+  'Tier1 cancelled login',
+  'Tier1 interaction-required fallback',
+  'Tier1 cancelled logout',
 ]
 
 export const ROWS = [
   { id: 'R1', label: 'Clean exact-head checkout verification', kind: 'meta' },
   { id: 'R2', label: 'Static source mutation regression (all mutations detected)', kind: 'exit', phase: 'static-mutation' },
   { id: 'R2B', label: 'Browser-level security mutation regression (all mutations detected)', kind: 'exit', phase: 'browser-mutation' },
-  { id: 'R3', label: 'Offline synthetic suite (all 7 executed tests)', kind: 'all', phase: 'offline', expect: OFFLINE_EXPECTED },
+  { id: 'R3', label: 'Offline synthetic suite (all ' + OFFLINE_EXPECTED.length + ' expected tests, C1 + Tier1)', kind: 'all', phase: 'offline', expect: OFFLINE_EXPECTED },
   { id: 'R4', label: 'Unconfigured SPA is fail-closed', kind: 'test', phase: 'unconfigured', title: 'M-1: missing SPA configuration is fail-closed' },
   { id: 'R5', label: 'Localhost routing and canonical localhost redirect', kind: 'redirect', phase: 'offline', title: 'M2 browser: loopback-origin redirect' },
   { id: 'R6', label: 'Live sign-in, initial consent, claims, silent token, verified logout', kind: 'test', phase: 'live', title: 'LIVE: popup login, validated claims' },
@@ -47,13 +62,14 @@ export const ROWS = [
   { id: 'R10', label: 'Toolchain: exact Playwright and the browser build it expects (headless and headed)', kind: 'toolchain' },
   { id: 'R11', label: 'Private desktop: Codespaces port privacy technically verified (decoy probe)', kind: 'privacy' },
   { id: 'R12', label: 'Every executed test and phase succeeded (no unlisted failures)', kind: 'integrity' },
+  { id: 'R13', label: 'Production code changed between the auth baseline and the tested head is independently certified', kind: 'prodreview' },
 ]
 
 const RESULT_RE = /^C1 RESULT case=(consent-denial|cancelled-logout) state=(not_observed|succeeded|failed|unrecognized) code=([a-z0-9_]{1,64}) aadsts=(none|AADSTS\d{5,6}|unrecognized)$/
 const OBS_RE = /^C1 OBSERVATION case=cancelled-logout ui_signed_in=(true|false) msal_account_present=(true|false) failure_message_shown=(true|false) server_signout_confirmed=(true|false)$/
 const HOST_RE = /(?:Blocked unauthorized HTTP origin|Unexpected request origin|Blocked unauthorized WebSocket origin|Unauthorized WebSocket origin|Authorization header to unauthorized origin|Unexpected request host|Blocked unauthorized WebSocket host) ((?:[a-z][a-z0-9+.-]*:\/\/)?[a-z0-9.:-]{1,253})/gi
 const CRED_MARK = /Credential-like|Authorization header to unauthorized/
-const EGRESS_MARK = /Unexpected request host|Blocked unauthorized|Unauthorized WebSocket/
+const EGRESS_MARK = /Unexpected request (?:host|origin)|Blocked unauthorized|Unauthorized WebSocket/
 const INCOMPLETE_RE = /^INCOMPLETE: [A-Za-z0-9 ;,.()'-]{1,160}$/
 const TITLE_RE = /^[A-Za-z0-9 /:;,.()'_-]{1,200}$/
 
@@ -66,6 +82,8 @@ export function assertSanitized(text) {
     [/https?:\/\/[^\s)]*[?#]/, 'URL with query or fragment'],
     [/client_secret|access_token|id_token|refresh_token|code_verifier|code_challenge=/i, 'OAuth parameter name'],
     [/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i, 'GUID (tenant/client/object id)'],
+    // L-8: GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_ are 40 chars, below the opaque-string rule).
+    [/(?<![A-Za-z0-9])(?:gh[opsur]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{20,})/, 'GitHub token'],
     [/[A-Za-z0-9+/_-]{48,}/, 'long opaque string'],
     [/(?:cookie|set-cookie)\s*:/i, 'cookie header'],
   ]
@@ -86,6 +104,7 @@ export function parseMeta(text) {
     EXPECTED_PLAYWRIGHT_VERSION: /^[0-9.]{1,20}$/, EXPECTED_BROWSER_VERSION: /^[0-9.]{1,32}$/,
     EXPECTED_HEADED_BROWSER_VERSION: /^[0-9.]{1,32}$/, BROWSER_HEADED_VERSION: /^([0-9.]{1,32}|not-launched|unknown)$/,
     ATTEST_NO_PRIOR_CONSENT: /^(yes|no|not-asked)$/, ATTEST_CONSENT_PROMPT_CANCELLED: /^(yes|no|not-asked)$/,
+    PROD_REVIEW_PENDING: /^(none|[A-Za-z0-9_./-]{1,200}@[0-9a-f]{40}(?:,[A-Za-z0-9_./-]{1,200}@[0-9a-f]{40}){0,19})$/,
   }
   const meta = {}
   for (const line of text.split('\n')) {
@@ -202,18 +221,26 @@ export function evaluate({ meta, phases, reports, artifactHits }) {
       verdict = meta.CHECKOUT_VERIFIED === 'PASS' && meta.HARNESS_CLEAN === 'true' && !missing.length ? 'PASS' : 'FAIL'
       detail = (meta.CHECKS || '').replace(/,/g, ', ') + (missing.length ? '; MISSING: ' + missing.join(', ') : '')
     } else if (row.kind === 'toolchain') {
-      const pwOk = Boolean(meta.PLAYWRIGHT_VERSION) && meta.PLAYWRIGHT_VERSION === meta.EXPECTED_PLAYWRIGHT_VERSION
-      const bOk = Boolean(meta.BROWSER_VERSION) && meta.BROWSER_VERSION === meta.EXPECTED_BROWSER_VERSION
+      // Consistent with what the installed Playwright expects AND the literal pinned versions (I-5).
+      const pwOk = meta.PLAYWRIGHT_VERSION === REQUIRED_PLAYWRIGHT_VERSION && meta.EXPECTED_PLAYWRIGHT_VERSION === REQUIRED_PLAYWRIGHT_VERSION
+      const bOk = meta.BROWSER_VERSION === REQUIRED_CHROMIUM_VERSION && meta.EXPECTED_BROWSER_VERSION === REQUIRED_CHROMIUM_VERSION
       const headedRequired = meta.MODE !== 'offline-only'
-      const hOk = !headedRequired || (Boolean(meta.BROWSER_HEADED_VERSION) && meta.BROWSER_HEADED_VERSION === meta.EXPECTED_HEADED_BROWSER_VERSION)
+      const hOk = !headedRequired || (meta.BROWSER_HEADED_VERSION === REQUIRED_CHROMIUM_VERSION && meta.EXPECTED_HEADED_BROWSER_VERSION === REQUIRED_CHROMIUM_VERSION)
       verdict = pwOk && bOk && hOk ? 'PASS' : 'FAIL'
       detail = 'playwright ' + (meta.PLAYWRIGHT_VERSION ?? 'unknown') + ' (expected ' + (meta.EXPECTED_PLAYWRIGHT_VERSION ?? 'unknown') + '); headless ' +
         (meta.BROWSER_VERSION ?? 'unknown') + ' (expected ' + (meta.EXPECTED_BROWSER_VERSION ?? 'unknown') + ')' +
-        (headedRequired ? '; headed ' + (meta.BROWSER_HEADED_VERSION ?? 'unknown') + ' (expected ' + (meta.EXPECTED_HEADED_BROWSER_VERSION ?? 'unknown') + ')' : '')
+        (headedRequired ? '; headed ' + (meta.BROWSER_HEADED_VERSION ?? 'unknown') + ' (expected ' + (meta.EXPECTED_HEADED_BROWSER_VERSION ?? 'unknown') + ')' : '') +
+        '; required ' + REQUIRED_PLAYWRIGHT_VERSION + ' / ' + REQUIRED_CHROMIUM_VERSION
     } else if (row.kind === 'privacy') {
       if (meta.MODE !== 'supervised') { verdict = 'INCOMPLETE'; detail = 'desktop not started (offline-only)' }
       else if (/^verified-probe-(gh|user-repo)$/.test(meta.PORT_PRIVATE || '')) { verdict = 'PASS'; detail = meta.PORT_PRIVATE }
       else { verdict = 'FAIL'; detail = 'privacy not verified: ' + (meta.PORT_PRIVATE ?? 'unknown') }
+    } else if (row.kind === 'prodreview') {
+      // Separate security review required for uncertified production changes (owner condition 4).
+      const p = meta.PROD_REVIEW_PENDING
+      if (!p) { verdict = 'FAIL'; detail = 'production review status not recorded' }
+      else if (p === 'none') { verdict = 'PASS'; detail = 'no uncertified production change' }
+      else { verdict = 'INCOMPLETE'; detail = 'pending separate independent security review: ' + p.split(',').map(x => x.replace('@', ' at blob ')).join('; ') }
     } else if (row.kind === 'integrity') {
       const failedTests = allTests.filter(t => t.verdict === 'FAIL')
       const badPhases = Object.entries(phases).filter(([, p]) => p.state === 'ran' && p.rc !== '0')
@@ -230,15 +257,22 @@ export function evaluate({ meta, phases, reports, artifactHits }) {
       if (pd) ({ verdict, detail } = pd)
       else if (!tests) { verdict = 'FAIL'; detail = 'no report (startup/config failure, exit ' + phases[row.phase].rc + ')' }
       else if (row.kind === 'all') {
+        // N-2: every expected test must have verdict PASS. Absent, SKIPPED, FAIL
+        // or any unknown verdict -> FAIL; an INCOMPLETE expected test -> the row
+        // is INCOMPLETE (never PASS, so the session can never be READY).
         const expected = row.expect.map(p => find(tests, p))
+        const passed = expected.filter(t => t?.verdict === 'PASS')
         const missing = expected.filter(t => !t || t.verdict === 'SKIPPED')
         const failed = expected.filter(t => t?.verdict === 'FAIL')
         const incomplete = expected.filter(t => t?.verdict === 'INCOMPLETE')
-        verdict = missing.length || failed.length ? 'FAIL' : incomplete.length ? 'INCOMPLETE' : 'PASS'
-        detail = expected.filter(t => t?.verdict === 'PASS').length + '/' + row.expect.length + ' passed' +
+        const unknown = expected.filter(t => t && !['PASS', 'SKIPPED', 'FAIL', 'INCOMPLETE'].includes(t.verdict))
+        verdict = missing.length || failed.length || unknown.length ? 'FAIL'
+          : incomplete.length ? 'INCOMPLETE' : passed.length === row.expect.length ? 'PASS' : 'FAIL'
+        detail = passed.length + '/' + row.expect.length + ' passed' +
           (missing.length ? '; missing ' + missing.length : '') +
           (failed.length ? '; failed ' + failed.length : '') +
-          (incomplete.length ? '; incomplete ' + incomplete.length : '')
+          (incomplete.length ? '; incomplete ' + incomplete.length : '') +
+          (unknown.length ? '; unknown outcome ' + unknown.length : '')
       } else {
         const t = find(tests, row.title)
         if (!t) { verdict = 'FAIL'; detail = 'test did not execute' }
@@ -282,8 +316,9 @@ export function renderEvidence({ meta, phases, result, generated }) {
   L.push('**Harness summary: ' + result.overall + '.** This harness never issues C1 certification; an independent security review must evaluate this evidence.', '')
   L.push('## Identity', '')
   L.push('| Item | Value |', '|---|---|')
-  L.push('| Reviewed authentication SHA (PR #46) | `' + v(meta.AUTH_SHA) + '` |')
-  L.push('| Playwright suite SHA (PR #60, tested HEAD) | `' + v(meta.PW_SHA) + '` |')
+  L.push('| Auth baseline (protected main; contains certified PR #46 auth) | `' + v(meta.AUTH_SHA) + '` |')
+  L.push('| Tested PR #60 head (Playwright suite) | `' + v(meta.PW_SHA) + '` |')
+  L.push('| Production files pending separate review | ' + v(meta.PROD_REVIEW_PENDING) + ' |')
   L.push('| Harness SHA | `' + v(meta.HARNESS_SHA) + '` (clean: ' + v(meta.HARNESS_CLEAN) + ') |')
   L.push('| Clean-checkout verification | ' + v(meta.CHECKOUT_VERIFIED) + ' |')
   L.push('| @playwright/test | ' + v(meta.PLAYWRIGHT_VERSION) + ' |')
@@ -346,8 +381,19 @@ export function renderReviewPackage({ evidence, meta }) {
   return L.join('\n')
 }
 
-/** Is a terminal line safe to show? (same rules as the evidence sanitizer) */
+// L-7: terminal-only identity rules. Account display names reach phase output
+// through DOM text (e.g. the app's "Signed in: {account.name}") in failing
+// locator/assertion messages; they are not emails, so the evidence sanitizer
+// alone does not catch them.
+const TERMINAL_IDENTITY_RULES = [
+  /signed[\s_-]*in\b\s*(?::|as\b)/i,
+  /\b(?:display[\s_-]?name|given[\s_-]?name|family[\s_-]?name|preferred_username|account\.name|username)\b/i,
+  /\bname\s*[:=]\s*["'`]/i,
+]
+
+/** Is a terminal line safe to show? (evidence sanitizer + terminal identity rules) */
 export function safeLine(line) {
+  if (TERMINAL_IDENTITY_RULES.some(re => re.test(line))) return false
   try { assertSanitized(line); return true } catch { return false }
 }
 

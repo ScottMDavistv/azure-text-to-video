@@ -20,14 +20,19 @@ Have these ready:
 
 ## What happens
 
-1. **Preflight (automatic).** The harness checks the two pinned commits: protected-main baseline `81c352b…` (contains certified PR #46 auth) and tested PR #60 head `e187311…` (new changes still require independent review). It checks that the auth commit is an ancestor and that only the explicitly allowlisted 15 workflow, test and UI files differ between them, then creates a detached, clean worktree at exactly the Playwright SHA. It refuses any modified, untracked, skip-worktree or assume-unchanged files, in the worktree **and** in the harness itself. It also checks that `localhost` resolves only to loopback and that ports 5173 and 6080 are free. **Any failed check stops the run before anything starts.**
-2. **Dependencies (automatic, idempotent).** It installs the approved packages (`xvfb x11vnc novnc websockify fluxbox xauth iproute2`) only if any are missing. It runs `npm ci` only when the lockfile changed, installs `@playwright/test@1.65.1` (no-save, as the approved README does), and installs Chromium.
+1. **Preflight (automatic).** The harness checks the two pinned commits: protected-main baseline `81c352b…` (contains certified PR #46 auth) and tested PR #60 head `e187311…` (new changes still require independent review). It checks that the auth commit is an ancestor and that only the explicitly allowlisted 15 workflow, test and UI files differ between them, then creates a detached, clean worktree at exactly the Playwright SHA. It refuses any modified, untracked, skip-worktree or assume-unchanged files, in the worktree **and** in the harness itself. It also checks that the approved Vite configuration keeps Vite's Host-header check (see *Network exposure*), that `localhost` resolves only to loopback and that ports 5173 and 6080 are free. **Any failed check stops the run before anything starts.**
+2. **Dependencies (automatic, idempotent).** It installs the approved packages (`xvfb x11vnc novnc websockify fluxbox xauth iproute2`) only if any are missing. It runs `npm ci` only when the lockfile changed, installs `@playwright/test@1.65.1` (no-save, as the approved README does), and installs Chromium. Installers run without `GITHUB_TOKEN`, other GitHub/Codespaces credentials, token- or secret-like variables, or npm/Node/Vite/Playwright overrides; only `PATH`, `HOME`, locale, proxy settings and CA-trust settings are passed through.
 3. **Offline checks (automatic).** It runs the static mutation check, the browser-level mutation runner (when the pinned suite has one), the offline synthetic suite and the unconfigured suite. The approved suite runs unmodified, in a minimal allowlisted environment. Your terminal shows one sanitized line per test; raw Playwright output stays in the private session directory.
 4. **Private desktop.** The harness starts the X display and VNC server (Unix sockets only, no TCP), then **proves port 6080 is private before serving the desktop**:
    - A decoy serves a random one-time value on `127.0.0.1:6080`, with no desktop behind it.
-   - An **unauthenticated** request to the Codespaces URL must **not** reach it, and a request carrying your Codespace's `GITHUB_TOKEN` **must** reach it.
+   - An **unauthenticated** request to the Codespaces URL must be **positively denied**: HTTP 401/403, or a redirect to `https://github.com` (or an HTTPS `*.github.com` host) for sign-in. A request carrying your Codespace's `GITHUB_TOKEN` **must** then reach the decoy.
+   - Anything else is **ambiguous** and never counts as private: a reset or dropped connection, a timeout, a DNS or TLS failure, a 5xx, another 4xx, or a redirect anywhere else. The harness keeps retrying for up to 120 s and then refuses to serve the desktop.
    - Organization-wide visibility is excluded through a `gh` read-back of `private`, or because the repository is owned by a user account.
-   - Only then does the real noVNC start. The check is repeated before the password is shown and before each step, and a background monitor stops the desktop within seconds if the port ever becomes reachable without GitHub sign-in.
+   - Only then does the real noVNC start. The check is repeated before the password is shown and before each step. A background monitor re-checks every 15 s:
+     - it stops the desktop at once if the port becomes reachable without GitHub sign-in;
+     - on the `gh` path, it also stops the desktop at once if `gh` reads back anything but `private` (for example, organization or public visibility);
+     - it stops the desktop after 3 consecutive unverifiable checks (an ambiguous probe or an unavailable `gh` read-back).
+   - Every stop uses the same verified teardown: it marks the session privacy-failed, sends TERM, waits, sends KILL, and confirms port 6080 is closed. If it cannot confirm that, the session aborts and full cleanup runs.
    - There is **no manual "type PRIVATE" fallback**. If privacy cannot be proven, the desktop is never served and the evidence records a FAIL.
    - When the check passes, the terminal prints a link and a **one-time VNC password**.
 5. **Supervised steps.** You act in the desktop. When you're done with a step, click **Resume ▶** in the *Playwright Inspector* window. You can type `s` at any prompt to skip a step; that row becomes INCOMPLETE.
@@ -52,29 +57,30 @@ Paste the **review package** into a **separate** Claude session for the independ
 
 ## Security model
 
-- **Network exposure.**
-  - The only TCP listener the harness opens is noVNC on `127.0.0.1:6080`.
-  - Before noVNC starts, only the privacy decoy listens there.
+- **Network exposure.** Two TCP listeners exist during a session, both on loopback:
+  - **noVNC on `127.0.0.1:6080`**, started by the harness. Before noVNC starts, only the privacy decoy listens there. Its Codespaces forwarding is verified private (step 4) and monitored.
+  - **The Vite dev server on `127.0.0.1:5173`**, started by the approved Playwright configuration (`npm run dev -- --host 127.0.0.1`) for every Playwright phase. Codespaces may auto-forward it, and **the harness does not verify 5173's forwarding visibility**. A forwarded request arrives with `Host: <codespace>-5173.<forwarding domain>`, and Vite's Host-header check rejects it with 403, because the approved `vite.config.ts` binds `127.0.0.1` and sets no `allowedHosts`. Preflight enforces this statically (`vite_host_guard`, required for R1): exactly one `vite.config.*`, bound to `127.0.0.1`, no `allowedHosts`/`--allowed-hosts`/`__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` in the approved Vite, Playwright or package configuration, and the approved webServer command. Test phases also run with an environment allowlist that excludes every `VITE_*`/`__VITE_*` override. The 5173 page is the synthetic test app with a fake client ID offline; in supervised phases it is the real SPA, which holds no secrets. Its behaviour behind real Codespaces forwarding is an independent-verification item.
   - Xvfb runs with `-nolisten tcp -nolisten local` and a random X cookie.
   - x11vnc listens only on a `0600` Unix socket (`-rfbport 0`) and requires VNC password authentication.
-  - The harness verifies that the set of listeners is exactly `127.0.0.1:6080`.
-- **Port privacy** is proven technically (step 4) and recorded as row R11. If R11 is not PASS, the session can never be "ready for review".
+  - The harness verifies that the set of listeners it starts itself is exactly `127.0.0.1:6080`.
+- **Port privacy** is proven technically (step 4) and recorded as row R11. If R11 is not PASS, the session can never be "ready for review". The VNC password is printed only after privacy has been proven.
 - **Passwords and tokens.**
   - The VNC password is random for each session and is shown only on your terminal. It reaches x11vnc through a `rm:` password file that x11vnc deletes as soon as it reads it.
-  - Your Codespace's `GITHUB_TOKEN` is used only for the privacy probe and the repository-owner lookup. It goes to `curl` through a `0600` header file in the private session directory, never on a command line, and is deleted at cleanup.
+  - Your Codespace's `GITHUB_TOKEN` is used only for the privacy probe and the repository-owner lookup. It goes to `curl` through a `0600` header file in the private session directory, never on a command line, and is deleted at cleanup. It is not passed to dependency installers or test phases. The evidence sanitizer and the terminal filter both reject GitHub token formats (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`).
 - **Microsoft credentials.** You type them only into Microsoft's own pages inside the desktop. MSAL uses memory-only storage, and each test gets a fresh browser context that is discarded afterwards. Tracing, video and screenshots stay off. Chromium profiles and Playwright output live in the `0700` session directory and are deleted at cleanup.
 - **Evidence.** The harness reads raw Playwright results in memory only. Evidence contains only allowlisted values: SHAs, versions, UTC times, PASS/FAIL/INCOMPLETE, sanitized MSAL codes, hostnames, booleans and your yes/no confirmations. A sanitizer refuses output containing JWTs, bearer strings, emails/UPNs, GUIDs, URLs with query strings, cookie headers or long opaque strings.
 - **Fail-closed verdict.** The overall result is FAIL if any of the following holds:
   - any executed test fails, or any phase exits non-zero (R12);
   - port privacy is unverified (R11);
-  - Playwright is not 1.65.1, or the headless or headed Chromium differs from the build Playwright expects (R10);
+  - Playwright is not exactly 1.65.1, or the headless or headed Chromium is not exactly 159.0.8154.6, the build Playwright 1.65.1 expects (R10). Both the consistency check and the literal versions are required;
+  - any expected offline test is anything other than PASS: FAIL, SKIPPED, INCOMPLETE, absent or unknown (R3);
   - a mandatory preflight check did not run (R1).
-- **Terminal output.** Only sanitizer-approved lines are shown. Don't paste raw terminal output anywhere; share the review package instead.
+- **Terminal output.** When a phase produced a Playwright report, the terminal shows only its per-test summary, whether it passed or failed. Failing locator and DOM text, such as the app's `Signed in: <display name>`, stays in the private session directory. A phase without a report shows only sanitizer-approved lines. Lines carrying `Signed in:`, display or user names, emails, GUIDs, tokens or URLs with query strings are withheld. Don't paste raw terminal output anywhere; share the review package instead.
 
 ## Troubleshooting
 
 - *Port 5173/6080 in use.* Stop your own dev server, or run `c1-session.sh cleanup`.
 - *Cached approved worktree is modified.* Run `c1-session.sh purge`, then start again.
-- *"could not prove port 6080 is private and forwarded".* Check that the PORTS tab shows 6080 and that auto-forwarding is on. Set the port's visibility to **Private**, then run the harness again. The harness never continues without proof.
+- *"could not prove port 6080 is private and forwarded".* Check that the PORTS tab shows 6080 and that auto-forwarding is on. Set the port's visibility to **Private**, then run the harness again. The harness never continues without proof. A message saying the unauthenticated probe "was not positively denied (HTTP …)" means the forwarding edge answered ambiguously. The harness treats that as unverified and never as private.
 - *Session interrupted (Ctrl-C, closed terminal, killed process).* Cleanup runs on exit, and the watchdog covers a killed launcher. If something is still left over, the next run detects the stale session and cleans it up; you can also run `c1-session.sh cleanup`.
 - *Egress verdict FAIL listing a Microsoft host.* The approved allowlist blocked a host that Entra really used. Report the hostname to the reviewer; the harness never widens the allowlist.
