@@ -135,10 +135,16 @@ def plan(pr, reviews, existing_issues, *, reviewer_login=None, reviewer_type=Non
     # Dedup only against trusted controller-validated issue provenance and
     # exact marker, never substring matches or attacker-owned issue content.
     approved_markers = set()
+    trusted_ids = attested.get("trusted_remediation_issue_ids")
+    if (not isinstance(trusted_ids, list) or
+            any(not isinstance(i, int) or isinstance(i, bool) or i <= 0 for i in trusted_ids)):
+        return hold("Authenticated remediation-issue inventory incomplete")
     for issue in existing_issues:
         if issue.get("pull_request"):
             continue
-        if (issue.get("trusted_remediation") is True
+        if (issue.get("id") in trusted_ids
+                and isinstance(issue.get("id"), int)
+                and issue.get("trusted_remediation") is True
                 and issue.get("author_assurance") == "trusted-controller"
                 and issue.get("repository") == pr.get("base", {}).get("repo", {}).get("full_name")
                 and isinstance(issue.get("marker"), str)
@@ -164,8 +170,9 @@ def plan(pr, reviews, existing_issues, *, reviewer_login=None, reviewer_type=Non
             return hold("Missing or unverified exact-head comments")
         if item.get("state") == "CHANGES_REQUESTED" and not comments:
             return hold("Unrepresented changes-requested review")
-        if item.get("state") == "CHANGES_REQUESTED" and item.get("body") and not comments:
-            return hold("Unrepresented review body")
+        if (isinstance(item.get("body"), str) and item["body"].strip()
+                and not attested.get("review_bodies_accounted_for")):
+            return hold("Review summary may contain unrepresented findings")
         for finding in comments:
             # Real GitHub review comments have no 'blocking' field. Every
             # actionable inline comment is a finding; never discard by default.
