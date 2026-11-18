@@ -714,23 +714,23 @@ c1_privacy_gate() {
 # c1_privacy_monitor_loop SESSION BASE TOKENHDR WSPID WSSTART [CACERT] [INTERVAL] [PORT] [REQUIRE_GH]
 # Background, marker-scoped: tears noVNC down (and flags the session) as soon as
 # the port is seen public or gh (REQUIRE_GH=1, L-10) reads back anything other
-# than "private" (e.g. org/public), or after 3 consecutive unverifiable checks
-# (an ambiguous probe or an unavailable gh read-back counts as unverifiable).
+# than "private" (e.g. org/public), or on the first unverifiable
+# observation (ambiguous HTTPS probe or unavailable gh read-back).
 c1_privacy_monitor_loop() {
   local s=$1 base=$2 hdr=$3 ws=$4 wsst=$5 ca=${6:-} iv=${7:-0.2} port=${8:-$C1_NOVNC_PORT} req_gh=${9:-0}
   # L-6: these are local to this monitor's shell/function calls; bootstrap
   # privacy checks still use their full timeouts. One sweep is bounded to
   # two HTTPS probes at <=0.4 s each; teardown gets <=1 s of grace.
   local C1_PROBE_MAX_TIME=0.4 C1_MONITOR_FAST_TEARDOWN=1
-  local misses=0 reason g
+  local reason g
   trap 'exit 0' TERM
   while c1_owned_pid "$ws" "$s" "$wsst"; do
     sleep "$iv"
     reason=''
     if c1_privacy_check "$base" '/vnc.html' "$C1_NOVNC_SIGNATURE" "$hdr" "$ca"; then
-      if (( ! req_gh )); then misses=0; continue; fi
+      if (( ! req_gh )); then continue; fi
       g=0; c1_gh_private "$port" || g=$?
-      if (( g == 0 )); then misses=0; continue; fi
+      if (( g == 0 )); then continue; fi
       if (( g == 1 )); then reason="gh-visibility-$C1_GH_VIS"; else reason=gh-unavailable; fi
     elif [[ $C1_PRIVACY_STATE == public ]]; then reason=public
     else reason=unverified
