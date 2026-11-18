@@ -211,13 +211,21 @@ ownedguard() {
   local bad; for bad in -1 0 1 abc '' '12 34' "$$"; do if c1_owned_pid "$bad" "$s"; then return 1; fi; done
 }
 t 'ownership guard rejects -1, 0, 1, non-numeric and the caller itself' ownedguard
-reuse_with_start() {   # recorded PID+start time now belong to an UNRELATED process (no marker)
-  local s v; s=$(c1_session_new "$ROOT")
+reuse_with_start() {   # a recorded PID/starttime matches an UNRELATED process (no marker)
+  local s v rc=0 reg; s=$(c1_session_new "$ROOT")
   setsid sleep 300 </dev/null >/dev/null 2>&1 & v=$!; sleep 0.3
   printf '%s %s\n' "$v" "$(c1_proc_start "$v")" >"$s/pids"; printf '999999 1 %s\n' "$s" >"$ROOT/active"
-  c1_cleanup_all "$ROOT"; sleep 0.3
-  local ok=0; alive "$v" && ok=1; kill "$v" 2>/dev/null || true
-  (( ok == 1 ))
+  # No unrelated process may be signalled. The evidence must remain unresolved
+  # while this PID/starttime pair is live (fail closed, L-3).
+  c1_cleanup_all "$ROOT" 2>/dev/null || rc=$?
+  reg="$ROOT/.${s##*/}.pids"
+  local ok=0
+  (( rc != 0 )) && alive "$v" && [[ -s "$reg" ]] && ok=1
+  # The fixture owns this foreign process, so only the fixture may stop it.
+  kill "$v" 2>/dev/null || true
+  wait "$v" 2>/dev/null || true
+  # Once gone, strict recovery must be able to verify/retire the saved record.
+  (( ok == 1 )) && c1_cleanup_all "$ROOT" && [[ ! -e "$reg" ]]
 }
 t 'stale recovery never signals an unrelated process (or its group) that reused a recorded PID' reuse_with_start
 reuse_legacy_line() {  # legacy/garbage pids lines without a start time are never trusted
