@@ -48,6 +48,33 @@ def attestation(record, decision="approve", nonce="1" * 32, issued=T0, ttl=3600,
 TRUST = {"keyring": {"owner-2026": KEY}, "approver_ids": frozenset({OWNER})}
 
 
+def add(events, etype, rid, source, at, data, **kw):
+    """Append with the event time stamped from the (test) trusted clock."""
+    merged = dict(TRUST)
+    merged.update(kw)
+    merged.setdefault("trusted_now", at)
+    return q.append(events, etype, rid, source, at, data, **merged)
+
+
+def cert_attestation(record, cert, nonce="9" * 32, issued=T0, ttl=3600, key=KEY, **over):
+    fields = {"version": 1, "scheme": q.CERT_ATTESTATION_SCHEME, "key_id": "owner-2026",
+              "record_id": record["id"], "payload_sha256": record["payload_sha256"],
+              "repository": record["repository"], "action_kind": record["action_kind"],
+              "pr_number": record["pr_number"], "head_sha": record["head_sha"],
+              "certification_sha256": q.sha256_hex(cert), "decision": "certify",
+              "approver_user_id": OWNER, "issued_at": issued, "expires_at": issued + ttl,
+              "nonce": nonce}
+    fields.update(over)
+    return sign(fields, key=key)
+
+
+def reviewed_range(head=A, prs=(58,), contributors=("claude-impl-58",), **over):
+    out = {"source": q.RANGE_SOURCE, "repository": q.REPO, "base_sha": M, "head_sha": head,
+           "pr_numbers": list(prs), "contributor_session_ids": list(contributors)}
+    out.update(over)
+    return out
+
+
 def review(pr=58, head=A, **kw):
     return q.build_record("claude_review", pr, head, kw.pop("priority", "P1"),
                           "Independent full-diff review", "Full diff vs main", **kw)
@@ -59,12 +86,12 @@ def impl(pr=58, head=A, **kw):
 
 
 def enqueue(events, record, at=T0, source="owner-prepared-record"):
-    return q.append(events, "enqueue", record["id"], source, at, {"record": record}, **TRUST)
+    return add(events, "enqueue", record["id"], source, at, {"record": record})
 
 
 def approve(events, record, at=T0 + 10, **att_kw):
-    return q.append(events, "owner_decision", record["id"], "owner-attestation", at,
-                    {"attestation": attestation(record, issued=at - 5, **att_kw)}, **TRUST)
+    return add(events, "owner_decision", record["id"], "owner-attestation", at,
+               {"attestation": attestation(record, issued=at - 5, **att_kw)})
 
 
 def session(sid, role="implementer", pr=58, record_id=None, state="active",
@@ -185,7 +212,7 @@ class Ledger(unittest.TestCase):
         other = copy.deepcopy(self.r)
         other["payload_sha256"] = "0" * 64
         with self.assertRaises(ValueError):
-            q.append(self.events, "enqueue", self.r["id"], "owner-prepared-record", T0,
+            add(self.events, "enqueue", self.r["id"], "owner-prepared-record", T0,
                      {"record": other}, **TRUST)
 
     def test_tampering_reordering_deletion_detected(self):
@@ -234,10 +261,11 @@ class Ledger(unittest.TestCase):
     def test_untrusted_sources_and_unknown_events_rejected(self):
         for etype, source in (("owner_decision", "github-comment"), ("enqueue", "copilot"),
                               ("invalidate", "owner-attestation"), ("dispatch", "owner-attestation"),
-                              ("merge", "trusted-reconciler"), ("certify", "claude-session")):
+                              ("merge", "trusted-reconciler"), ("certify", "claude-session"),
+                              ("certify", "trusted-report-import")):
             with self.subTest(etype=etype, source=source):
                 with self.assertRaises(ValueError):
-                    q.append(self.events, etype, self.r["id"], source, T0 + 1,
+                    add(self.events, etype, self.r["id"], source, T0 + 1,
                              {"reason": "x", "observed_head_sha": None}, **TRUST)
 
     def test_reconciler_cannot_enqueue_work(self):
@@ -248,52 +276,35 @@ class Ledger(unittest.TestCase):
         with self.assertRaises(ValueError):
             enqueue(self.events, review(), at=T0 - 1)
         with self.assertRaises(ValueError):
-            q.append(self.events, "invalidate", "e" * 24, "trusted-reconciler", T0 + 1,
+            add(self.events, "invalidate", "e" * 24, "trusted-reconciler", T0 + 1,
                      {"reason": "x", "observed_head_sha": None}, **TRUST)
 
     def test_one_live_decision_per_slot_until_invalidated(self):
         newer = impl(head=B)
         with self.assertRaisesRegex(ValueError, "live decision"):
             enqueue(self.events, newer, at=T0 + 1)
-        events = q.append(self.events, "invalidate", self.r["id"], "trusted-reconciler", T0 + 1,
+        events = add(self.events, "invalidate", self.r["id"], "trusted-reconciler", T0 + 1,
                           {"reason": "stale SHA", "observed_head_sha": B}, **TRUST)
         events = enqueue(events, newer, at=T0 + 2)
         with self.assertRaises(ValueError):  # stale approval cannot land on old record
             approve(events, self.r, at=T0 + 3)
 
     def test_terminal_states_cannot_be_revived(self):
-        events = q.append(self.events, "invalidate", self.r["id"], "trusted-reconciler", T0 + 1,
+        events = add(self.events, "invalidate", self.r["id"], "trusted-reconciler", T0 + 1,
                           {"reason": "closed", "observed_head_sha": None}, **TRUST)
         for etype, source, data in (
                 ("invalidate", "trusted-reconciler", {"reason": "x", "observed_head_sha": None}),
                 ("complete", "trusted-reconciler", {"evidence": "x"})):
             with self.subTest(etype=etype):
                 with self.assertRaises(ValueError):
-                    q.append(events, etype, self.r["id"], source, T0 + 2, data, **TRUST)
+                    add(events, etype, self.r["id"], source, T0 + 2, data, **TRUST)
         with self.assertRaises(ValueError):
             approve(events, self.r, at=T0 + 3)
 
     def test_completion_requires_prior_owner_approval(self):
         with self.assertRaises(ValueError):
-            q.append(self.events, "complete", self.r["id"], "trusted-reconciler", T0 + 1,
+            add(self.events, "complete", self.r["id"], "trusted-reconciler", T0 + 1,
                      {"evidence": "integrated"}, **TRUST)
-
-    def test_forged_certification_in_ledger_rejected(self):
-        r = review()
-        events = approve(enqueue([], r), r)
-        for cert in ({"result": "exact_head_certified", "record_id": r["id"], "head_sha": B,
-                      "merge_enabled": False},
-                     {"result": "exact_head_certified", "record_id": r["id"], "head_sha": A,
-                      "merge_enabled": True}):
-            with self.subTest(cert=cert):
-                with self.assertRaises(ValueError):
-                    q.append(events, "certify", r["id"], "trusted-report-import", T0 + 20,
-                             {"certification": cert}, **TRUST)
-        with self.assertRaises(ValueError):  # non-review kinds cannot be certified
-            q.append(approve(self.events, self.r), "certify", self.r["id"],
-                     "trusted-report-import", T0 + 20,
-                     {"certification": {"result": "exact_head_certified", "record_id": self.r["id"],
-                                        "head_sha": A, "merge_enabled": False}}, **TRUST)
 
 
 class Attestations(unittest.TestCase):
@@ -323,7 +334,7 @@ class Attestations(unittest.TestCase):
                      {"comment": "/approve", "author": "ScottMDavistv"}, None, ["approve"]):
             with self.subTest(fake=fake):
                 with self.assertRaises(ValueError):
-                    q.append(self.events, "owner_decision", self.r["id"], "owner-attestation",
+                    add(self.events, "owner_decision", self.r["id"], "owner-attestation",
                              T0 + 10, {"attestation": fake}, **TRUST)
 
     def test_binding_and_signature_attacks(self):
@@ -433,7 +444,7 @@ class Reconciliation(unittest.TestCase):
         # Applying the proposals through the ledger is accepted, and idempotent.
         events = enqueue(enqueue([], self.r), self.rev, at=T0 + 1)
         for p in out["proposals"]:
-            events = q.append(events, p["proposal"], p["record_id"], p["source"], T0 + 5,
+            events = add(events, p["proposal"], p["record_id"], p["source"], T0 + 5,
                               p["data"], **TRUST)
         again = q.reconcile(q.replay(events, **TRUST)["records"], snap)
         self.assertEqual(again["proposals"], [])
@@ -508,7 +519,7 @@ class PlanningAndCapacity(unittest.TestCase):
         records = self.build()
         entry = {e["id"]: e for e in q.plan(records, [], T0)["order"]}[self.rev["id"]]
         self.assertEqual(entry["status"], "blocked")
-        events = q.append(self.events, "complete", self.impl["id"], "trusted-reconciler", T0 + 20,
+        events = add(self.events, "complete", self.impl["id"], "trusted-reconciler", T0 + 20,
                           {"evidence": "integrated by verified ancestry"}, **TRUST)
         records = q.replay(events, **TRUST)["records"]
         entry = {e["id"]: e for e in q.plan(records, [], T0)["order"]}[self.rev["id"]]
@@ -617,19 +628,25 @@ class Certification(unittest.TestCase):
                        "provenance": "trusted-report-import"}
 
     def run_cert(self, report=None, record=None, head=A, sessions=None, ci=None,
-                 source="trusted-protected-task-ledger", applicable=None):
+                 source="trusted-protected-task-ledger", applicable=None, rng=None):
         return q.certify(record or self.record, report or self.report, current_head_sha=head,
                          sessions=self.sessions if sessions is None else sessions,
                          ci_policy_source=source,
                          applicable_workflows=applicable or ["Security Checks", "Backend Python Tests"],
-                         ci=ci_runs(A) if ci is None else ci)
+                         ci=ci_runs(A) if ci is None else ci,
+                         reviewed_range=reviewed_range() if rng is None else rng)
 
     def test_valid_certification_is_not_merge_authorization(self):
         out = self.run_cert()
         self.assertEqual(out["result"], "exact_head_certified")
         self.assertFalse(out["merge_enabled"])
-        events = q.append(self.events, "certify", self.rec["id"], "trusted-report-import", T0 + 20,
-                          {"certification": out}, **TRUST)
+        self.assertEqual(set(out), q.CERTIFICATION_KEYS)
+        self.assertEqual(out["report_sha256"], q.sha256_hex(self.report))
+        self.assertEqual(out["reviewed_range_sha256"], q.sha256_hex(reviewed_range()))
+        self.assertEqual(out["session_ledger_sha256"], q.sha256_hex(self.sessions))
+        events = add(self.events, "certify", self.rec["id"], "owner-attestation", T0 + 20,
+                     {"certification": out,
+                      "attestation": cert_attestation(self.record, out, issued=T0 + 15)})
         self.assertEqual(q.replay(events, **TRUST)["records"][self.rec["id"]]["state"], "certified")
 
     def test_report_attacks(self):
@@ -686,6 +703,413 @@ class Certification(unittest.TestCase):
                              ("unhashable applicability", {"applicable": [["Security Checks"]]})):
             with self.subTest(name=name):
                 self.assertEqual(self.run_cert(**kwargs)["result"], "not_certified")
+
+
+class LedgerCertificationM1(unittest.TestCase):
+    """M-1: a ledger ``certify`` event needs an owner attestation over the exact
+    digest-bound certification; self-declared shapes and source tags are not
+    evidence."""
+
+    def setUp(self):
+        self.rec = review()
+        self.events = approve(enqueue([], self.rec), self.rec)
+        self.record = q.replay(self.events, **TRUST)["records"][self.rec["id"]]
+        self.sessions = [session("claude-impl-58", pr=58, state="ended"),
+                         session("claude-rev-58", role="reviewer", record_id=self.rec["id"])]
+        report = {"schema_version": 1, "report_type": "independent_security_review",
+                  "repository": q.REPO, "pr_number": 58, "head_sha": A, "base_ref": "main",
+                  "scope": "full-diff-exact-head", "reviewer_session_id": "claude-rev-58",
+                  "reviewer_provider": "claude", "verdict": "PASS", "findings": [],
+                  "provenance": "trusted-report-import"}
+        self.cert = q.certify(self.record, report, current_head_sha=A, sessions=self.sessions,
+                              ci_policy_source="trusted-protected-task-ledger",
+                              applicable_workflows=["Security Checks"], ci=ci_runs(A),
+                              reviewed_range=reviewed_range())
+        self.assertEqual(self.cert["result"], "exact_head_certified")
+
+    def certify_event(self, data, events=None, source="owner-attestation", at=T0 + 20, **kw):
+        return add(self.events if events is None else events, "certify", self.rec["id"],
+                   source, at, data, **kw)
+
+    def good(self, **over):
+        over.setdefault("issued", T0 + 15)
+        return {"certification": self.cert,
+                "attestation": cert_attestation(self.record, self.cert, **over)}
+
+    def state(self, events):
+        return q.replay(events, **TRUST)["records"][self.rec["id"]]["state"]
+
+    def test_authentic_owner_certification_is_accepted_and_reverified(self):
+        events = self.certify_event(self.good())
+        self.assertEqual(self.state(events), "certified")
+        with self.assertRaises(ValueError):  # replay without the owner keyring fails closed
+            q.replay(events)
+
+    def test_probe_p1_self_declared_certification_without_evidence_rejected(self):
+        legacy = {"result": "exact_head_certified", "record_id": self.rec["id"], "head_sha": A,
+                  "merge_enabled": False}
+        for source in ("trusted-report-import", "owner-attestation"):
+            for data in ({"certification": legacy}, {"certification": self.cert},
+                         {"certification": legacy,
+                          "attestation": cert_attestation(self.record, legacy, issued=T0 + 15)}):
+                with self.subTest(source=source, keys=sorted(data)):
+                    with self.assertRaises(ValueError):
+                        self.certify_event(data, source=source)
+
+    def test_forged_or_misbound_attestations_rejected(self):
+        other_cert = dict(self.cert, report_sha256="e" * 64)
+        approval_att = attestation(self.record, issued=T0 + 15, nonce="8" * 32)
+        cases = {
+            "wrong key": self.good(key=b"x" * 32),
+            "not owner": self.good(approver_user_id=2002),
+            "bound to other certification": {"certification": self.cert,
+                                             "attestation": cert_attestation(
+                                                 self.record, other_cert, issued=T0 + 15)},
+            "digest-swapped certification": {"certification": other_cert,
+                                             "attestation": self.good()["attestation"]},
+            "approval attestation replayed": {"certification": self.cert,
+                                              "attestation": approval_att},
+            "approval scheme": self.good(scheme=q.ATTESTATION_SCHEME),
+            "approve decision": self.good(decision="approve"),
+            "other head": self.good(head_sha=B),
+            "other pr": self.good(pr_number=59),
+            "expired": self.good(issued=T0 + 15 - 3600),
+            "future": self.good(issued=T0 + 25),
+            "unicode-lookalike digest": self.good(
+                certification_sha256=q.sha256_hex(self.cert).upper()),
+        }
+        for name, data in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    self.certify_event(data)
+
+    def test_certification_field_tampering_rejected(self):
+        for field, value in (("head_sha", B), ("merge_enabled", True), ("pr_number", True),
+                             ("record_id", "e" * 24), ("result", "certified"),
+                             ("note", "merge approved"), ("report_sha256", "short"),
+                             ("ci_evidence_sha256", None), ("reviewer_session_id", "x"),
+                             ("extra", 1)):
+            with self.subTest(field=field):
+                cert = dict(self.cert)
+                cert[field] = value
+                data = {"certification": cert,
+                        "attestation": cert_attestation(self.record, cert, issued=T0 + 15)}
+                with self.assertRaises(ValueError):
+                    self.certify_event(data)
+        missing = {k: v for k, v in self.cert.items() if k != "report_sha256"}
+        with self.assertRaises(ValueError):
+            self.certify_event({"certification": missing, "attestation": cert_attestation(
+                self.record, missing, issued=T0 + 15)})
+
+    def test_post_signature_ledger_edit_detected(self):
+        events = self.certify_event(self.good())
+        edited = copy.deepcopy(events)
+        edited[-1]["data"]["certification"]["report_sha256"] = "e" * 64
+        edited[-1]["event_hash"] = q._event_hash(edited[-1])  # attacker recomputes chain
+        with self.assertRaises(ValueError):
+            q.replay(edited, **TRUST)
+
+    def test_nonce_shared_with_approvals_and_single_use(self):
+        with self.assertRaisesRegex(ValueError, "nonce replay"):  # nonce of the approval
+            self.certify_event(self.good(nonce="1" * 32))
+        events = self.certify_event(self.good())
+        with self.assertRaises(ValueError):  # already certified; cannot re-certify
+            self.certify_event(self.good(nonce="7" * 32), events=events, at=T0 + 30)
+        later = review(pr=60, head=C)
+        events = enqueue(events, later, at=T0 + 30)
+        with self.assertRaisesRegex(ValueError, "nonce replay"):  # certification nonce consumed
+            approve(events, later, at=T0 + 40, nonce="9" * 32)
+
+    def test_pending_moved_or_non_review_records_cannot_be_certified(self):
+        pending = review(pr=59)
+        events = enqueue([], pending)
+        with self.assertRaises(ValueError):
+            add(events, "certify", pending["id"], "owner-attestation", T0 + 20, self.good())
+        moved = add(self.events, "invalidate", self.rec["id"], "trusted-reconciler", T0 + 16,
+                    {"reason": "stale SHA", "observed_head_sha": B})
+        with self.assertRaises(ValueError):
+            self.certify_event(self.good(), events=moved)
+        other = impl()
+        events = approve(enqueue([], other), other)
+        cert = dict(self.cert, record_id=other["id"])
+        with self.assertRaises(ValueError):
+            add(events, "certify", other["id"], "owner-attestation", T0 + 20,
+                {"certification": cert, "attestation": cert_attestation(
+                    dict(other, state=q.APPROVED), cert, issued=T0 + 15)})
+
+    def test_forged_certification_cannot_unblock_security_merge(self):
+        merge = q.build_record("security_merge", 58, A, "P0", "Merge", "Owner only",
+                               depends_on=[self.rec["id"]])
+        events = approve(enqueue(self.events, merge, at=T0 + 11), merge, at=T0 + 12,
+                         nonce="6" * 32)
+        legacy = {"result": "exact_head_certified", "record_id": self.rec["id"], "head_sha": A,
+                  "merge_enabled": False}
+        with self.assertRaises(ValueError):
+            add(events, "certify", self.rec["id"], "trusted-report-import", T0 + 20,
+                {"certification": legacy})
+        order = {e["id"]: e for e in q.plan(q.replay(events, **TRUST)["records"], [], T0)["order"]}
+        self.assertEqual(order[merge["id"]]["status"], "blocked")
+        events = add(events, "certify", self.rec["id"], "owner-attestation", T0 + 20, self.good())
+        records = q.replay(events, **TRUST)["records"]
+        entry = {e["id"]: e for e in q.plan(records, [], T0)["order"]}[merge["id"]]
+        self.assertEqual(entry["status"], "approved_awaiting_manual_start")
+        self.assertFalse(records[merge["id"]]["merge_enabled"])
+
+
+class CertifyInputsL1L2(unittest.TestCase):
+    def setUp(self):
+        self.base = Certification("run_cert")
+        self.base.setUp()
+
+    def test_probe_p2_synthetic_or_malformed_record_not_certified(self):
+        fake = dict(self.base.record, id="f" * 24)
+        tampered = dict(self.base.record, details="other scope")
+        missing = {k: v for k, v in self.base.record.items() if k != "payload_sha256"}
+        unhashable = dict(self.base.record, priority=["P0"])
+        for name, rec in (("fake id", fake), ("tampered", tampered), ("missing", missing),
+                          ("unhashable", unhashable)):
+            with self.subTest(name=name):
+                out = self.base.run_cert(record=rec)
+                self.assertEqual(out["result"], "not_certified")
+                self.assertFalse(out["merge_enabled"])
+
+    def test_probe_p3_stacked_pr_contributor_cannot_certify(self):
+        # PR #79 stacks on PR #58: a session that implemented PR #58 (or
+        # authored any commit in base..head) is not independent of PR #79.
+        rec = review(pr=79, head=A)
+        record = dict(rec, state=q.APPROVED)
+        sessions = [session("claude-impl-58", pr=58, state="ended"),
+                    session("claude-rev-79", role="reviewer", pr=79, record_id=rec["id"])]
+        report = dict(self.base.report, pr_number=79, reviewer_session_id="claude-rev-79")
+        def run(rng, sess=sessions):
+            return self.base.run_cert(record=record, report=report, sessions=sess, rng=rng)
+        self.assertEqual(run(reviewed_range(prs=(58, 79)))["result"], "exact_head_certified")
+        # The reviewer authored a commit somewhere in base..head (e.g. in PR #58).
+        authored = reviewed_range(prs=(58, 79), contributors=("claude-impl-58", "claude-rev-79"))
+        self.assertIn("self-certification", run(authored)["reason"])
+        bad = {
+            "untrusted source": reviewed_range(prs=(58, 79), source="pr-description"),
+            "other repo": reviewed_range(prs=(58, 79), repository="attacker/repo"),
+            "range ends elsewhere": reviewed_range(head=B, prs=(58, 79)),
+            "record PR absent": reviewed_range(prs=(58,)),
+            "bool pr": reviewed_range(prs=(True, 79)),
+            "duplicate pr": reviewed_range(prs=(79, 79)),
+            "bad contributor": reviewed_range(prs=(79,), contributors=(["x"],)),
+            "duplicate contributor": reviewed_range(prs=(79,), contributors=("abc", "abc")),
+            "extra key": dict(reviewed_range(prs=(79,)), complete=True),
+            "missing": None,
+        }
+        for name, rng in bad.items():
+            with self.subTest(name=name):
+                out = q.certify(record, report, current_head_sha=A, sessions=sessions,
+                                ci_policy_source="trusted-protected-task-ledger",
+                                applicable_workflows=["Security Checks"], ci=ci_runs(A),
+                                reviewed_range=rng)
+                self.assertEqual(out["result"], "not_certified", name)
+
+    def test_stack_implementer_session_excluded_across_prs(self):
+        # Reviewer session registered as reviewer, while an implementer session
+        # with the same identity exists only under a different PR is
+        # inexpressible (unique IDs); verify the per-stack union is used.
+        rec = review(pr=79, head=A)
+        record = dict(rec, state=q.APPROVED)
+        sessions = [session("claude-rev-79", role="reviewer", pr=79, record_id=rec["id"]),
+                    session("other-impl", pr=58)]
+        report = dict(self.base.report, pr_number=79, reviewer_session_id="claude-rev-79")
+        orig = q._implementer_sessions
+        try:
+            q._implementer_sessions = lambda s, n: {"claude-rev-79"} if n == 58 else set()
+            out = self.base.run_cert(record=record, report=report, sessions=sessions,
+                                     rng=reviewed_range(prs=(58, 79), contributors=()))
+        finally:
+            q._implementer_sessions = orig
+        self.assertIn("self-certification", out["reason"])
+
+    def test_reviewer_admitted_for_a_different_record_rejected(self):
+        other = review(pr=58, head=A, linked_issue=99)
+        sessions = [session("claude-impl-58", pr=58, state="ended"),
+                    session("claude-rev-58", role="reviewer", record_id=other["id"])]
+        out = self.base.run_cert(sessions=sessions)
+        self.assertEqual(out["reason"], "reviewer session not admitted for this record")
+
+    def test_non_canonical_evidence_fails_closed(self):
+        ci = ci_runs(A)
+        ci[0]["duration"] = 1.5
+        out = self.base.run_cert(ci=ci)
+        self.assertEqual(out["result"], "not_certified")
+
+
+class LedgerIntegrityL3(unittest.TestCase):
+    """Discriminating tests for controls that previously survived mutation."""
+
+    def setUp(self):
+        self.r = impl()
+        events = enqueue([], self.r)
+        self.events = add(events, "invalidate", self.r["id"], "trusted-reconciler", T0 + 1,
+                          {"reason": "stale SHA", "observed_head_sha": B})
+        self.anchor = q.replay(self.events)["head_hash"]
+
+    def test_unrehashed_edit_of_non_record_fields_detected_even_with_anchor(self):
+        for field, value in (("at", T0 + 2), ("reason", "operator approved merge"),
+                             ("observed_head_sha", C)):
+            with self.subTest(field=field):
+                edited = copy.deepcopy(self.events)
+                if field == "at":
+                    edited[1]["at"] = value
+                else:
+                    edited[1]["data"][field] = value
+                with self.assertRaisesRegex(ValueError, "event hash mismatch"):
+                    q.replay(edited, anchor_hash=self.anchor)
+
+    def test_event_hash_type_checked(self):
+        edited = copy.deepcopy(self.events)
+        edited[1]["event_hash"] = None
+        with self.assertRaisesRegex(ValueError, "event hash mismatch"):
+            q.replay(edited)
+
+    def test_non_contiguous_sequence_with_valid_chain_rejected(self):
+        for seqs in ((0, 2), (1, 2), (False, 1), (0, True)):
+            with self.subTest(seqs=seqs):
+                forged, prev = [], q.GENESIS
+                for event, seq in zip(copy.deepcopy(self.events), seqs):
+                    event["seq"], event["prev_hash"] = seq, prev
+                    event["event_hash"] = q._event_hash(event)
+                    prev = event["event_hash"]
+                    forged.append(event)
+                with self.assertRaisesRegex(ValueError, "non-contiguous sequence"):
+                    q.replay(forged)
+
+    def test_bool_attestation_binds_never_equal_pr_one(self):
+        r1 = q.build_record("implementation", 1, A, "P1", "pr one", "d")
+        good = attestation(r1, issued=T0)
+        self.assertEqual(q.verify_attestation(good, r1, now=T0 + 1, used_nonces=set(), **TRUST),
+                         "approve")
+        for field, value in (("pr_number", True),):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "not bound"):
+                    q.verify_attestation(attestation(r1, issued=T0, **{field: value}), r1,
+                                         now=T0 + 1, used_nonces=set(), **TRUST)
+
+    def test_short_key_rejected_even_with_matching_mac(self):
+        for size in (1, 16, 31):
+            with self.subTest(size=size):
+                key = b"s" * size
+                att = attestation(self.r, issued=T0)
+                att = sign(att, key=key)
+                with self.assertRaisesRegex(ValueError, "no trusted verification key"):
+                    q.verify_attestation(att, self.r, keyring={"owner-2026": key},
+                                         approver_ids=frozenset({OWNER}), now=T0 + 1,
+                                         used_nonces=set())
+        att = sign(attestation(self.r, issued=T0), key=b"s" * 32)
+        self.assertEqual(q.verify_attestation(att, self.r, keyring={"owner-2026": b"s" * 32},
+                                              approver_ids=frozenset({OWNER}), now=T0 + 1,
+                                              used_nonces=set()), "approve")
+
+
+class TrustedTimeL4(unittest.TestCase):
+    def setUp(self):
+        self.r = impl()
+        self.events = enqueue([], self.r)
+
+    def test_probe_p5_backdated_append_of_expired_attestation_rejected(self):
+        att = attestation(self.r, issued=T0, ttl=60)
+        # Real (trusted) time is long after expiry; writer back-dates the event.
+        with self.assertRaisesRegex(ValueError, "trusted time"):
+            add(self.events, "owner_decision", self.r["id"], "owner-attestation", T0 + 30,
+                {"attestation": att}, trusted_now=T0 + 7200)
+        with self.assertRaisesRegex(ValueError, "expired"):
+            add(self.events, "owner_decision", self.r["id"], "owner-attestation", T0 + 7200,
+                {"attestation": att})
+
+    def test_append_requires_trusted_clock(self):
+        for bad in (None, True, "1800000000", -1):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError, "trusted_now"):
+                    q.append(self.events, "invalidate", self.r["id"], "trusted-reconciler",
+                             T0 + 1, {"reason": "x", "observed_head_sha": None},
+                             trusted_now=bad, **TRUST)
+        with self.assertRaisesRegex(ValueError, "trusted_now"):
+            q.append(self.events, "invalidate", self.r["id"], "trusted-reconciler", T0 + 1,
+                     {"reason": "x", "observed_head_sha": None}, **TRUST)
+        with self.assertRaisesRegex(ValueError, "equal trusted time"):
+            add(self.events, "invalidate", self.r["id"], "trusted-reconciler", T0 + 1,
+                {"reason": "x", "observed_head_sha": None}, trusted_now=T0 + 2)
+
+    def test_replay_rejects_events_after_trusted_time(self):
+        events = approve(self.events, self.r, at=T0 + 10)
+        self.assertTrue(q.replay(events, trusted_now=T0 + 10, **TRUST))
+        with self.assertRaisesRegex(ValueError, "after trusted time"):
+            q.replay(events, trusted_now=T0 + 9, **TRUST)
+        with self.assertRaisesRegex(ValueError, "invalid trusted time"):
+            q.replay(events, trusted_now=True, **TRUST)
+
+
+class ReconcileL5AndInformational(unittest.TestCase):
+    def test_probe_p8_merge_at_unapproved_head_raises_security_hold(self):
+        merge = q.build_record("security_merge", 46, B, "P0", "Merge", "Owner only")
+        approved = q.replay(approve(enqueue([], merge), merge), **TRUST)["records"]
+        pending = q.replay(enqueue([], merge), **TRUST)["records"]
+        for name, records, state in (("approved other head", approved, q.APPROVED),
+                                     ("never approved", pending, q.PENDING)):
+            head = A if state == q.APPROVED else B
+            with self.subTest(name=name):
+                out = q.reconcile(records, snapshot(pull(46, head, "closed", True, C)))
+                self.assertEqual(out["holds"], [{
+                    "record_id": merge["id"], "reason": q.UNAPPROVED_MERGE_HOLD,
+                    "security_alert": True, "owner_action_required": True,
+                    "decision_state": state, "decision_head_sha": B,
+                    "observed_head_sha": head, "merge_commit_sha": C}])
+                inval = [p for p in out["proposals"] if p["proposal"] == "invalidate"]
+                self.assertEqual(len(inval), 1)
+                self.assertIn("SECURITY HOLD", inval[0]["data"]["reason"])
+                self.assertNotIn("complete", [p["proposal"] for p in out["proposals"]])
+        ok = q.reconcile(approved, snapshot(pull(46, B, "closed", True, C)))
+        self.assertEqual(ok["holds"], [])
+
+    def test_i5_target_merge_reason_is_accurate(self):
+        c = q.build_record("branch_correction", 63, B, "P0", "Fix", "Wrong origin", target_pr=46)
+        records = q.replay(enqueue([], c), **TRUST)["records"]
+        out = q.reconcile(records, snapshot(pull(63, A), pull(46, B, "closed", True, C)))
+        self.assertEqual(out["proposals"][0]["data"]["reason"],
+                         "target PR merged; correction superseded")
+        closed = q.reconcile(records, snapshot(pull(63, A), pull(46, B, "closed")))
+        self.assertEqual(closed["proposals"][0]["data"]["reason"], "PR closed without merge")
+
+    def test_i4_owner_only_p0_does_not_reserve_agent_slot(self):
+        merge = q.build_record("security_merge", 46, A, "P0", "Merge", "Owner only")
+        work = impl()
+        events = approve(approve(enqueue(enqueue([], merge), work, at=T0 + 1), merge,
+                                 at=T0 + 10, nonce="4" * 32), work, at=T0 + 11, nonce="5" * 32)
+        records = q.replay(events, **TRUST)["records"]
+        req = {"session_id": "claude-impl-58", "provider": "claude", "role": "implementer",
+               "record_id": work["id"]}
+        self.assertTrue(q.admission(req, records, [session("other", pr=46)], T0)["admissible"])
+        p0 = q.build_record("remediation", 74, B, "P0", "P0 fix", "C1", linked_issue=73)
+        events = approve(enqueue(events, p0, at=T0 + 12), p0, at=T0 + 13, nonce="6" * 32)
+        records = q.replay(events, **TRUST)["records"]
+        self.assertEqual(q.admission(req, records, [session("other", pr=46)], T0)["reason"],
+                         "last slot reserved for unstaffed P0 work")
+
+    def test_i1_unhashable_ledger_fields_fail_closed_with_value_error(self):
+        r = impl()
+        base = enqueue([], r)
+        base = add(base, "invalidate", r["id"], "trusted-reconciler", T0 + 1,
+                   {"reason": "stale", "observed_head_sha": None})
+        for index, field, value in ((0, "event_type", ["enqueue"]), (0, "source", {"x": 1}),
+                                    (0, "record_id", [r["id"]]), (1, "record_id", [r["id"]])):
+            with self.subTest(index=index, field=field):
+                edited, prev = copy.deepcopy(base), q.GENESIS
+                edited[index][field] = value
+                for event in edited:
+                    event["prev_hash"] = prev
+                    event["event_hash"] = prev = q._event_hash(event)
+                with self.assertRaises(ValueError):
+                    q.replay(edited)
+        for field, value in (("action_kind", ["implementation"]), ("priority", ["P1"]),
+                             ("state", ["x"])):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    q.validate_record(dict(r, **{field: value}))
 
 
 class SharedPolicyRegression(unittest.TestCase):

@@ -78,7 +78,9 @@ EVENT_SOURCES = {
     "owner_decision": {"owner-attestation"},
     "invalidate": {"trusted-reconciler"},
     "complete": {"trusted-reconciler"},
-    "certify": {"trusted-report-import"},
+    # A certification is authenticated by an owner certification attestation
+    # over the digest-bound certification, never by this source label.
+    "certify": {"owner-attestation"},
 }
 EVENT_KEYS = frozenset({"seq", "prev_hash", "event_type", "record_id", "source",
                         "at", "data", "event_hash"})
@@ -87,6 +89,20 @@ ATTESTATION_KEYS = frozenset({
     "action_kind", "pr_number", "head_sha", "decision", "approver_user_id",
     "issued_at", "expires_at", "nonce", "signature"})
 ATTESTATION_SCHEME = "hmac-sha256-offline-reference"
+# Domain-separated from approvals: distinct scheme, decision and key set, so an
+# approval attestation can never be replayed as a certification or vice versa.
+CERT_ATTESTATION_KEYS = ATTESTATION_KEYS | {"certification_sha256"}
+CERT_ATTESTATION_SCHEME = "hmac-sha256-offline-reference-certification"
+CERTIFICATION_KEYS = frozenset({
+    "result", "record_id", "pr_number", "head_sha", "report_sha256",
+    "reviewer_session_id", "ci_evidence_sha256", "session_ledger_sha256",
+    "reviewed_range_sha256", "merge_enabled", "note"})
+CERT_NOTE = ("Certification is not merge authorization; a security-sensitive "
+             "merge needs a separate authenticated owner decision.")
+RANGE_KEYS = frozenset({"source", "repository", "base_sha", "head_sha", "pr_numbers",
+                        "contributor_session_ids"})
+RANGE_SOURCE = "trusted-git-range-adapter"
+UNAPPROVED_MERGE_HOLD = "SECURITY HOLD: PR merged at an unapproved exact head"
 PROVIDERS = frozenset({"claude", "copilot", "codex", "other"})
 SESSION_ROLES = frozenset({"implementer", "reviewer", "read_only_verifier"})
 SESSION_KEYS = frozenset({"session_id", "provider", "role", "record_id",
@@ -184,7 +200,8 @@ def validate_record(record, allowed_states=frozenset({PENDING})):
     if record["record_type"] != "unified_queue_entry" or record["repository"] != REPO:
         raise ValueError("record type/repository not allowed")
     kind = record["action_kind"]
-    if kind not in KINDS or record["agent_role"] != ROLE_FOR_KIND[kind]:
+    if (not isinstance(kind, str) or kind not in KINDS or
+            record["agent_role"] != ROLE_FOR_KIND[kind]):
         raise ValueError("kind/role mismatch")
     if not _int(record["pr_number"]):
         raise ValueError("invalid PR number")
@@ -197,7 +214,7 @@ def validate_record(record, allowed_states=frozenset({PENDING})):
         raise ValueError("invalid exact head")
     if record["linked_issue"] is not None and not _int(record["linked_issue"]):
         raise ValueError("invalid linked issue")
-    if record["priority"] not in PRIORITY_RANK:
+    if not isinstance(record["priority"], str) or record["priority"] not in PRIORITY_RANK:
         raise ValueError("invalid priority")
     deps = record["depends_on"]
     if (not isinstance(deps, list) or
@@ -206,7 +223,7 @@ def validate_record(record, allowed_states=frozenset({PENDING})):
         raise ValueError("invalid dependencies")
     if not _text(record["title"]) or not _text(record["details"]):
         raise ValueError("invalid title/details")
-    if record["state"] not in allowed_states:
+    if not isinstance(record["state"], str) or record["state"] not in allowed_states:
         raise ValueError("record state not allowed here")
     if (record["dispatch_enabled"] is not False or record["activation_enabled"] is not False
             or record["merge_enabled"] is not False):
@@ -229,16 +246,13 @@ def _slot(record):
 # Owner approval attestations: verification only. This module cannot sign.
 # --------------------------------------------------------------------------
 
-def verify_attestation(att, record, *, keyring, approver_ids, now, used_nonces,
-                       max_ttl=MAX_APPROVAL_TTL_SECONDS):
-    """Return ``approve``/``reject`` for a valid attestation, else raise.
-
-    GitHub comment text, labels, checkboxes or model output are never inputs
-    here; only a structured attestation whose MAC covers every bound field.
-    """
-    if not isinstance(att, dict) or set(att) != ATTESTATION_KEYS:
+def _verify_owner_mac(att, record, *, keys, scheme, decisions, record_states,
+                      record_error, extra_bindings, keyring, approver_ids, now,
+                      used_nonces, max_ttl):
+    """Shared verifier for owner approval and certification attestations."""
+    if not isinstance(att, dict) or set(att) != keys:
         raise ValueError("attestation fields missing/unexpected")
-    if att["version"] != 1 or type(att["version"]) is not int or att["scheme"] != ATTESTATION_SCHEME:
+    if att["version"] != 1 or type(att["version"]) is not int or att["scheme"] != scheme:
         raise ValueError("unsupported attestation scheme")
     if not isinstance(keyring, dict) or not isinstance(att["key_id"], str):
         raise ValueError("no trusted verification key")
@@ -246,15 +260,17 @@ def verify_attestation(att, record, *, keyring, approver_ids, now, used_nonces,
     if not isinstance(key, bytes) or len(key) < 32:
         raise ValueError("no trusted verification key")
     try:
-        validate_record(record)
-    except ValueError:
-        raise ValueError("record is not a valid pending owner decision") from None
-    for field, rec_field in (("record_id", "id"), ("payload_sha256", "payload_sha256"),
-                             ("repository", "repository"), ("action_kind", "action_kind"),
-                             ("pr_number", "pr_number"), ("head_sha", "head_sha")):
-        if type(att[field]) is not type(record[rec_field]) or att[field] != record[rec_field]:
+        validate_record(record, allowed_states=record_states)
+    except (ValueError, TypeError):
+        raise ValueError(record_error) from None
+    bindings = [(field, record[rec_field]) for field, rec_field in (
+        ("record_id", "id"), ("payload_sha256", "payload_sha256"),
+        ("repository", "repository"), ("action_kind", "action_kind"),
+        ("pr_number", "pr_number"), ("head_sha", "head_sha"))]
+    for field, value in bindings + list(extra_bindings):
+        if type(att[field]) is not type(value) or att[field] != value:
             raise ValueError("attestation not bound to this exact record: " + field)
-    if att["decision"] not in ("approve", "reject"):
+    if not isinstance(att["decision"], str) or att["decision"] not in decisions:
         raise ValueError("invalid decision")
     if (not _int(att["approver_user_id"]) or not isinstance(approver_ids, frozenset)
             or att["approver_user_id"] not in approver_ids):
@@ -278,6 +294,59 @@ def verify_attestation(att, record, *, keyring, approver_ids, now, used_nonces,
     return att["decision"]
 
 
+def verify_attestation(att, record, *, keyring, approver_ids, now, used_nonces,
+                       max_ttl=MAX_APPROVAL_TTL_SECONDS):
+    """Return ``approve``/``reject`` for a valid attestation, else raise.
+
+    GitHub comment text, labels, checkboxes or model output are never inputs
+    here; only a structured attestation whose MAC covers every bound field.
+    """
+    return _verify_owner_mac(
+        att, record, keys=ATTESTATION_KEYS, scheme=ATTESTATION_SCHEME,
+        decisions=("approve", "reject"), record_states=frozenset({PENDING}),
+        record_error="record is not a valid pending owner decision", extra_bindings=(),
+        keyring=keyring, approver_ids=approver_ids, now=now, used_nonces=used_nonces,
+        max_ttl=max_ttl)
+
+
+def validate_certification(cert, record):
+    """Exact-shape check of a certification produced by ``certify``.
+
+    Shape alone is never sufficient: replay additionally requires an owner
+    certification attestation over ``sha256_hex(cert)``.
+    """
+    if not isinstance(cert, dict) or set(cert) != CERTIFICATION_KEYS:
+        raise ValueError("invalid certification data")
+    if (cert["result"] != "exact_head_certified" or cert["merge_enabled"] is not False or
+            cert["note"] != CERT_NOTE or
+            type(cert["record_id"]) is not str or cert["record_id"] != record["id"] or
+            type(cert["pr_number"]) is not int or cert["pr_number"] != record["pr_number"] or
+            type(cert["head_sha"]) is not str or cert["head_sha"] != record["head_sha"]):
+        raise ValueError("invalid certification data")
+    for field in ("report_sha256", "ci_evidence_sha256", "session_ledger_sha256",
+                  "reviewed_range_sha256"):
+        if not isinstance(cert[field], str) or not DIGEST.fullmatch(cert[field]):
+            raise ValueError("invalid certification evidence digest")
+    if (not isinstance(cert["reviewer_session_id"], str) or
+            not SESSION_ID.fullmatch(cert["reviewer_session_id"])):
+        raise ValueError("invalid certification reviewer")
+    return True
+
+
+def verify_certification_attestation(att, record, certification, *, keyring, approver_ids,
+                                     now, used_nonces, max_ttl=MAX_APPROVAL_TTL_SECONDS):
+    """Verify an owner attestation that binds an exact certification digest to
+    an approved review record. Returns ``certify`` or raises."""
+    validate_certification(certification, record)
+    return _verify_owner_mac(
+        att, record, keys=CERT_ATTESTATION_KEYS, scheme=CERT_ATTESTATION_SCHEME,
+        decisions=("certify",), record_states=frozenset({APPROVED}),
+        record_error="record is not an approved review awaiting certification",
+        extra_bindings=(("certification_sha256", sha256_hex(certification)),),
+        keyring=keyring, approver_ids=approver_ids, now=now, used_nonces=used_nonces,
+        max_ttl=max_ttl)
+
+
 # --------------------------------------------------------------------------
 # Append-only, hash-chained event ledger.
 # --------------------------------------------------------------------------
@@ -286,14 +355,21 @@ def _event_hash(event):
     return sha256_hex({k: v for k, v in event.items() if k != "event_hash"})
 
 
-def replay(events, *, keyring=None, approver_ids=frozenset(), anchor_hash=None):
+def replay(events, *, keyring=None, approver_ids=frozenset(), anchor_hash=None,
+           trusted_now=None):
     """Strictly replay a ledger; any irregularity fails closed.
 
     ``anchor_hash`` is the externally retained head hash; supplying it detects
     truncation or wholesale replacement, which a chain alone cannot.
+    ``trusted_now`` (epoch seconds from a trusted clock) rejects future-dated
+    events. Attestation freshness is evaluated at each event's ``at``; only
+    ``append`` (which stamps ``at`` from the trusted clock) binds that time to
+    real time, so a replayed ledger is only as fresh as its write path.
     """
     if not isinstance(events, list):
         raise ValueError("ledger must be a list")
+    if trusted_now is not None and not _int(trusted_now, 0):
+        raise ValueError("invalid trusted time")
     records, nonces, slots = {}, set(), {}
     prev, last_at = GENESIS, 0
     for index, event in enumerate(events):
@@ -306,13 +382,18 @@ def replay(events, *, keyring=None, approver_ids=frozenset(), anchor_hash=None):
         if not isinstance(event["event_hash"], str) or event["event_hash"] != _event_hash(event):
             raise ValueError("event hash mismatch at %d" % index)
         etype, source = event["event_type"], event["source"]
-        if etype not in EVENT_SOURCES or source not in EVENT_SOURCES[etype]:
+        if (not isinstance(etype, str) or not isinstance(source, str) or
+                etype not in EVENT_SOURCES or source not in EVENT_SOURCES[etype]):
             raise ValueError("event type/source not allowed at %d" % index)
         if not _int(event["at"], 0) or event["at"] < last_at:
             raise ValueError("non-monotonic event time at %d" % index)
+        if trusted_now is not None and event["at"] > trusted_now:
+            raise ValueError("event dated after trusted time at %d" % index)
         if not isinstance(event["data"], dict):
             raise ValueError("invalid event data at %d" % index)
         rid = event["record_id"]
+        if not isinstance(rid, str) or not RECORD_ID.fullmatch(rid):
+            raise ValueError("invalid record ID at %d" % index)
         data = event["data"]
         if etype == "enqueue":
             if set(data) != {"record"}:
@@ -357,13 +438,15 @@ def replay(events, *, keyring=None, approver_ids=frozenset(), anchor_hash=None):
                     raise ValueError("only approved non-review records can complete")
                 record["state"] = "completed"
             elif etype == "certify":
-                cert = data.get("certification") if set(data) == {"certification"} else None
-                if (not isinstance(cert, dict) or cert.get("result") != "exact_head_certified" or
-                        cert.get("record_id") != rid or cert.get("head_sha") != record["head_sha"] or
-                        cert.get("merge_enabled") is not False):
+                if set(data) != {"certification", "attestation"}:
                     raise ValueError("invalid certification data")
+                validate_certification(data["certification"], record)
                 if state != APPROVED or kind != "claude_review":
                     raise ValueError("only approved review records can be certified")
+                verify_certification_attestation(
+                    data["attestation"], record, data["certification"], keyring=keyring,
+                    approver_ids=approver_ids, now=event["at"], used_nonces=nonces)
+                nonces.add(data["attestation"]["nonce"])
                 record["state"] = "certified"
         prev, last_at = event["event_hash"], event["at"]
     if anchor_hash is not None and anchor_hash != prev:
@@ -375,8 +458,15 @@ def append(events, event_type, record_id, source, at, data, **replay_kwargs):
     """Return a new ledger with one validated event; the input is not mutated.
 
     Re-enqueueing an identical record is an idempotent no-op; a conflicting
-    payload under the same ID fails closed.
+    payload under the same ID fails closed. ``trusted_now`` is required and the
+    event time must equal it: the writer cannot back-date an event to keep an
+    expired attestation inside its validity window.
     """
+    trusted_now = replay_kwargs.get("trusted_now")
+    if not _int(trusted_now, 0):
+        raise ValueError("append requires trusted_now from a trusted clock")
+    if type(at) is not int or at != trusted_now:
+        raise ValueError("event time must equal trusted time at append")
     state = replay(events, **replay_kwargs)
     if event_type == "enqueue" and record_id in state["records"]:
         existing = state["records"][record_id]
@@ -530,10 +620,28 @@ def reconcile(records, snapshot):
                 proposals.append({"proposal": "complete", "record_id": rid,
                                   "data": {"evidence": "PR merged at approved head; merge commit "
                                            + pr["merge_commit_sha"]}})
+            elif kind == "security_merge":
+                # A merge without a verified owner decision at that exact head
+                # is a control failure, not routine supersession.
+                holds.append({"record_id": rid, "reason": UNAPPROVED_MERGE_HOLD,
+                              "security_alert": True, "owner_action_required": True,
+                              "decision_state": record["state"],
+                              "decision_head_sha": record["head_sha"],
+                              "observed_head_sha": pr["head_sha"],
+                              "merge_commit_sha": pr["merge_commit_sha"]})
+                proposals.append({"proposal": "invalidate", "record_id": rid,
+                                  "data": {"reason": UNAPPROVED_MERGE_HOLD +
+                                           "; owner security review required",
+                                           "observed_head_sha": pr["head_sha"]}})
             else:
                 proposals.append({"proposal": "invalidate", "record_id": rid,
                                   "data": {"reason": "PR merged; decision superseded",
                                            "observed_head_sha": pr["head_sha"]}})
+            continue
+        if kind == "branch_correction" and head_pr["merged"]:
+            proposals.append({"proposal": "invalidate", "record_id": rid,
+                              "data": {"reason": "target PR merged; correction superseded",
+                                       "observed_head_sha": head_pr["head_sha"]}})
             continue
         if pr["state"] == "closed" or head_pr["state"] == "closed":
             proposals.append({"proposal": "invalidate", "record_id": rid,
@@ -637,6 +745,7 @@ def admission(request, records, sessions, now):
         out["reason"] = "two-agent cap reached"
     elif record["priority"] != "P0" and cap["available"] == 1 and any(
             r["priority"] == "P0" and r["state"] in LIVE_STATES and
+            r["agent_role"] != "owner" and
             not any(s["state"] == "active" and s["record_id"] == r["id"] for s in sessions)
             for r in records.values()):
         out["reason"] = "last slot reserved for unstaffed P0 work"
@@ -702,10 +811,35 @@ def plan(records, sessions, now):
 # Independent exact-head review certification.
 # --------------------------------------------------------------------------
 
+def _validate_range(reviewed_range, record):
+    """Trusted description of the full reviewed diff ``base..head``: every PR
+    in the stack and every agent session that authored a commit in it."""
+    if not isinstance(reviewed_range, dict) or set(reviewed_range) != RANGE_KEYS:
+        return "reviewed range fields missing/unexpected"
+    if reviewed_range["source"] != RANGE_SOURCE or reviewed_range["repository"] != REPO:
+        return "untrusted reviewed range"
+    for field in ("base_sha", "head_sha"):
+        if not isinstance(reviewed_range[field], str) or not SHA.fullmatch(reviewed_range[field]):
+            return "invalid reviewed range"
+    if reviewed_range["head_sha"] != record["head_sha"]:
+        return "reviewed range does not end at the exact head"
+    prs, contributors = reviewed_range["pr_numbers"], reviewed_range["contributor_session_ids"]
+    if (not isinstance(prs, list) or not all(_int(n) for n in prs) or
+            len(prs) != len(set(prs)) or record["pr_number"] not in prs):
+        return "invalid reviewed range PRs"
+    if (not isinstance(contributors, list) or
+            not all(isinstance(c, str) and SESSION_ID.fullmatch(c) for c in contributors) or
+            len(contributors) != len(set(contributors))):
+        return "invalid reviewed range contributors"
+    return None
+
+
 def certify(record, report, *, current_head_sha, sessions, ci_policy_source,
-            applicable_workflows, ci):
+            applicable_workflows, ci, reviewed_range):
     """Evaluate an imported review report (untrusted data) for exact-head
-    certification. A certification is never merge authorization."""
+    certification. A certification is never merge authorization, and on its
+    own it cannot change ledger state: replay additionally requires an owner
+    certification attestation over the returned, digest-bound result."""
     def no(reason):
         return {"result": "not_certified", "reason": reason, "merge_enabled": False}
 
@@ -714,6 +848,10 @@ def certify(record, report, *, current_head_sha, sessions, ci_policy_source,
         return no("not an independent review record")
     if record.get("state") != APPROVED:
         return no("review record lacks verified owner approval")
+    try:
+        validate_record(record, allowed_states=frozenset({APPROVED}))
+    except (ValueError, TypeError):
+        return no("invalid or synthetic review record")
     if not isinstance(report, dict) or set(report) != REPORT_KEYS:
         return no("report fields missing/unexpected")
     if (report["schema_version"] != 1 or type(report["schema_version"]) is not int or
@@ -734,8 +872,15 @@ def certify(record, report, *, current_head_sha, sessions, ci_policy_source,
             reviewer[0]["record_id"] != record["id"] or
             reviewer[0]["provider"] != report["reviewer_provider"]):
         return no("reviewer session not admitted for this record")
-    if report["reviewer_session_id"] in _implementer_sessions(sessions, record["pr_number"]):
-        return no("self-certification: reviewer is an implementer")
+    range_reason = _validate_range(reviewed_range, record)
+    if range_reason is not None:
+        return no(range_reason)
+    stack_implementers = set()
+    for number in reviewed_range["pr_numbers"]:
+        stack_implementers |= _implementer_sessions(sessions, number)
+    if (report["reviewer_session_id"] in stack_implementers or
+            report["reviewer_session_id"] in reviewed_range["contributor_session_ids"]):
+        return no("self-certification: reviewer contributed to the reviewed range")
     if report["verdict"] != "PASS":
         return no("verdict is not PASS")
     findings = report["findings"]
@@ -744,6 +889,7 @@ def certify(record, report, *, current_head_sha, sessions, ci_policy_source,
     for f in findings:
         if (not isinstance(f, dict) or set(f) != FINDING_KEYS or not _text(f["id"]) or
                 not isinstance(f["severity"], str) or f["severity"] not in SEVERITIES or
+                not isinstance(f["status"], str) or
                 f["status"] not in ("open", "resolved", "accepted_residual")):
             return no("malformed finding")
         if f["severity"] in BLOCKING and f["status"] != "resolved":
@@ -752,11 +898,20 @@ def certify(record, report, *, current_head_sha, sessions, ci_policy_source,
                                      record["head_sha"])
     if ci_reason is not None:
         return no(ci_reason)
-    return {"result": "exact_head_certified", "record_id": record["id"],
-            "pr_number": record["pr_number"], "head_sha": record["head_sha"],
-            "report_sha256": sha256_hex(report), "merge_enabled": False,
-            "note": "Certification is not merge authorization; a security-sensitive "
-                    "merge needs a separate authenticated owner decision."}
+    try:
+        digests = {
+            "report_sha256": sha256_hex(report),
+            "ci_evidence_sha256": sha256_hex({"ci_policy_source": ci_policy_source,
+                                              "applicable_workflows": applicable_workflows,
+                                              "runs": ci}),
+            "session_ledger_sha256": sha256_hex(sessions),
+            "reviewed_range_sha256": sha256_hex(reviewed_range)}
+    except (ValueError, TypeError):
+        return no("certification evidence is not canonical")
+    return dict(digests, result="exact_head_certified", record_id=record["id"],
+                pr_number=record["pr_number"], head_sha=record["head_sha"],
+                reviewer_session_id=report["reviewer_session_id"], merge_enabled=False,
+                note=CERT_NOTE)
 
 
 # --------------------------------------------------------------------------
