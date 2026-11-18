@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from scripts.trusted_github_evidence import (
-    EvidenceError, GitHubReadOnly, WorkflowRule, safe_path,
+    EvidenceError, GitHubReadOnly, WorkflowRule, safe_path, strict_json,
     verify_pr_snapshot, verify_webhook, verify_workflow_provenance,
 )
 from scripts.trusted_agent_slots import Slots, SlotError
@@ -26,7 +26,9 @@ class FakeAPI:
     def get(self, path):
         if path.endswith("/pulls/81"):
             return ({"number": 81, "state": "open", "draft": True, "merged_at": None,
-                     "head": {"sha": HEAD}, "base": {"sha": MAIN, "ref": "main"}}, {})
+                     "head": {"sha": HEAD, "repo": {"full_name": REPO}},
+                     "base": {"sha": MAIN, "ref": "main",
+                              "repo": {"full_name": REPO}}}, {})
         if path.endswith("/git/ref/heads/main"):
             return ({"object": {"sha": MAIN}}, {})
         if "/contents/" in path:
@@ -60,6 +62,23 @@ class EvidenceTests(unittest.TestCase):
                      "docs/workflow.yml"):
             with self.subTest(path=path), self.assertRaises(EvidenceError):
                 safe_path(path)
+
+    def test_reject_ambiguous_api_json(self):
+        for raw in (b'{"number":81,"number":82}',
+                    b'{"head":{"sha":"first","sha":"last"}}',
+                    b'{"score":NaN}', b'{"score":Infinity}'):
+            with self.subTest(raw=raw), self.assertRaises(EvidenceError):
+                strict_json(raw)
+
+    def test_refuse_foreign_pr_repository(self):
+        class Foreign(FakeAPI):
+            def get(self, path):
+                data, headers = super().get(path)
+                if path.endswith("/pulls/81"):
+                    data["head"]["repo"]["full_name"] = "untrusted/other"
+                return data, headers
+        with self.assertRaises(EvidenceError):
+            verify_pr_snapshot(Foreign(), 81, HEAD, MAIN)
 
     def test_exact_head(self):
         self.assertEqual(verify_pr_snapshot(FakeAPI(), 81, HEAD, MAIN)["head_sha"], HEAD)
