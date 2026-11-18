@@ -20,6 +20,26 @@ class EvidenceError(ValueError):
     pass
 
 
+def strict_json(raw):
+    """Reject duplicate keys and non-finite constants in security evidence."""
+    def unique(pairs):
+        result = {}
+        for name, value in pairs:
+            if name in result:
+                raise EvidenceError("ambiguous duplicate JSON field")
+            result[name] = value
+        return result
+
+    def invalid_constant(_value):
+        raise EvidenceError("nonstandard JSON number")
+
+    try:
+        return json.loads(raw, object_pairs_hook=unique,
+                          parse_constant=invalid_constant)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise EvidenceError("invalid JSON evidence") from exc
+
+
 def verify_webhook(body: bytes, signature: str, secret: bytes, delivery: str) -> str:
     """HMAC authenticates bytes; replay prevention REQUIRES external durable ledger."""
     if not isinstance(body, bytes) or not body or len(body) > MAX_BYTES:
@@ -93,10 +113,7 @@ class GitHubReadOnly:
             raise EvidenceError("GitHub API unavailable") from exc
         if status != 200 or len(raw) > MAX_BYTES:
             raise EvidenceError("invalid response")
-        try:
-            return json.loads(raw), headers
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise EvidenceError("invalid JSON evidence") from exc
+        return strict_json(raw), headers
 
     def pages(self, path: str):
         seen, items = set(), []
@@ -135,6 +152,13 @@ def verify_pr_snapshot(api, pr_number: int, expected_head: str, expected_main: s
     main, _ = api.get(f"/repos/{REPO}/git/ref/heads/main")
     if not isinstance(pr, dict) or not isinstance(main, dict):
         raise EvidenceError("invalid PR provenance")
+    if (not isinstance(pr.get("head"), dict) or
+            not isinstance(pr.get("base"), dict) or
+            not isinstance(pr["head"].get("repo"), dict) or
+            not isinstance(pr["base"].get("repo"), dict) or
+            pr["head"]["repo"].get("full_name") != REPO or
+            pr["base"]["repo"].get("full_name") != REPO):
+        raise EvidenceError("PR repository provenance mismatch")
     if (pr.get("number") != pr_number or pr.get("state") != "open" or
             pr.get("draft") is not True or pr.get("merged_at") is not None or
             pr.get("head", {}).get("sha") != expected_head or
