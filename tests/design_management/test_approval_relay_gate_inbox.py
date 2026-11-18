@@ -56,6 +56,8 @@ class UnifiedQueue(unittest.TestCase):
         a = corrective_task(63, 46, SHA, "Wrong origin")
         b = corrective_task(63, 46, SHA, "Wrong origin")
         self.assertEqual(a["dedupe_marker"], b["dedupe_marker"])
+        other = corrective_task(63, 47, SHA, "Wrong origin")
+        self.assertNotEqual(a["dedupe_marker"], other["dedupe_marker"])
         self.assertIn("Owner approval", a["issue_body"])
         self.assertEqual(consolidate([a,a]), [a])
 
