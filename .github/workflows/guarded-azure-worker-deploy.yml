@@ -8,6 +8,7 @@ on:
       - 'scripts/validate-worker-infrastructure.py'
       - 'scripts/validate-fal-keyvault-iac.py'
       - 'scripts/verify_azure_worker_safe.py'
+      - 'scripts/verify_worker_image_whatif.py'
       - '.github/workflows/guarded-azure-worker-deploy.yml'
   schedule:
     - cron: '23 13 * * *'
@@ -115,10 +116,14 @@ jobs:
           set -euo pipefail
           test "$(az account show --query id -o tsv)" = "41fbffdc-1793-44f9-b70f-220ea8a9bc6c"
           python scripts/verify_azure_worker_safe.py
+          umask 077
+          preview_file="$(mktemp)"
+          trap 'rm -f "$preview_file"' EXIT
           az deployment group what-if -g rg-textvideo-dev \
             --template-file infra/worker-job.bicep \
             --parameters workerImage="$WORKER_IMAGE" \
-            --result-format ResourceIdOnly
+            --result-format FullResourcePayloads --output json > "$preview_file"
+          python scripts/verify_worker_image_whatif.py "$preview_file"
         env:
           WORKER_IMAGE: acrtextvideo1794671698.azurecr.io/textvideo-worker@sha256:219ebbe03d9b1356a4091912b4955c1987ba8a0131a4e084953ab3796b5f0646
   deploy:
@@ -143,6 +148,17 @@ jobs:
           test "$(az account show --query id -o tsv)" = "41fbffdc-1793-44f9-b70f-220ea8a9bc6c"
           python scripts/validate-worker-infrastructure.py
           python scripts/validate-fal-keyvault-iac.py
+          python scripts/verify_azure_worker_safe.py
+          # Recheck the exact change immediately before apply; a prior job's
+          # exit code or manually approved summary is not proof of scope.
+          umask 077
+          preview_file="$(mktemp)"
+          trap 'rm -f "$preview_file"' EXIT
+          az deployment group what-if -g rg-textvideo-dev \
+            --template-file infra/worker-job.bicep \
+            --parameters workerImage="$WORKER_IMAGE" \
+            --result-format FullResourcePayloads --output json > "$preview_file"
+          python scripts/verify_worker_image_whatif.py "$preview_file"
           az deployment group create -g rg-textvideo-dev \
             --name "dev-worker-${{ github.run_id }}" \
             --template-file infra/worker-job.bicep \
