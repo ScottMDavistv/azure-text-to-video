@@ -73,7 +73,9 @@ Paste the **review package** into a **separate** Claude session for the independ
   - any executed test fails, or any phase exits non-zero (R12);
   - port privacy is unverified (R11);
   - Playwright is not exactly 1.65.1, or the headless or headed Chromium is not exactly 159.0.8154.6, the build Playwright 1.65.1 expects (R10). Both the consistency check and the literal versions are required;
-  - any expected offline test is anything other than PASS: FAIL, SKIPPED, INCOMPLETE, absent or unknown (R3);
+  - any of the 14 expected offline tests of the pinned suite (C1 and Tier1) is FAIL, SKIPPED, absent or unknown (R3). An INCOMPLETE expected test makes R3 INCOMPLETE, never PASS;
+  - the production-review status was not recorded (R13).
+- **Uncertified production code (R13).** The only production file that differs between the auth baseline and the tested PR #60 head is `frontend/src/App.tsx`. It is listed in `C1_PROD_REVIEW_PENDING` because it has not been independently certified. The evidence records it with its exact blob SHA, and R13 stays INCOMPLETE until a separate security review certifies it. A session can therefore never be "ready for review" while it is pending. Preflight refuses to start if any other non-test file appears in the approved diff without being listed.
   - a mandatory preflight check did not run (R1).
 - **Terminal output.** When a phase produced a Playwright report, the terminal shows only its per-test summary, whether it passed or failed. Failing locator and DOM text, such as the app's `Signed in: <display name>`, stays in the private session directory. A phase without a report shows only sanitizer-approved lines. Lines carrying `Signed in:`, display or user names, emails, GUIDs, tokens or URLs with query strings are withheld. Don't paste raw terminal output anywhere; share the review package instead.
 

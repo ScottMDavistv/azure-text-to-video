@@ -503,3 +503,13 @@ test('egress markers recognise the pinned guards\' exact-origin diagnostics', ()
   const [c] = summarizeReport(report([spec('LIVE: x', 'failed', { errors: ['Authorization header to unauthorized origin https://evil.example'] })]))
   assert.equal(c.credentialMarker, true)
 })
+
+test('N-2: a SKIPPED or unknown expected test FAILS R3 even when another expected test is only INCOMPLETE', () => {
+  const mixed = (i0) => withOffline(OFFLINE_EXPECTED.map((t, i) =>
+    i === 0 ? spec(t, 'skipped', incomplete) : i === 1 ? spec(t, i0) : spec(t, 'passed')))
+  const rs = evaluate({ meta, phases: allPhases(), reports: mixed('skipped'), artifactHits: 0 })
+  assert.equal(row(rs, 'R3').verdict, 'FAIL'); assert.match(row(rs, 'R3').detail, /missing 1; incomplete 1/); assert.equal(rs.overall, 'FAIL')
+  const reports = mixed('passed'); reports.offline = reports.offline.map((t, i) => i === 1 ? { ...t, verdict: 'MAYBE' } : t)
+  const ru = evaluate({ meta, phases: allPhases(), reports, artifactHits: 0 })
+  assert.equal(row(ru, 'R3').verdict, 'FAIL'); assert.match(row(ru, 'R3').detail, /incomplete 1; unknown outcome 1/); assert.equal(ru.overall, 'FAIL')
+})
