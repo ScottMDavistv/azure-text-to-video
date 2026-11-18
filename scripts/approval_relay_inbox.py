@@ -32,9 +32,18 @@ def queue_item(kind, pr, head_sha, title, details, issue_number=None):
 
 def corrective_task(coding_pr, target_pr, target_head_sha, reason):
     """Prepare task description only, keyed for publisher idempotency."""
+    if type(target_pr) is not int or target_pr < 1 or target_pr == coding_pr:
+        raise ValueError("invalid target PR")
     item = queue_item("branch_correction", coding_pr, target_head_sha,
                       "Correct coding PR ancestry for target PR #" + str(target_pr),
                       reason)
+    # The target PR is part of the stable task identity; otherwise corrections
+    # for different target PRs collide when coding PR/head happen to match.
+    identity = {"repository": REPO, "kind": item["kind"],
+                "coding_pr": coding_pr, "target_pr": target_pr,
+                "target_head_sha": target_head_sha}
+    item["id"] = hashlib.sha256(json.dumps(identity, sort_keys=True,
+                          separators=(",", ":")).encode()).hexdigest()[:24]
     item["target_pr"] = target_pr
     item["dedupe_marker"] = "<!-- relay-branch-correction:" + item["id"] + " -->"
     item["issue_body"] = (
