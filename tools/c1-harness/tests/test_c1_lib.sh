@@ -344,11 +344,34 @@ installer_calls() {     # I-3 behavioural: npm ci / npm install / playwright ins
       "$TMP" "$f" "'{\"version\":\"1.64.0\"}'" >"$bin/$f"
     chmod +x "$bin/$f"
   done
+  # The behavioral fixture never needs root. Mock only sudo -n to preserve
+  # the real c1_ienv -> sudo -> env -> npx argument and credential boundary.
+  # Real installer behavior and no_new_privileges are not changed.
+  printf '#!/usr/bin/env bash\\n' >"$bin/sudo"
+  cat >>"$bin/sudo" <<'C1_MOCK_SUDO'
+[[ "${1:-}" == -n ]] || { echo 'mock sudo: missing -n' >&2; exit 91; }
+shift
+[[ "${1:-}" == env ]] || { echo 'mock sudo: expected env' >&2; exit 92; }
+printf '%s\\n' "$@" >"$C1_SUDO_ARGS_LOG"
+exec "$@"
+C1_MOCK_SUDO
+  chmod +x "$bin/sudo"
   export PATH="$bin:$PATH" GITHUB_TOKEN=ghu_fakefakefake GH_TOKEN=x NODE_OPTIONS=--require=/evil MY_SECRET=x
+  export C1_SUDO_ARGS_LOG="$TMP/sudo.args"
   c1_install_node_deps "$fe" "$cache"
   [[ -s "$TMP/npm.env" && -s "$TMP/npx.env" ]]
   [[ $(grep -c '^PATH=' "$TMP/npm.env") -ge 2 && $(grep -c '^PATH=' "$TMP/npx.env") -ge 2 ]]   # npm ci+install; npx install+install-deps
   ! grep -Eq '^(GITHUB_TOKEN|GH_TOKEN|NODE_OPTIONS|MY_SECRET)=' "$TMP/npm.env" "$TMP/npx.env"
+  # Negative paths: the mocked sudo must never forward unsanitized secrets,
+  # and must refuse a call without -n or without the expected env boundary.
+  if (( EUID != 0 )); then
+    [[ -s "$TMP/sudo.args" ]] || { echo 'sudo shim not exercised'; return 1; }
+    grep -Fxq env "$TMP/sudo.args" || return 1
+    grep -Fxq -- '--no-install' "$TMP/sudo.args" || return 1
+    ! grep -Eq '^(GITHUB_TOKEN|GH_TOKEN|NODE_OPTIONS|MY_SECRET)=' "$TMP/sudo.args"
+  fi
+  if "$bin/sudo" --invalid env true >"$TMP/sudo-negative.log" 2>&1; then return 1; fi
+  if "$bin/sudo" -n true >>"$TMP/sudo-negative.log" 2>&1; then return 1; fi
 }
 t 'dependency installers never receive GITHUB_TOKEN or tool overrides (behavioural, I-3)' installer_calls
 starttime_mismatch() {  # I-4: a MARKED process whose start time does not match is never signalled
