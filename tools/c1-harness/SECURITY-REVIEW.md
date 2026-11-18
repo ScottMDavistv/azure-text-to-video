@@ -87,6 +87,40 @@ Environment: Anthropic cloud sandbox, Ubuntu 24.04.5, Node 22.23.4, x11vnc 0.9.1
 | Chromium 159.0.8154.6 | **UNVERIFIED**: ENVIRONMENT BLOCKED |
 | Live Entra (R6–R9) | **UNVERIFIED**: NOT RUN (not authorized) |
 
+## 2026-11-17 L-6/L-9 focused follow-up — pending independent execution and review
+
+The incremental follow-up after `a705ce2f` targets only `tools/c1-harness/**`.
+The production launcher now polls the noVNC edge every **0.2 s**; the
+privacy monitor locally caps each unauthenticated/authenticated HTTPS probe at
+**0.4 s**, treats the *first* ambiguous observation as unverifiable and tears
+down, and locally bounds TERM/KILL grace to five 0.1-second steps each.
+The launcher bootstrap and interactive privacy-gate defaults remain unchanged.
+The L-9 monitor propagates failure (rc 2), writes `teardown-failed`, and its
+watchdog checks the recorded launcher PID/start-time/session before sending TERM
+and performing marker-scoped cleanup.
+
+New source checks/regression cases in `tests/test_c1_lib.sh` target the actual
+launcher interval, the slow two-probe path against the 2.5-second target,
+monitor rc 2, synthetic PID ownership, and real marked-process watchdog
+session cleanup. **These new harness cases were not independently executed in
+the authoring environment** (repository clone unavailable); do not inherit
+the historical 115/44/38 PASS counts as evidence for this new head. The three
+GitHub Actions CI workflows do not run the harness-specific shell tests.
+Treat L-6 normal Codespaces latency and L-9 full supervised teardown as
+**UNVERIFIED** until an independent runner exercises the cases.
+
+Before independent approval: execute `bash tools/c1-harness/tests/test_c1_lib.sh`,
+`node --test tools/c1-harness/tests/c1-evidence.test.mjs`,
+`shellcheck -S warning tools/c1-harness/lib/c1-lib.sh tools/c1-harness/c1-session.sh tools/c1-harness/tests/test_c1_lib.sh`,
+and applicable security-invariant tests on this exact head. Measure monitor
+shutdown with slow/reset/private-to-public flips in a real **private**
+Codespace, including both 6080 and 5173, with no Entra authentication.
+Keep the `frontend/src/App.tsx` R13 pending-review entry intact. PR #60 at
+`b1e30d3` changes workflow files only; its environment isolation remains
+UNVERIFIED until the owner checks GitHub's `design-management-control`
+environment settings. Preserve manual workflow approvals and do not merge or
+deploy from this evidence.
+
 ## Real-Codespace instrument run still required (independent)
 
 1. The real unauthenticated status code and `Location` host for a private port. Only 401/403 or `https://github.com`/`*.github.com` are accepted; anything else fails **closed**.
