@@ -12,6 +12,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 
 API = "https://api.github.com"
 START = "<!-- design-management-report:start -->"
@@ -175,11 +176,16 @@ def render_report(data, now):
           "_Hybrid analysis: this deterministic evidence can be reviewed with ChatGPT on demand. No LLM API is called._"]
     azure = data.get("azure")
     if azure is not None:
-        p += ["", "#### Azure read-only inventory", "Read-only evidence: " + str(azure.get("status", "unknown"))]
-        p += ["Resource group: " + str(azure.get("resource_group", "unspecified")),
-              "Resources inventoried: " + str(len(azure.get("resources", [])))]
+        p += ["", "#### Azure read-only inventory", "Read-only evidence: " + str(azure["status"])]
+        p += ["Resource group: " + str(azure["resource_group"]),
+              "Resources inventoried: " + str(len(azure["resources"]))]
+        evidence = data.get("azure_evidence") or {}
+        p += ["Evidence: protected-main Azure Reader run `" + str(evidence.get("run_id")) +
+              "` on commit `" + str(evidence.get("head_sha")) + "`"]
+        p += ["**Runtime health: NOT VERIFIED** — resource inventory is metadata only."]
     else:
-        p += ["", "#### Azure read-only inventory", "NOT VERIFIED — optional Reader/OIDC audit not configured or not run"]
+        p += ["", "#### Azure read-only inventory",
+              "NOT VERIFIED — no authenticated fresh successful protected-main Reader inventory"]
     return "\n".join(p)
 
 def collect(repo, token):
@@ -205,9 +211,15 @@ def main():
         raise SystemExit("Missing or invalid GitHub repository/token")
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     data = collect(repo, token)
-    azure_file = pathlib.Path("azure-inventory.json")
-    if azure_file.exists():
-        data["azure"] = json.loads(azure_file.read_text(encoding="utf-8"))
+    # Never trust a local file as Azure evidence. Fetch only the sanitized artifact
+    # from a fresh, successful Reader job on protected main using actions:read.
+    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        from verified_azure_inventory import load, NoVerifiedInventory
+        try:
+            data["azure"], data["azure_evidence"] = load(repo, token)
+        except (NoVerifiedInventory, ValueError, KeyError, OSError,
+                urllib.error.URLError, json.JSONDecodeError, zipfile.BadZipFile, TypeError):
+            print("Azure inventory NOT VERIFIED: no authenticated fresh Reader evidence")
     report = render_report(data, now)
     execution = report_execution_signature()
     if execution is not None:

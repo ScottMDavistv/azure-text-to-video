@@ -35,11 +35,24 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Verify PR workflow isolation invariants (read-only)
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: --no-deps -r scripts/ci-isolation-requirements.txt
+          python scripts/check_ci_isolation.py --root .
+
+      - name: Run isolation regression tests with the real parser (no skips allowed)
+        run: |
+          set -o pipefail
+          python -m unittest -v tests/design_management/test_ci_isolation.py 2>&1 | tee isolation-tests.log
+          if grep -q "skipped" isolation-tests.log; then echo "::error::isolation tests skipped"; exit 1; fi
 
       - name: Check paid rendering invariant and obvious secrets
         run: python scripts/security_invariants.py
