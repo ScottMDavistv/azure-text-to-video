@@ -283,6 +283,41 @@ class WorkerWhatIfTests(unittest.TestCase):
         self.assertEqual(whatif.classify_azure_failure(None), "unknown")
         self.assertEqual(whatif.classify_azure_failure("X" * 65537), "unknown")
 
+    def test_conflicting_multiline_cli_codes_fail_closed(self):
+        samples = (
+            "ERROR: (AuthorizationFailed) first\\nERROR: (InvalidTemplate) second",
+            "ERROR: (InvalidTemplate) first\\n(AuthorizationFailed) second",
+            "(AuthorizationFailed) first\\n(AuthorizationFailed) duplicate",
+            "ERROR: (AuthorizationFailed) first\\n  ERROR: (LinkedAuthorizationFailed) second",
+            "ERROR: (AuthorizationFailed) first\\n(UnknownFutureCode) second",
+        )
+        for stderr in samples:
+            with self.subTest(stderr=stderr):
+                self.assertEqual(whatif.classify_azure_failure(stderr), "unknown")
+                def runner(argv, **kwargs):
+                    return SimpleNamespace(returncode=1, stdout="PRIVATE-OUTPUT", stderr=stderr)
+                with self.assertRaises(whatif.Blocked) as failure:
+                    whatif.run_json(["az", "deployment", "group", "what-if"],
+                                    runner=runner, stage="arm-whatif-preview")
+                self.assertEqual(failure.exception.error_category, "unknown")
+                data = whatif.report(blocked=str(failure.exception),
+                                     stage=failure.exception.stage,
+                                     error_category=failure.exception.error_category)
+                self.assertEqual(data["arm_error_category"], "unknown")
+                self.assertNotIn("PRIVATE-OUTPUT", json.dumps(data))
+                self.assertNotIn("AuthorizationFailed", json.dumps(data))
+
+    def test_narrative_codes_and_malformed_envelopes_never_infer_rbac(self):
+        samples = (
+            "AuthorizationFailed mentioned in prose",
+            "ERROR: (InvalidTemplate) detail mentions AuthorizationFailed",
+            '{"error":{"code":"AuthorizationFailed"},"extra":"(InvalidTemplate)"} garbage',
+            '{"error":{"code":["AuthorizationFailed"]}}',
+            '{"outer":{"error":{"code":"AuthorizationFailed"}}}',
+        )
+        for stderr in samples:
+            self.assertNotEqual(whatif.classify_azure_failure(stderr), "rbac-denied")
+
     def test_arm_preview_denial_reports_only_allowlisted_category(self):
         secret = "RAW-IDENTITY-SCOPE-SECRET"
         calls = []
