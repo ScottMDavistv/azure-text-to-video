@@ -487,43 +487,157 @@ group_members() {      # a harness group member that dropped the marker (env -i)
   ! alive "$child" && ! alive "$leader"
 }
 t 'cleanup removes unmarked members of a verified harness process group' group_members
-detached_descendant_cleanup() (
-  local mode=$1 s leader child child_start
+# ---- L-A: persistent subreaper supervision ----------------------------------
+# Every c1_spawn runs under lib/c1-supervisor.py, a child subreaper that lives
+# until no descendant remains. INVARIANT checked by every case below: cleanup
+# plus verification may report success only if no descendant survives.
+la_wait() { local i; for (( i=0; i<80; i++ )); do eval "$1" && return 0; sleep 0.05; done; return 1; }
+la_sup() { awk 'NR==1 {print $1}' "$1/supervisors"; }
+# la_case MODE -> 0 only if MODE's expected outcome holds AND the invariant does.
+la_case() (
+  local mode=$1 s leader child cst sup crc=0 vrc=0
   s=$(c1_session_new "$ROOT")
-  leader=$(c1_spawn "$s" tree-fixture bash -c 'env -i setsid sleep 300 & echo $! >"$1/child"; wait' _ "$s")
-  for _ in $(seq 1 30); do [[ -s "$s/child" ]] && break; sleep 0.05; done
-  child=$(cat "$s/child")
-  child_start=$(c1_proc_start "$child")
-  trap '[[ "$(c1_proc_start "$child")" != "$child_start" ]] || kill -KILL "$child" 2>/dev/null || true' EXIT
-  [[ -n "$child_start" ]]
-  for _ in $(seq 1 30); do [[ $(c1_proc_stat_field "$child" 4) == "$child" ]] && break; sleep 0.05; done
-  [[ $(c1_proc_stat_field "$child" 4) == "$child" && $(c1_proc_stat_field "$child" 2) == "$leader" ]]
-  if c1_pid_has_marker "$child" "$s"; then return 1; fi
-  if [[ $mode == orphan ]]; then
-    c1_harness_listeners "$s" >/dev/null
-    grep -Fxq "$child $child_start" "$s/descendants"
-    kill -KILL "$leader"
-    for _ in $(seq 1 30); do [[ $(c1_proc_stat_field "$child" 2) != "$leader" ]] && break; sleep 0.05; done
+  if [[ $mode == intermediate ]]; then   # leader -> A -> scrubbed setsid B; A exits at once
+    leader=$(c1_spawn "$s" la bash -c 'bash -c "env -i setsid sleep 300 & echo \$! >\"\$1/child\"" _ "$1"; exec sleep 300' _ "$s")
+  else
+    leader=$(c1_spawn "$s" la bash -c 'env -i setsid sleep 300 & echo $! >"$1/child"; wait' _ "$s")
   fi
-  c1_cleanup_session "$ROOT" "$s"
-  if [[ $mode == orphan ]]; then
-    alive "$child"
-    if c1_verify_cleanup "$s"; then return 1; fi
-    grep -Fxq "$child $child_start" "$ROOT/.${s##*/}.pids"
-    kill -KILL "$child"
+  la_wait '[[ -s "$s/child" ]]'
+  child=$(cat "$s/child"); cst=$(c1_proc_start "$child"); sup=$(la_sup "$s")
+  trap '[[ "$(c1_proc_start "$child")" != "$cst" ]] || kill -KILL "$child" 2>/dev/null || true' EXIT
+  [[ -n "$cst" && -n "$sup" && "$sup" != "$leader" ]]
+  la_wait '[[ $(c1_proc_stat_field "$child" 4) == "$child" ]]'   # own setsid session
+  if c1_pid_has_marker "$child" "$s"; then return 1; fi          # env-scrubbed
+  case $mode in
+    orphan-after-scan)  c1_harness_listeners "$s" >/dev/null; kill -KILL "$leader" ;;
+    orphan-before-scan) [[ ! -e "$s/descendants" ]]; kill -KILL "$leader" ;;   # no scan ever saw it
+    supervisor-killed)  [[ ! -e "$s/descendants" ]]; kill -KILL "$sup" "$leader" ;;
+  esac
+  local adopted=1
+  case $mode in
+    orphan-*|intermediate)                                       # adopted by the LIVE supervisor, not PID 1
+      la_wait '[[ $(c1_proc_stat_field "$child" 2) == "$sup" ]]' || { adopted=0; echo "not adopted: child ppid $(c1_proc_stat_field "$child" 2), supervisor $sup"; }
+      [[ ! -e "$s/descendants" || $mode == orphan-after-scan ]] ;;
+    supervisor-killed) la_wait '[[ $(c1_proc_stat_field "$child" 2) != "$leader" ]]' ;;
+  esac
+  c1_cleanup_session "$ROOT" "$s" 2>/dev/null || crc=$?
+  c1_verify_cleanup "$s" 2>/dev/null || vrc=$?
+  if (( crc == 0 && vrc == 0 )) && [[ "$(c1_proc_start "$child")" == "$cst" ]]; then
+    echo "FALSE SUCCESS: cleanup verified while descendant $child survives"; return 1
   fi
-  for _ in $(seq 1 30); do alive "$child" || break; sleep 0.05; done
-  if alive "$child"; then return 1; fi
-  c1_verify_cleanup "$s"
+  if [[ $mode == supervisor-killed ]]; then
+    # Escaped to PID 1: never a success, and still not one after the child exits,
+    # because nothing proves no OTHER descendant escaped with it.
+    (( vrc != 0 )) && [[ "$(c1_proc_start "$child")" == "$cst" ]] || { echo "crc=$crc vrc=$vrc"; return 1; }
+    kill -KILL "$child"; la_wait '[[ "$(c1_proc_start "$child")" != "$cst" ]]'
+    if c1_verify_cleanup "$s" 2>/dev/null; then echo 'unproven supervisor exit accepted'; return 1; fi
+    [[ -s "$ROOT/.${s##*/}.supervisors" ]]
+    rm -f -- "$ROOT/.${s##*/}.supervisors" "$ROOT/.${s##*/}.reaped" "$ROOT/.${s##*/}.pids"   # fixture-owned evidence
+    return 0
+  fi
+  (( crc == 0 && vrc == 0 && adopted == 1 )) || { echo "crc=$crc vrc=$vrc adopted=$adopted"; return 1; }
+  [[ "$(c1_proc_start "$child")" != "$cst" ]]
 )
-t 'L-A: cleanup signals an attributed env-scrubbed detached child' detached_descendant_cleanup attached
-t 'L-A: cleanup retains evidence and refuses success for an already reparented known child' detached_descendant_cleanup orphan
-detached_descendant_mutation() (
-  local ROOT="$TMP/no-descendant-capture"
-  c1_tree_descendant_identities() { :; }
-  ! detached_descendant_cleanup attached
+t 'L-A: original case: cleanup signals an attributed env-scrubbed setsid child' la_case attached
+t 'L-A: leader killed after a scan: child adopted by the supervisor and removed' la_case orphan-after-scan
+t 'L-A: orphan before the first scan: adopted by the live supervisor, removed, verified' la_case orphan-before-scan
+t 'L-A: intermediate ancestor exits before any scan: descendant adopted and removed' la_case intermediate
+t 'L-A: supervisor SIGKILLed so a descendant escapes to PID 1: verification fails closed' la_case supervisor-killed
+
+la_mutant() (   # la_mutant SED_EXPR MODE -> 0 only if the mutant supervisor yields a detected FALSE SUCCESS
+  local m="$TMP/la-mutant.$BASHPID.py" out rc=0
+  sed -e "$1" "$C1_SUPERVISOR" >"$m"; ! cmp -s "$m" "$C1_SUPERVISOR"
+  C1_SUPERVISOR=$m
+  out=$(la_case "$2" 2>&1) || rc=$?
+  rm -f -- "$m"
+  (( rc != 0 )) && [[ "$out" == *'FALSE SUCCESS'* ]]
 )
-t 'L-A: detached-child test detects removal of descendant capture' detached_descendant_mutation
+t 'L-A mutation: supervisor without PR_SET_CHILD_SUBREAPER (orphan before scan) is caught' \
+  la_mutant 's/libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0/False/' orphan-before-scan
+t 'L-A mutation: supervisor without PR_SET_CHILD_SUBREAPER (intermediate exit) is caught' \
+  la_mutant 's/libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0/False/' intermediate
+t 'L-A mutation: supervisor that stops when its own child exits (before ECHILD) is caught' \
+  la_mutant 's/^\(            rc = 128 - rc if rc < 0 else rc\)$/\1\n            break/' orphan-before-scan
+la_mutant_no_proof_check() (
+  c1_verify_supervisors() { rm -f -- "$(dirname -- "$1")/.${1##*/}.supervisors"; return 0; }
+  local out rc=0; out=$(la_case supervisor-killed 2>&1) || rc=$?
+  (( rc != 0 )) && [[ "$out" == *'FALSE SUCCESS'* ]]
+)
+t 'L-A mutation: verification that ignores missing reaping proofs is caught' la_mutant_no_proof_check
+
+la_failed_signals() (   # every cleanup signal fails: never success, nothing lost; a later cleanup recovers
+  local s leader child cst rc=0 vrc=0; s=$(c1_session_new "$ROOT")
+  leader=$(c1_spawn "$s" la bash -c 'env -i setsid sleep 300 & echo $! >"$1/child"; wait' _ "$s")
+  la_wait '[[ -s "$s/child" ]]'; child=$(cat "$s/child"); cst=$(c1_proc_start "$child")
+  trap '[[ "$(c1_proc_start "$child")" != "$cst" ]] || kill -KILL "$child" 2>/dev/null || true' EXIT
+  kill -KILL "$leader"; la_wait '[[ $(c1_proc_stat_field "$child" 2) == "$(la_sup "$s")" ]]'
+  ( kill() { :; }; C1_SUPERVISOR_WAIT_STEPS=10; c1_cleanup_session "$ROOT" "$s" ) 2>/dev/null || rc=$?
+  c1_verify_cleanup "$s" 2>/dev/null || vrc=$?
+  (( rc != 0 && vrc != 0 )) && [[ -d "$s" && "$(c1_proc_start "$child")" == "$cst" ]] || { echo "rc=$rc vrc=$vrc"; return 1; }
+  c1_cleanup_session "$ROOT" "$s" && c1_verify_cleanup "$s" && [[ "$(c1_proc_start "$child")" != "$cst" ]]
+)
+t 'L-A: failed signals: cleanup and verification fail, session retained; retry removes the adopted child' la_failed_signals
+
+la_interrupted() (   # cleanup SIGKILLed mid-signal, then the next start's recovery finishes it
+  local s leader child cst cp; s=$(c1_session_new "$ROOT")
+  # shellcheck disable=SC2016
+  leader=$(c1_spawn "$s" la bash -c 'trap "" TERM; env -i setsid "$2" -I -c "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open(\"$1/child\",\"w\").write(str(__import__(\"os\").getpid())); time.sleep(300)" & wait' _ "$s" "$PY3_LA")
+  la_wait '[[ -s "$s/child" ]]'; child=$(cat "$s/child"); cst=$(c1_proc_start "$child")
+  trap '[[ "$(c1_proc_start "$child")" != "$cst" ]] || kill -KILL "$child" 2>/dev/null || true' EXIT
+  ( c1_cleanup_session "$ROOT" "$s" ) >/dev/null 2>&1 & cp=$!
+  sleep 1; kill -KILL "$cp"; wait "$cp" 2>/dev/null || true    # interrupted inside the TERM grace period
+  [[ -d "$s" && "$(c1_proc_start "$child")" == "$cst" ]]
+  printf '999999 1 %s\n' "$s" >"$ROOT/active"                   # the launcher died with it
+  c1_recover_before_start "$ROOT" 2>/dev/null
+  [[ "$(c1_proc_start "$child")" != "$cst" && ! -e "$s" ]] && ! ls "$ROOT"/.${s##*/}.* >/dev/null 2>&1
+)
+PY3_LA=$(command -v python3)
+t 'L-A: interrupted cleanup: recovery removes the TERM-ignoring adopted child and retires all records' la_interrupted
+
+la_supervisor_lifetime() (   # the supervisor outlives every descendant through cleanup
+  local s leader child cst sup sst smp; s=$(c1_session_new "$ROOT"); smp="$TMP/la-samples.$BASHPID"
+  # shellcheck disable=SC2016
+  leader=$(c1_spawn "$s" la bash -c 'env -i setsid "$2" -I -c "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open(\"$1/child\",\"w\").write(str(__import__(\"os\").getpid())); time.sleep(300)" & wait' _ "$s" "$PY3_LA")
+  la_wait '[[ -s "$s/child" ]]'; child=$(cat "$s/child"); cst=$(c1_proc_start "$child")
+  sup=$(la_sup "$s"); sst=$(c1_proc_start "$sup")
+  trap '[[ "$(c1_proc_start "$child")" != "$cst" ]] || kill -KILL "$child" 2>/dev/null || true' EXIT
+  kill -KILL "$leader"; la_wait '[[ $(c1_proc_stat_field "$child" 2) == "$sup" ]]'   # orphaned, adopted
+  ( while :; do   # sample "child-alive supervisor-alive" every 10 ms until both are gone
+      c=0 p=0
+      [[ "$(c1_proc_start "$child")" == "$cst" && ! "$(c1_proc_stat_field "$child" 1)" =~ ^[ZX]$ ]] && c=1
+      [[ "$(c1_proc_start "$sup")" == "$sst" && ! "$(c1_proc_stat_field "$sup" 1)" =~ ^[ZX]$ ]] && p=1
+      echo "$c $p"; (( c || p )) || break; sleep 0.01
+    done >"$smp" ) & local sampler=$!
+  c1_cleanup_session "$ROOT" "$s"; c1_verify_cleanup "$s"
+  wait "$sampler"
+  # Never a moment where the descendant lived without its supervisor; the
+  # supervisor stayed up through the TERM grace period and the KILL escalation.
+  ! grep -qx '1 0' "$smp" && [[ $(grep -cx '1 1' "$smp") -ge 50 ]] && tail -1 "$smp" | grep -qx '0 0'
+)
+t 'L-A: supervisor stays alive through cleanup until its last descendant is reaped (sampled)' la_supervisor_lifetime
+
+la_pid_reuse() (   # supervisor identities whose PID now names an UNRELATED process
+  local s v vst rc=0 name=session.la-reuse
+  setsid sleep 300 </dev/null >/dev/null 2>&1 & v=$!; sleep 0.2; vst=$(c1_proc_start "$v")
+  trap 'kill "$v" 2>/dev/null || true' EXIT
+  # (a) recorded supervisor exited with proof; its PID was reused: retire, never signal.
+  printf '%s 1\n' "$v" >"$ROOT/.$name.supervisors"; printf '%s 1\n' "$v" >"$ROOT/.$name.reaped"
+  c1_verify_cleanup "$ROOT/$name" && alive "$v" && [[ ! -e "$ROOT/.$name.supervisors" && ! -e "$ROOT/.$name.reaped" ]]
+  # (b) reused PID, no proof: fails closed, still never signalled.
+  printf '%s 1\n' "$v" >"$ROOT/.$name.supervisors"
+  if c1_verify_cleanup "$ROOT/$name" 2>/dev/null; then return 1; fi
+  alive "$v"; rm -f -- "$ROOT/.$name.supervisors"
+  # (c) a live record that matches the unrelated, unmarked process exactly: no signal reaches it.
+  s=$(c1_session_new "$ROOT"); printf '%s %s\n' "$v" "$vst" >"$s/supervisors"
+  # shellcheck disable=SC2034  # read by c1_cleanup_session
+  ( C1_SUPERVISOR_WAIT_STEPS=4; c1_cleanup_session "$ROOT" "$s" ) 2>/dev/null || rc=$?
+  (( rc != 0 )) && alive "$v" && [[ -d "$s" ]]
+  rm -f -- "$s/supervisors"; c1_cleanup_session "$ROOT" "$s" && c1_verify_cleanup "$s" && alive "$v"
+)
+t 'L-A: PID reuse: supervisor records never authorize signalling an unrelated process' la_pid_reuse
+
+t 'L-A: the supervisor is the only spawn path (no direct setsid exec in c1_spawn)' bash -c \
+  '! grep -Fq "setsid \"\$@\"" "$1" && grep -Fq -e "-I \"\$C1_SUPERVISOR\" \"\$s\"" "$1"' _ "$HERE/../lib/c1-lib.sh"
 
 desktop_environment() (
   local s output
@@ -1080,16 +1194,23 @@ MOCK_GH
     c1_privacy_gate "$s" "$DP" "$BASE" "$PV/hdr" "$ws" "$wsst" 1 "$CA"
     [[ $(wc -l <"$GH_FIXTURE_CALLS") == 2 ]]
 
+    # R-1: the monitor's pf-signin sweeps use its budgeted gh evidence (no gh
+    # call per sweep). A hanging gh (ignores TERM) never pauses the sweeps; once
+    # the last private read is older than the freshness bound, noVNC is torn down.
+    # Test-only scaled schedule; production values are asserted separately.
+    local C1_MON_GH_INTERVAL_MS=500 C1_MON_GH_RETRY_MS=500 C1_MON_GH_TIMEOUT_MS=500 C1_MON_GH_MAX_AGE_MS=2000
     printf 'hang\n' >"$GH_FIXTURE_STATE"
+    : >"$GH_FIXTURE_CALLS"
     start=${EPOCHREALTIME/./}
     c1_privacy_monitor_loop "$s" "$BASE" "$PV/hdr" "$ws" "$wsst" "$CA" 0.2 "$DP" 1
     elapsed=$(( ${EPOCHREALTIME/./} - start ))
-    (( elapsed < 2500000 ))
-    [[ $(wc -l <"$GH_FIXTURE_CALLS") == 3 ]]
-    grep -q ' unverified$' "$s/privacy-failed"
+    (( elapsed >= 2000000 && elapsed < 4000000 )) || { echo "elapsed ${elapsed}us"; return 1; }
+    local calls; calls=$(wc -l <"$GH_FIXTURE_CALLS")
+    (( calls >= 1 && calls <= 3 )) || { echo "gh calls $calls"; return 1; }   # 2 s / 0.5 s retry, one in flight
+    grep -q ' gh-stale$' "$s/privacy-failed"
     c1_port_free "$DP"
   )
-  t 'HTTPS pf-signin redirect uses the decoy, desktop gate and first-failure monitor teardown' pf_signin_https_integration
+  t 'HTTPS pf-signin redirect uses the decoy, desktop gate and budgeted gh-stale monitor teardown (R-1)' pf_signin_https_integration
 
   pf_signin_https_reject() (
     local route=$1 trace="$PV/state/authenticated-probes"
@@ -1176,7 +1297,8 @@ MOCK_GH
       local s=$1 ws wsst
       c1_start_display_vnc "$s" "$(c1_gen_password)" >/dev/null; ws=$(c1_start_websockify "$s" "$DP"); wsst=$(c1_proc_start "$ws")
       # shellcheck disable=SC2016
-      c1_spawn "$s" privacy-monitor bash -c 'source "$1"; c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "$7" 1 "$8" "$9"' \
+      # Test-only scaled gh schedule (production values are asserted separately).
+      c1_spawn "$s" privacy-monitor bash -c 'source "$1"; C1_MON_GH_INTERVAL_MS=1000 C1_MON_GH_RETRY_MS=500 C1_MON_GH_TIMEOUT_MS=1000 C1_MON_GH_MAX_AGE_MS=3000; c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "$7" 1 "$8" "$9"' \
         _ "$HERE/../lib/c1-lib.sh" "$s" "$BASE" "$PV/hdr" "$ws" "$wsst" "$CA" "$DP" "$3" >/dev/null
       printf '%s %s' "$ws" "$wsst"
     }
@@ -1217,18 +1339,18 @@ MOCK_GH
     }
     t 'privacy monitor re-reads gh: a change to organization visibility tears noVNC down (L-10)' monitor_gh org
     t 'privacy monitor re-reads gh: a change to public visibility tears noVNC down (L-10)' monitor_gh public
-    monitor_gh_unavailable() {   # L-10: losing the gh read-back is unverifiable -> torn down after 3 misses
+    monitor_gh_unavailable() {   # L-10/R-1: lost gh read-back -> torn down once the last private read is stale
       local s ws wsst; usegh; echo private >"$PV/state/ghvis"
       s=$(c1_session_new "$ROOT"); export C1_HARNESS_SESSION=$s
       read -r ws wsst <<<"$(start_mon "$s" private 1)"
       sleep 1.5; alive "$ws"
       echo fail >"$PV/state/ghvis"
       local ok=0; closed_within "$DP" 8 && ok=1
-      grep -q ' gh-unavailable$' "$s/privacy-failed" || ok=0
+      grep -q ' gh-stale$' "$s/privacy-failed" || ok=0
       echo private >"$PV/state/ghvis"; unset C1_HARNESS_SESSION; c1_cleanup_session "$ROOT" "$s"
       (( ok == 1 ))
     }
-    t 'privacy monitor tears noVNC down when the gh read-back becomes unavailable (L-10)' monitor_gh_unavailable
+    t 'privacy monitor tears noVNC down when the gh read-back becomes unavailable (L-10, gh-stale)' monitor_gh_unavailable
     monitor_user_path_ignores_gh() {   # REQUIRE_GH=0 (user-owned repo path): gh is not consulted
       local s ws wsst; usegh; echo org >"$PV/state/ghvis"
       s=$(c1_session_new "$ROOT"); export C1_HARNESS_SESSION=$s
@@ -1382,6 +1504,90 @@ monitor_slow_authenticated_probe() {
 }
 t 'L-6: slow authentication probes fail closed and finish teardown within 2.5 s' monitor_slow_authenticated_probe
 
+# ---- R-1: budgeted, freshness-bounded gh read-back in the privacy monitor ----
+# The real monitor loop runs with a stub gh (call log, latency, concurrency
+# probe) and stubbed HTTPS probes/teardown. Schedules are scaled for speed;
+# the production schedule is asserted by the static case above and below.
+r1_run() (   # r1_run SECONDS LATENCY MODE [SWITCH_AFTER SWITCH_MODE] -> "rc elapsed_ms calls probes maxconc reason"
+  local secs=$1 lat=$2 mode=$3 sw_after=${4:-} sw_mode=${5:-} d="$TMP/r1.$BASHPID" t0 rc=0 el
+  rm -rf "$d"; mkdir -p "$d/bin" "$d/s/tmp"
+  printf 'X-Github-Token: fixture\n' >"$d/hdr"; printf '%s\n' "$mode" >"$d/mode"
+  : >"$d/gh.log"; : >"$d/conc"; : >"$d/probes"
+  cat >"$d/bin/gh" <<GH
+#!/usr/bin/env bash
+d=$(printf '%q' "$d")
+echo call >>"\$d/gh.log"
+mkdir "\$d/inflight.\$\$"; trap 'rmdir "\$d/inflight.\$\$" 2>/dev/null' EXIT
+ls -d "\$d"/inflight.* | wc -l >>"\$d/conc"
+sleep $(printf '%q' "$lat") & wait \$!
+m=\$(cat "\$d/mode")
+case \$m in private|org|public) printf '[{"sourcePort":6080,"visibility":"%s"}]\n' "\$m" ;; *) exit 1 ;; esac
+GH
+  chmod 755 "$d/bin/gh"
+  export PATH="$d/bin:$PATH" CODESPACE_NAME=r1-fixture TMPDIR="$d/s/tmp"
+  c1_owned_pid() { [[ ! -e "$d/stop" ]]; }
+  c1_privacy_check() { echo probe >>"$d/probes"; C1_PRIVACY_STATE=private; return 0; }
+  c1_teardown_novnc() { printf '%s\n' "$5" >"$d/reason"; return 0; }
+  ( sleep "$secs"; : >"$d/stop" ) & local stopper=$!
+  if [[ -n "$sw_after" ]]; then ( sleep "$sw_after"; printf '%s\n' "$sw_mode" >"$d/mode" ) & fi
+  t0=${EPOCHREALTIME//[!0-9]/}
+  c1_privacy_monitor_loop "$d/s" https://example.invalid "$d/hdr" 1 1 '' 0.1 6080 1 || rc=$?
+  el=$(( (${EPOCHREALTIME//[!0-9]/} - t0) / 1000 ))
+  kill "$stopper" 2>/dev/null || true; wait 2>/dev/null || true
+  printf '%s %s %s %s %s %s\n' "$rc" "$el" "$(wc -l <"$d/gh.log")" "$(wc -l <"$d/probes")" \
+    "$(sort -n "$d/conc" | tail -1)" "$(cat "$d/reason" 2>/dev/null || echo none)"
+)
+r1_slow() (    # realistic 1.5 s latency under the PRODUCTION timeout: never torn down, sweeps never pause
+  local C1_MON_GH_INTERVAL_MS=1000 C1_MON_GH_RETRY_MS=500 C1_MON_GH_MAX_AGE_MS=4000   # timeout: production 15 s
+  local rc el calls probes conc reason
+  read -r rc el calls probes conc reason <<<"$(r1_run 6 1.5 private)"
+  echo "rc=$rc el=$el calls=$calls probes=$probes conc=$conc reason=$reason"
+  (( rc == 0 )) && [[ $reason == none ]] && (( calls >= 2 && calls <= 4 && probes >= 35 && conc == 1 ))
+)
+t 'R-1: slow gh (1.5 s) under the 15 s production timeout: no teardown, HTTPS sweeps continue, one read in flight' r1_slow
+r1_timeout() ( # gh never answers in time: no teardown until the evidence is stale, then gh-stale
+  local C1_MON_GH_INTERVAL_MS=500 C1_MON_GH_RETRY_MS=500 C1_MON_GH_TIMEOUT_MS=300 C1_MON_GH_MAX_AGE_MS=2000
+  local rc el calls probes conc reason
+  read -r rc el calls probes conc reason <<<"$(r1_run 8 5 private)"
+  echo "rc=$rc el=$el calls=$calls conc=$conc reason=$reason"
+  (( rc == 0 )) && [[ $reason == gh-stale ]] && (( el >= 2000 && el < 3500 && calls >= 1 && calls <= 5 && conc == 1 ))
+)
+t 'R-1: gh timeouts tear noVNC down as gh-stale once the private evidence exceeds its age bound' r1_timeout
+r1_changed() ( # visibility changes to org/public: torn down on the next budgeted read
+  local vis=$1 C1_MON_GH_INTERVAL_MS=500 C1_MON_GH_RETRY_MS=500 C1_MON_GH_TIMEOUT_MS=1000 C1_MON_GH_MAX_AGE_MS=5000
+  local rc el calls probes conc reason
+  read -r rc el calls probes conc reason <<<"$(r1_run 8 0.2 private 1.5 "$vis")"
+  echo "rc=$rc el=$el calls=$calls reason=$reason"
+  (( rc == 0 )) && [[ $reason == "gh-visibility-$vis" ]] && (( el >= 1500 && el < 3000 ))
+)
+t 'R-1: gh visibility changed to organization: teardown on the next budgeted read' r1_changed org
+t 'R-1: gh visibility changed to public: teardown on the next budgeted read' r1_changed public
+r1_stale() (   # gh fails outright: retried on budget, torn down exactly at staleness, not before
+  local C1_MON_GH_INTERVAL_MS=500 C1_MON_GH_RETRY_MS=500 C1_MON_GH_TIMEOUT_MS=1000 C1_MON_GH_MAX_AGE_MS=2000
+  local rc el calls probes conc reason
+  read -r rc el calls probes conc reason <<<"$(r1_run 8 0 fail)"
+  echo "rc=$rc el=$el calls=$calls reason=$reason"
+  (( rc == 0 )) && [[ $reason == gh-stale ]] && (( el >= 2000 && el < 2700 && calls >= 2 && calls <= 4 ))
+)
+t 'R-1: stale evidence: failing gh is retried on budget and noVNC is torn down at the age bound' r1_stale
+r1_budget() (  # r1_budget INTERVAL RETRY MODE CLAIMED_GAP_MS -> read count within the claimed bound over 5 s
+  local C1_MON_GH_INTERVAL_MS=$1 C1_MON_GH_RETRY_MS=$2 C1_MON_GH_TIMEOUT_MS=1000 C1_MON_GH_MAX_AGE_MS=60000
+  local rc el calls probes conc reason gap=$4
+  read -r rc el calls probes conc reason <<<"$(r1_run 5 0 "$3")"
+  echo "rc=$rc el=$el calls=$calls probes=$probes conc=$conc reason=$reason bound=$(( el / gap + 1 ))"
+  (( rc == 0 )) && [[ $reason == none ]] && (( calls >= 1 && calls <= el / gap + 1 && conc <= 1 ))
+)
+t 'R-1: bounded request count: private reads at most one per interval (5 s run)' r1_budget 500 250 private 500
+t 'R-1: bounded request count: failing reads at most one per retry gap (5 s run)' r1_budget 500 250 fail 250
+f 'R-1 control: an unbudgeted schedule (no interval) violates the request bound' r1_budget 0 0 private 500
+r1_production_budget() (   # the documented production budget is self-consistent
+  (( 3600000 / C1_MON_GH_INTERVAL_MS == 120 && 3600000 / C1_MON_GH_RETRY_MS == 360 ))
+  (( C1_MON_GH_MAX_AGE_MS >= C1_MON_GH_INTERVAL_MS + 2 * C1_MON_GH_TIMEOUT_MS ))   # one slow success never goes stale
+  (( C1_MON_GH_TIMEOUT_MS >= 10000 && C1_GH_READ_TIMEOUT >= 10 ))                  # assumed gh latency: a few seconds
+  grep -Fq 'Request budget (R-1)' "$HERE/../README.md" && grep -Fq '360' "$HERE/../README.md"
+)
+t 'R-1: production gh budget (120/h nominal, 360/h cap, 75 s freshness, 15 s timeout) is documented and consistent' r1_production_budget
+
 # The real c1_spawn/c1_start_watchdog/c1_cleanup_session paths, with a test
 # launcher but no Codespace, network, or Entra. A failed monitor teardown marker
 # must stop the launcher and remove the marked session without a manual prompt.
@@ -1402,8 +1608,12 @@ watchdog_teardown_end_to_end() {
 }
 t 'L-9: real watchdog terminates marked launcher and removes session after teardown-failed' watchdog_teardown_end_to_end
 
-t 'L-6/R-1: monitor-scoped HTTPS and gh deadlines are 0.4s with fast teardown' bash -c \
-  'grep -Fq "local C1_PROBE_MAX_TIME=0.4 C1_GH_READ_TIMEOUT=0.4 C1_MONITOR_FAST_TEARDOWN=1" "$1" &&
+t 'L-6/R-1: monitor HTTPS probes stay 0.4s; gh uses the documented budget and realistic timeout' bash -c \
+  'grep -Fq "local C1_PROBE_MAX_TIME=0.4 C1_MONITOR_FAST_TEARDOWN=1" "$1" &&
+   grep -Fq "local C1_GH_READ_TIMEOUT C1_GH_EVIDENCE=cached" "$1" &&
+   grep -Fxq "C1_GH_READ_TIMEOUT=15" "$1" && grep -Fxq "C1_MON_GH_TIMEOUT_MS=15000" "$1" &&
+   grep -Fxq "C1_MON_GH_INTERVAL_MS=30000" "$1" && grep -Fxq "C1_MON_GH_RETRY_MS=10000" "$1" &&
+   grep -Fxq "C1_MON_GH_MAX_AGE_MS=75000" "$1" &&
    grep -Fq "local wait_steps=20" "$1" &&
    grep -Fq "wait_steps=5" "$1" &&
    grep -Fq -- "--max-time" "$1" && grep -Fq "C1_PROBE_MAX_TIME" "$1"' _ "$HERE/../lib/c1-lib.sh"
@@ -1725,12 +1935,15 @@ if [[ -n "$REAL_SS" ]] && command -v python3 >/dev/null; then
     for (( i = 0; i < 100; i++ )); do [[ -s "$s/log/execer.log" ]] && break; sleep 0.05; done
     c1_assert_no_listeners_before_novnc "$s" 2>/dev/null || rc=$?
     local st lp vc=0; st=$(sed -n 1p "$s/listener-state"); lp=$(awk '{print $1; exit}' "$s/pids"); endsess "$s"
-    # Cleanup cannot signal it (no marker = no ownership proof), so verification MUST report it.
+    # L-A: the launcher cannot prove ownership (no marker), but the leader is its
+    # supervisor's own child: the supervisor terminates it, and only then does
+    # verification succeed.
     c1_verify_cleanup "$s" 2>/dev/null || vc=$?
+    local gone=0; alive "$lp" || gone=1
     kill "$lp" 2>/dev/null || true; sleep 0.2
-    (( rc != 0 )) && [[ "$st" == failed-unavailable ]] && (( vc != 0 )) && c1_verify_cleanup "$s"
+    (( rc != 0 )) && [[ "$st" == failed-unavailable ]] && (( vc == 0 && gone == 1 ))
   }
-  t 'recorded leader that exec()s into an env-cleared listener: fail closed, and cleanup verification reports it surviving' leader_dropped_marker
+  t 'recorded leader that exec()s into an env-cleared listener: fail closed; its supervisor terminates it before verification' leader_dropped_marker
   setsid_grandchild_attributed() {   # like fluxbox -> fbsetbg: the child calls setsid AND drops the marker
     local s got port; s=$(newsess); export C1_HARNESS_SESSION=$s
     c1_spawn "$s" fluxlike bash -c 'setsid env -i "$1" -I -c "import socket,time;s=socket.socket();s.bind((\"0.0.0.0\",0));s.listen();print(s.getsockname()[1],flush=True);time.sleep(60)" & wait' _ "$PY3" >/dev/null
@@ -1924,27 +2137,61 @@ X
   else skip 'adversarial x11vnc startup (Xvfb/fluxbox/xauth missing)'; fi
   if command -v websockify >/dev/null; then
     mkdir -p "$ADV/race"
-    # websockify stand-in: an UNRELATED, unmarked, re-parented process grabs the
+    # T-1: an UNRELATED, unmarked process OUTSIDE the harness tree grabs the
     # noVNC port on the wildcard address between the free check and the bind.
-    cat >"$ADV/race/websockify" <<'W'
+    # The foreign listener is armed by this test shell (not by the supervised
+    # stand-in, whose orphans the L-A supervisor would adopt); the stand-in only
+    # fires the trigger. Every value the stand-in needs is embedded here: the
+    # desktop credential-isolation policy (env -i allowlist) passes it no test
+    # variables, and must not be weakened to make this fixture work.
+    RACE_TRIGGER="$ADV/race.trigger"
+    cat >"$ADV/race/websockify" <<W
 #!/usr/bin/env bash
-port=${*: -1}; port=${port##*:}
-( env -i setsid "$PY3" -I -c 'import socket,sys,time
-s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("0.0.0.0", int(sys.argv[1]))); s.listen(); open(sys.argv[2],"w").write(str(__import__("os").getpid())); time.sleep(30)' "$port" "$RACE_PIDFILE" </dev/null >/dev/null 2>&1 & )
-sleep 30
+: >$(printf '%q' "$RACE_TRIGGER")
+exec sleep 30
 W
     chmod 755 "$ADV/race/websockify"
+    # shellcheck disable=SC2016
+    RACE_ARM='import os,socket,sys,time
+trig, pidf, port = sys.argv[1], sys.argv[2], int(sys.argv[3])
+open(pidf + ".armed", "w").write(str(os.getpid()))
+end = time.time() + 20
+while not os.path.exists(trig):
+    if time.time() > end: sys.exit(3)
+    time.sleep(0.005)
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", port)); s.listen()
+open(pidf + ".tmp", "w").write(str(os.getpid())); os.rename(pidf + ".tmp", pidf)
+time.sleep(30)'
     port_race() {
-      local s port rc=0 pf; s=$(newsess); export C1_HARNESS_SESSION=$s
+      local s port rc=0 pf fp='' ok=1 i listening; s=$(newsess); export C1_HARNESS_SESSION=$s
       port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
-      export RACE_PIDFILE="$ADV/race.pid" PY3; rm -f "$RACE_PIDFILE"
+      local race_pid="$ADV/race.pid"; rm -f "$race_pid" "$race_pid.armed" "$RACE_TRIGGER"
+      ( env -i setsid "$PY3" -I -c "$RACE_ARM" "$RACE_TRIGGER" "$race_pid" "$port" </dev/null >"$ADV/race.log" 2>&1 & )
+      for (( i=0; i<200; i++ )); do [[ -s "$race_pid.armed" ]] && break; sleep 0.01; done
+      [[ -s "$race_pid.armed" ]] || { echo 'fixture: foreign listener was never armed'; return 1; }
       PATH="$ADV/race:$PATH" c1_start_websockify "$s" "$port" >/dev/null 2>&1 || rc=$?
       pf=$(cat "$s/privacy-failed" 2>/dev/null || true)
-      [[ -s "$RACE_PIDFILE" ]] && kill "$(cat "$RACE_PIDFILE")" 2>/dev/null
+      # Fail closed if the fixture could not establish the race: the foreign
+      # wildcard listener must exist, be unmarked, and lie outside the harness tree.
+      [[ -s "$race_pid" ]] && fp=$(cat "$race_pid") || { echo 'fixture: foreign wildcard listener never started'; ok=0; }
+      if (( ok )); then
+        listening=$("$REAL_SS" -Hltn "sport = :$port" 2>/dev/null || true)
+        [[ "$listening" == *"0.0.0.0:$port"* ]] || { echo "fixture: no 0.0.0.0:$port listener (ss: ${listening:-none})"; ok=0; }
+        if c1_pid_has_marker "$fp" "$s"; then echo 'fixture: race listener carries the session marker'; ok=0; fi
+        c1_load_tree "$s"
+        if c1_tree_attributed "$fp"; then echo 'fixture: race listener is inside the harness tree'; ok=0; fi
+      fi
+      [[ -n "$fp" ]] && kill "$fp" 2>/dev/null
       sleep 0.2; endsess "$s"
-      (( rc == 2 )) && [[ "$pf" == *teardown-failed* ]]
+      (( ok )) && (( rc == 2 )) && [[ "$pf" == *teardown-failed* ]] || { echo "rc=$rc privacy-failed=${pf:-none}"; return 1; }
+    }
+    port_race_blind() {   # negative control: a race that never fires must FAIL the case, not pass silently
+      local RACE_ARM='import sys; open(sys.argv[2] + ".armed", "w").write("1")'
+      port_race
     }
     t 'port-listener race: foreign wildcard listener takes the noVNC port -> rejected, teardown-failed (rc 2)' port_race
+    f 'T-1 control: a port race fixture that never establishes the foreign listener fails the case' port_race_blind
   else skip 'noVNC port race (websockify missing)'; fi
 
   # ---- real binaries: no IPv4/IPv6 TCP socket is even attempted (M-1) -------

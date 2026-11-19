@@ -396,10 +396,16 @@ c1_tree_attributed() {
 # c1_load_tree SESSION -> fills C1_TREE_* (strict=1: a malformed record or a
 # live recorded process whose marker cannot be read is an error, rc 1).
 c1_load_tree() {
-  local s=$1 strict=${2:-0} pid st extra pp sd
+  local s=$1 strict=${2:-0} pid st extra pp sd rec
   declare -gA C1_TREE_LEAD=() C1_TREE_PPID=() C1_TREE_SID=() C1_TREE_START=()
-  if [[ -e "$s/pids" ]]; then
-    [[ -r "$s/pids" ]] || { (( ! strict )) || { c1_err 'listener evidence: harness pid record unreadable'; return 1; }; }
+  # L-A: recorded supervisors are leaders too, so every descendant they adopt
+  # stays attributable after its own ancestors exit.
+  for rec in "$s/pids" "$s/supervisors"; do
+  if [[ -e "$rec" || -L "$rec" ]]; then
+    if [[ ! -f "$rec" || -L "$rec" || ! -r "$rec" ]]; then
+      (( ! strict )) || { c1_err 'listener evidence: harness pid record unreadable'; return 1; }
+      continue
+    fi
     while read -r pid st extra; do
       [[ -n "$pid" ]] || continue
       if ! [[ "$pid" =~ ^[0-9]+$ && "$st" =~ ^[0-9]+$ && -z "$extra" ]]; then
@@ -413,8 +419,9 @@ c1_load_tree() {
         continue
       fi
       C1_TREE_LEAD[$pid]=$st
-    done <"$s/pids"
+    done <"$rec"
   fi
+  done
   while read -r pid pp sd st; do
     C1_TREE_PPID[$pid]=$pp; C1_TREE_SID[$pid]=$sd; C1_TREE_START[$pid]=$st
   done < <(c1_proc_tree)
@@ -763,38 +770,99 @@ c1_signal_owned() {
 # Every signal is ownership-verified: recorded entries ("pid starttime") must
 # match marker AND start time (PID-reuse safe); marker-scan hits are signalled
 # individually or, if they are their own setsid leader, as a group.
+C1_SUPERVISOR_WAIT_STEPS=100            # x 0.05 s after the KILL escalation
+
+# c1_ancestors -> this (sub)shell and every ancestor up to PID 1. Cleanup never
+# signals these: the watchdog runs cleanup from inside its own supervisor.
+c1_ancestors() {
+  local p=${BASHPID:-$$} n=0
+  while [[ "$p" =~ ^[0-9]+$ ]] && (( p > 1 && n++ < 256 )); do
+    printf '%s\n' "$p"
+    p=$(c1_proc_stat_field "$p" 2) || break
+  done
+}
+
+# c1_live_supervisors SESSION -> "pid start" of recorded supervisors that are
+# still running (not zombies) with their recorded start time.
+c1_live_supervisors() {
+  local pid st extra
+  [[ -f "$1/supervisors" && ! -L "$1/supervisors" ]] || return 0
+  while read -r pid st extra; do
+    [[ "$pid" =~ ^[0-9]+$ && "$st" =~ ^[0-9]+$ && -z "$extra" ]] || continue
+    [[ "$(c1_proc_start "$pid")" == "$st" && ! "$(c1_proc_stat_field "$pid" 1)" =~ ^[ZX]$ ]] || continue
+    printf '%s %s\n' "$pid" "$st"
+  done <"$1/supervisors"
+}
+
 c1_cleanup_session() {
   local root=$1 s=$2 pid start descendants='' capture_ok=0
   [[ -n "$s" ]] || return 0
   # Never let cleanup's own helper processes carry the marker it hunts for.
   export -n C1_HARNESS_SESSION 2>/dev/null || true; unset C1_HARNESS_SESSION
   local -a rec=()
+  local -A anc=() sup=()
+  for pid in $(c1_ancestors); do anc[$pid]=1; done
   if [[ -f "$s/pids" ]]; then mapfile -t rec <"$s/pids"; fi
   if [[ -d "$s" ]]; then
     if ! c1_load_tree "$s" || ! descendants=$(c1_tree_descendant_identities) ||
       ! c1_record_tree_descendants "$s" "$descendants"; then capture_ok=1; fi
   fi
-  local sig
+  while read -r pid start; do [[ -n "$pid" ]] && sup[$pid]=$start; done < <(c1_live_supervisors "$s")
+  local sig others
   for sig in TERM KILL; do
     local line
     # Only freshly attributed identities authorize a signal. Older records
     # can block verification, but never authorize killing a reparented PID.
     while read -r pid start; do
-      [[ -n "$start" && "$(c1_proc_start "$pid")" == "$start" ]] || continue
+      [[ -n "$start" && -z "${anc[$pid]:-}" && -z "${sup[$pid]:-}" && "$(c1_proc_start "$pid")" == "$start" ]] || continue
       kill -"$sig" -- "$pid" 2>/dev/null || true
     done <<<"$descendants"
     for line in "${rec[@]}"; do
       read -r pid start <<<"$line"
-      [[ -n "${start:-}" ]] || continue          # legacy/garbage line: never trusted
+      [[ -n "${start:-}" && -z "${anc[$pid]:-}" ]] || continue          # legacy/garbage line: never trusted
       c1_signal_owned "$sig" "$pid" "$s" "$start"
     done
-    for pid in $(c1_marked_pids "$s"); do c1_signal_owned "$sig" "$pid" "$s"; done
-    [[ $sig == KILL ]] && break
+    # A supervisor is never SIGKILLed while it may still own descendants: that
+    # would orphan them to PID 1. TERM is forwarded by the supervisor itself;
+    # the KILL escalation is SIGUSR1 (it then SIGKILLs its whole tree).
+    for pid in $(c1_marked_pids "$s"); do
+      [[ -z "${anc[$pid]:-}" ]] || continue
+      if [[ -n "${sup[$pid]:-}" ]]; then
+        [[ $sig == TERM ]] && c1_signal_owned TERM "$pid" "$s" "${sup[$pid]}"
+        continue
+      fi
+      c1_signal_owned "$sig" "$pid" "$s"
+    done
+    if [[ $sig == KILL ]]; then
+      for pid in "${!sup[@]}"; do
+        [[ -z "${anc[$pid]:-}" ]] || continue
+        c1_signal_owned USR1 "$pid" "$s" "${sup[$pid]}"
+      done
+      break
+    fi
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-      [[ -z "$(c1_marked_pids "$s")" ]] && break
+      others=''
+      for pid in $(c1_marked_pids "$s"); do [[ -n "${anc[$pid]:-}" ]] || others+="$pid "; done
+      [[ -z "$others" ]] && break
       sleep 0.5
     done
   done
+  # Wait for every (non-ancestor) supervisor to finish reaping and exit.
+  local pending='' i
+  for (( i=0; i<C1_SUPERVISOR_WAIT_STEPS; i++ )); do
+    pending=''
+    while read -r pid start; do
+      [[ -n "$pid" && -z "${anc[$pid]:-}" ]] && pending+="$pid "
+    done < <(c1_live_supervisors "$s")
+    [[ -z "$pending" ]] && break
+    sleep 0.05
+  done
+  if [[ -n "$pending" ]]; then
+    # Left running on purpose: a live supervisor keeps its descendants
+    # attributable, so a later cleanup can retry without losing evidence.
+    c1_err "cleanup evidence: supervisor(s) ${pending% } still own descendants; session retained"
+    return 1
+  fi
   if (( capture_ok )); then c1_err 'cleanup evidence: descendant identities could not be verified; session retained'; return 1; fi
   # L-3: keep the observed listener inodes so c1_verify_cleanup can prove none
   # of them is still listening after the session directory is gone.
@@ -814,6 +882,14 @@ c1_cleanup_session() {
       return 1
     fi
   done
+  # L-A: supervisor identities need a reaping proof, not only absence.
+  if [[ -e "$s/supervisors" || -L "$s/supervisors" ]]; then
+    if [[ ! -f "$s/supervisors" || -L "$s/supervisors" || ! -s "$s/supervisors" ]] ||
+       ! ( umask 077; cat -- "$s/supervisors" >>"$root/.${s##*/}.supervisors" ); then
+      c1_err 'cleanup evidence: cannot preserve supervisor identities; session retained'
+      return 1
+    fi
+  fi
   if [[ -d "$s" ]]; then c1_safe_rm "$s" "$root" || return 1; fi
   if [[ -f "$root/active" ]]; then
     local as; as=$(c1_session_dir "$root" || true)
@@ -835,7 +911,7 @@ c1_cleanup_all() {
   done
   # A crash may leave only the post-cleanup inode/PID registers. Verify them,
   # never discard them to make a subsequent cleanup appear successful.
-  for record in "$root"/.session.*.inodes "$root"/.session.*.pids; do
+  for record in "$root"/.session.*.inodes "$root"/.session.*.pids "$root"/.session.*.supervisors "$root"/.session.*.reaped; do
     [[ -e "$record" || -L "$record" ]] || continue
     name=${record##*/}; name=${name#.}; s="$root/${name%.*}"
     [[ -n "${checked[$s]:-}" ]] && continue
@@ -885,6 +961,7 @@ c1_verify_cleanup() {
     fi
     if (( unresolved )); then ok=1; else rm -f -- "$preg" || ok=1; fi
   fi
+  c1_verify_supervisors "$s" || ok=1
   reg="$(dirname -- "$s")/.${s##*/}.inodes"
   if [[ -e "$reg" || -L "$reg" ]]; then
     # N-6: ambiguous preserved evidence cannot establish listener closure.
@@ -913,6 +990,54 @@ c1_verify_cleanup() {
     if (( inode_unresolved )); then ok=1; else rm -f -- "$reg" || ok=1; fi
   fi
   return $ok
+}
+
+# c1_verify_supervisors SESSION -> 0 only if every preserved supervisor identity
+# is gone AND has a matching reaping proof (it observed ECHILD: no descendant of
+# any depth remained). A supervisor that is still running, or that vanished
+# without the proof (SIGKILL, crash), may have let descendants escape to PID 1:
+# that is never a successful cleanup (L-A). Records are kept on failure.
+c1_verify_supervisors() {
+  local s=$1 sreg rreg line pid st extra bad=0
+  local -A proof=()
+  sreg="$(dirname -- "$s")/.${s##*/}.supervisors"; rreg=$(c1_reaped_register "$s")
+  if [[ ! -e "$sreg" && ! -L "$sreg" ]]; then
+    # A proof without a supervisor record carries no obligation once the
+    # session directory is gone (the supervisor outlived an earlier verify).
+    [[ -e "$s" || ( ! -e "$rreg" && ! -L "$rreg" ) ]] || rm -f -- "$rreg" || return 1
+    return 0
+  fi
+  if [[ -e "$rreg" || -L "$rreg" ]]; then
+    if [[ ! -f "$rreg" || -L "$rreg" || ! -r "$rreg" ]]; then
+      c1_err 'supervisor reaping proof is not a readable regular file'; bad=1
+    else
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        pid='' st='' extra=''; read -r pid st extra <<<"$line" || true
+        if [[ ! "$pid" =~ ^[0-9]+$ || ! "$st" =~ ^[0-9]+$ || -n "$extra" ]]; then
+          c1_err 'malformed supervisor reaping proof; record retained'; bad=1; continue
+        fi
+        proof["$pid $st"]=1
+      done <"$rreg"
+    fi
+  fi
+  if [[ ! -f "$sreg" || -L "$sreg" || ! -r "$sreg" || ! -s "$sreg" ]]; then
+    c1_err 'preserved supervisor evidence is not a readable nonempty regular file'; bad=1
+  else
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      pid='' st='' extra=''; read -r pid st extra <<<"$line" || true
+      if [[ ! "$pid" =~ ^[0-9]+$ || ! "$st" =~ ^[0-9]+$ || -n "$extra" ]]; then
+        c1_err 'malformed preserved supervisor evidence; record retained'; bad=1; continue
+      fi
+      if [[ "$(c1_proc_start "$pid" || true)" == "$st" && ! "$(c1_proc_stat_field "$pid" 1)" =~ ^[ZX]$ ]]; then
+        c1_err "harness supervisor $pid is still running (it still owns descendants)"; bad=1
+      elif [[ -z "${proof["$pid $st"]:-}" ]]; then
+        c1_err "harness supervisor $pid exited without proving that its descendants were reaped; a descendant may survive outside the harness tree"
+        bad=1
+      fi
+    done <"$sreg"
+  fi
+  (( bad == 0 )) || return 1
+  rm -f -- "$sreg" "$rreg"
 }
 
 # ----------------------------------------------------------------- desktop --
@@ -954,16 +1079,53 @@ c1_close_inherited_fds() {
   done
 }
 
-# c1_spawn SESSION NAME CMD...  start detached in own process group, record pid
+# L-A: every spawned command runs under a persistent subreaper supervisor
+# (lib/c1-supervisor.py). The supervisor records itself in SESSION/supervisors
+# before it forks, adopts every orphaned descendant, and lives until no
+# descendant remains; only then does it append its identity to the root-level
+# reaped register. A recorded supervisor that is gone without that proof fails
+# cleanup verification closed (c1_verify_cleanup).
+C1_SUPERVISOR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/c1-supervisor.py"
+C1_SPAWN_WAIT_STEPS=250                 # x 0.02 s: supervisor publishes its child identity
+c1_reaped_register() { printf '%s/.%s.reaped' "$(dirname -- "$1")" "${1##*/}"; }
+
+# _c1_spawn_supervised SESSION NAME NPREFIX PREFIX... CMD...
+# PREFIX is the environment wrapper the supervisor itself runs under, so the
+# supervisor of a desktop process holds the same scrubbed environment (L-C).
+_c1_spawn_supervised() {
+  local s=$1 name=$2 n=$3 py reg i; shift 3
+  local -a pre=("${@:1:n}"); shift "$n"
+  py=$(command -v python3) || { c1_err 'python3 is required to supervise harness processes'; return 1; }
+  reg=$(c1_reaped_register "$s")
+  ( c1_close_inherited_fds; exec "${pre[@]}" "$py" -I "$C1_SUPERVISOR" "$s" "$reg" "$name" -- "$@" ) \
+    >"$s/log/$name.log" 2>&1 </dev/null &
+  local sup=$! pid='' st='' line
+  disown "$sup" 2>/dev/null || true   # no job-status noise when cleanup kills it
+  for (( i=0; i<C1_SPAWN_WAIT_STEPS; i++ )); do
+    if [[ -f "$s/tmp/spawn.$sup" && ! -L "$s/tmp/spawn.$sup" ]]; then
+      read -r line <"$s/tmp/spawn.$sup" || line=''
+      rm -f -- "$s/tmp/spawn.$sup"
+      read -r pid st _ <<<"$line"
+      break
+    fi
+    [[ -d "/proc/$sup" && ! "$(c1_proc_stat_field "$sup" 1)" =~ ^[ZX]$ ]] || break
+    sleep 0.02
+  done
+  if ! [[ "$pid" =~ ^[0-9]+$ && "$st" =~ ^[0-9]+$ ]]; then
+    c1_err "supervised spawn of $name did not publish its child identity"
+    return 1
+  fi
+  # The setsid leader is recorded as before ("pid starttime"); its supervisor
+  # recorded itself. A child that already exited is never signalled by PID.
+  printf '%s %s\n' "$pid" "$st" >>"$s/pids"
+  printf '%s' "$pid"
+}
+
+# c1_spawn SESSION NAME CMD...  start detached in its own setsid session under a
+# subreaper supervisor; records the leader, prints the leader pid.
 c1_spawn() {
   local s=$1 name=$2; shift 2
-  ( c1_close_inherited_fds; exec env C1_HARNESS_SESSION="$s" setsid "$@" ) >"$s/log/$name.log" 2>&1 </dev/null &
-  local pid=$! st=''
-  disown "$pid" 2>/dev/null || true   # no job-status noise when cleanup kills it
-  for _ in 1 2 3 4 5 6 7 8 9 10; do st=$(c1_proc_start "$pid"); [[ -n "$st" ]] && break; sleep 0.02; done
-  # A process that already exited records no start time and is never signalled by PID.
-  if [[ -n "$st" ]]; then printf '%s %s\n' "$pid" "$st" >>"$s/pids"; fi
-  printf '%s' "$pid"
+  _c1_spawn_supervised "$s" "$name" 2 env C1_HARNESS_SESSION="$s" "$@"
 }
 
 # Desktop and decoy processes never need the launcher's GitHub credentials.
@@ -971,7 +1133,7 @@ c1_spawn_desktop() {
   local s=$1 name=$2; shift 2
   local -a clean
   mapfile -d '' -t clean < <(c1_clean_env)
-  c1_spawn "$s" "$name" "${clean[@]}" C1_HARNESS_SESSION="$s" "$@"
+  _c1_spawn_supervised "$s" "$name" $(( ${#clean[@]} + 1 )) "${clean[@]}" C1_HARNESS_SESSION="$s" "$@"
 }
 
 # c1_start_display_vnc SESSION PASSWORD -> Xvfb + fluxbox + x11vnc (no TCP at all);
@@ -1080,7 +1242,22 @@ c1_assert_desktop_listeners() {
 
 C1_PRIVACY_TIMEOUT=120
 C1_PROBE_MAX_TIME=15
-C1_GH_READ_TIMEOUT=5
+# R-1: `gh codespace ports` is a GitHub REST call plus a connection to the
+# codespace; it is expected to take a few seconds (unmeasured here: the real-
+# Codespace run must record it). Bootstrap, gate and monitor reads allow 15 s
+# (plus 0.1 s kill grace).
+C1_GH_READ_TIMEOUT=15
+C1_GH_EVIDENCE=live                     # live | cached (privacy monitor only)
+C1_GH_CACHED_PRIVATE=0
+# R-1 monitor request budget for the gh read-back (see README "Request budget"):
+# one read in flight at most; the next read starts C1_MON_GH_INTERVAL_MS after
+# a "private" read, or C1_MON_GH_RETRY_MS after the previous read STARTED when
+# it failed or timed out. Nominal 120 reads/hour, hard cap 360 reads/hour.
+# "private" evidence older than C1_MON_GH_MAX_AGE_MS tears noVNC down (gh-stale).
+C1_MON_GH_INTERVAL_MS=30000
+C1_MON_GH_RETRY_MS=10000
+C1_MON_GH_TIMEOUT_MS=15000
+C1_MON_GH_MAX_AGE_MS=75000
 C1_NOVNC_RETRIES=10
 C1_NOVNC_SIGNATURE='noVNC'
 C1_PRIVACY_DETAIL=''
@@ -1179,7 +1356,14 @@ c1_privacy_check() {
     # This specific redirect is accepted only alongside independently verified
     # current Private visibility; gh failure, org/public, or missing evidence
     # remains unverified. Repeated monitor/gate probes re-check this each time.
-    if ! c1_gh_private "$C1_NOVNC_PORT"; then
+    # The monitor supplies its own budgeted, freshness-bounded gh evidence
+    # (R-1); every other caller performs a live read-back here.
+    if [[ "$C1_GH_EVIDENCE" == cached ]]; then
+      if [[ "$C1_GH_CACHED_PRIVATE" != 1 ]]; then
+        C1_PRIVACY_DETAIL='github.dev sign-in redirect without fresh private port visibility'
+        rm -f "$f"; return 1
+      fi
+    elif ! c1_gh_private "$C1_NOVNC_PORT"; then
       C1_PRIVACY_DETAIL='github.dev sign-in redirect without confirmed private port visibility'
       rm -f "$f"; return 1
     fi
@@ -1246,17 +1430,17 @@ c1_teardown_novnc() {
   local s=$1 port=$2 ws=$3 wsst=$4 reason=${5:-unverified}
   # A monitor supplies a tighter local bound; other callers retain the 2 s
   # TERM / KILL grace periods. Never accept arbitrary external step counts.
-  local wait_steps=20
+  local wait_steps=20 i
   [[ "${C1_MONITOR_FAST_TEARDOWN:-}" == 1 ]] && wait_steps=5
   [[ "$reason" =~ ^[a-z0-9_-]{1,40}$ ]] || reason=unverified
   printf '%s %s\n' "$(c1_utc)" "$reason" >>"$s/privacy-failed"
   c1_signal_owned TERM "$ws" "$s" "$wsst"
-  for (( _=0; _<wait_steps; _++ )); do
+  for (( i=0; i<wait_steps; i++ )); do
     if c1_port_free "$port" && ! c1_owned_pid "$ws" "$s" "$wsst"; then break; fi
     sleep 0.1
   done
   c1_signal_owned KILL "$ws" "$s" "$wsst"
-  for (( _=0; _<wait_steps; _++ )); do c1_port_free "$port" && break; sleep 0.1; done
+  for (( i=0; i<wait_steps; i++ )); do c1_port_free "$port" && break; sleep 0.1; done
   if ! c1_port_free "$port"; then
     printf '%s teardown-failed\n' "$(c1_utc)" >>"$s/privacy-failed"
     c1_err "port $port is still listening after the privacy teardown"
@@ -1293,38 +1477,81 @@ c1_privacy_gate() {
   return 1
 }
 
+# c1_now_ms VAR -> monotonic-enough wall clock in milliseconds (locale-safe).
+c1_now_ms() { local t=${EPOCHREALTIME//[!0-9]/}; printf -v "$1" '%s' "$(( 10#$t / 1000 ))"; }
+
 # c1_privacy_monitor_loop SESSION BASE TOKENHDR WSPID WSSTART [CACERT] [INTERVAL] [PORT] [REQUIRE_GH]
 # Background, marker-scoped: tears noVNC down (and flags the session) as soon as
-# the port is seen public or gh (REQUIRE_GH=1, L-10) reads back anything other
-# than "private" (e.g. org/public), or on the first unverifiable
-# observation (ambiguous HTTPS probe or unavailable gh read-back).
+# an HTTPS sweep sees the port public or ambiguous (every INTERVAL; L-6), as
+# soon as a gh read-back (REQUIRE_GH=1, L-10) returns anything other than
+# "private", or when the last "private" read-back is older than
+# C1_MON_GH_MAX_AGE_MS (gh-stale; R-1). gh reads run asynchronously on the
+# budget above, so a slow gh never pauses the HTTPS sweeps.
 c1_privacy_monitor_loop() {
   local s=$1 base=$2 hdr=$3 ws=$4 wsst=$5 ca=${6:-} iv=${7:-0.2} port=${8:-$C1_NOVNC_PORT} req_gh=${9:-0}
-  # Bootstrap keeps its normal timeouts. In one monitor sweep use at most two
-  # 0.4 s HTTPS probes and one 0.4 s gh read with a 0.1 s kill grace. The
-  # interval elapses between sweeps. Teardown gets up to 1 s of signal grace.
-  local C1_PROBE_MAX_TIME=0.4 C1_GH_READ_TIMEOUT=0.4 C1_MONITOR_FAST_TEARDOWN=1
-  local reason g
-  trap 'exit 0' TERM
+  # HTTPS sweeps stay fast: at most two 0.4 s probes per sweep. Teardown gets
+  # up to 1 s of signal grace.
+  local C1_PROBE_MAX_TIME=0.4 C1_MONITOR_FAST_TEARDOWN=1
+  local C1_GH_READ_TIMEOUT C1_GH_EVIDENCE=cached C1_GH_CACHED_PRIVATE=0
+  printf -v C1_GH_READ_TIMEOUT '%d.%03d' $(( C1_MON_GH_TIMEOUT_MS / 1000 )) $(( C1_MON_GH_TIMEOUT_MS % 1000 ))
+  local reason now gh_ok gh_next gh_started=0 gh_job='' gh_out g vis
+  gh_out="${TMPDIR:-/tmp}/c1-gh-monitor.$BASHPID"
+  trap 'c1_monitor_gh_stop; exit 0' TERM
+  c1_now_ms now
+  # The launcher verified gh "private" immediately before starting the monitor.
+  gh_ok=$now gh_next=$(( now + C1_MON_GH_INTERVAL_MS ))
+  (( req_gh )) && C1_GH_CACHED_PRIVATE=1
   while c1_owned_pid "$ws" "$s" "$wsst"; do
     sleep "$iv"
     reason=''
-    if c1_privacy_check "$base" '/vnc.html' "$C1_NOVNC_SIGNATURE" "$hdr" "$ca"; then
-      if (( ! req_gh )) || [[ $C1_PRIVACY_GH_PRIVATE == 1 ]]; then continue; fi
-      g=0; c1_gh_private "$port" || g=$?
-      if (( g == 0 )); then continue; fi
-      if (( g == 1 )); then reason="gh-visibility-$C1_GH_VIS"; else reason=gh-unavailable; fi
-    elif [[ $C1_PRIVACY_STATE == public ]]; then reason=public
-    else reason=unverified
+    c1_now_ms now
+    if (( req_gh )); then
+      if [[ -n "$gh_job" && -f "$gh_out" ]]; then
+        g=2 vis=''
+        read -r g vis <"$gh_out" || g=2
+        rm -f -- "$gh_out"; wait "$gh_job" 2>/dev/null || true; gh_job=''
+        case $g in
+          0) gh_ok=$now; gh_next=$(( now + C1_MON_GH_INTERVAL_MS )) ;;
+          1) reason="gh-visibility-$vis" ;;
+          *) gh_next=$(( gh_started + C1_MON_GH_RETRY_MS )) ;;
+        esac
+      elif [[ -n "$gh_job" ]] && (( now - gh_started > C1_MON_GH_TIMEOUT_MS + 2000 )); then
+        c1_monitor_gh_stop                # defence in depth: timeout(1) already bounds it
+        gh_next=$(( gh_started + C1_MON_GH_RETRY_MS ))
+      fi
+      if [[ -z "$reason" ]] && (( now - gh_ok > C1_MON_GH_MAX_AGE_MS )); then
+        C1_GH_CACHED_PRIVATE=0; reason=gh-stale
+      fi
+      if [[ -z "$reason" && -z "$gh_job" ]] && (( now >= gh_next )); then
+        rm -f -- "$gh_out" "$gh_out.tmp"
+        ( g=0; c1_gh_private "$port" || g=$?
+          printf '%s %s\n' "$g" "${C1_GH_VIS:-unknown}" >"$gh_out.tmp" && mv -f -- "$gh_out.tmp" "$gh_out" ) &
+        gh_job=$! gh_started=$now gh_next=$(( now + C1_MON_GH_RETRY_MS ))
+      fi
     fi
-    # A stalled/ambiguous edge is not a positive privacy proof. Fail closed
-    # on its first observation: three retry cycles cannot meet L-6's bound.
-    if [[ -n "$reason" ]]; then
-      # L-9: an unverifiable teardown must propagate failure to the watchdog.
-      c1_teardown_novnc "$s" "$port" "$ws" "$wsst" "$reason" || return 2
-      return 0
+    if [[ -z "$reason" ]]; then
+      if c1_privacy_check "$base" '/vnc.html' "$C1_NOVNC_SIGNATURE" "$hdr" "$ca"; then continue
+      elif [[ $C1_PRIVACY_STATE == public ]]; then reason=public
+      else reason=unverified
+      fi
     fi
+    # A stalled/ambiguous edge is not a positive privacy proof: fail closed on
+    # its first observation. L-9: an unverifiable teardown propagates rc 2.
+    c1_monitor_gh_stop
+    c1_teardown_novnc "$s" "$port" "$ws" "$wsst" "$reason" || return 2
+    return 0
   done
+  c1_monitor_gh_stop
+}
+
+# Stops an in-flight monitor gh read (dynamic scope: gh_job, gh_out).
+c1_monitor_gh_stop() {
+  [[ -n "${gh_job:-}" ]] || return 0
+  pkill -TERM -P "$gh_job" 2>/dev/null || true   # timeout(1) forwards TERM to gh
+  kill -KILL "$gh_job" 2>/dev/null || true
+  wait "$gh_job" 2>/dev/null || true
+  gh_job=''
+  rm -f -- "${gh_out:-/nonexistent}" "${gh_out:-/nonexistent}.tmp"
 }
 
 # c1_repo_owner_type OWNER/REPO AUTHHDR [CACERT] [API_BASE] -> GitHub owner type (User | Organization)

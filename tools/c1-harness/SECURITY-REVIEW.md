@@ -19,6 +19,28 @@
 
 **Reviewer independence:** sessions B, D and E and the `cd33512` session are implementers and **must not review**. Session C authored no code but proposed these fixes, so a **new** session is required.
 
+## 2026-11-19 final focused remediation on `69a2bdc` (L-A, T-1, R-1, L-D): pending incremental independent review
+
+This is the implementer's account. Treat it as claims, not evidence. The scope is `tools/c1-harness/**` only.
+
+- **L-A (orphaned descendants).** The new `lib/c1-supervisor.py` runs every `c1_spawn` command under a persistent `PR_SET_CHILD_SUBREAPER` supervisor.
+  - **Records:** the supervisor appends its identity to `SESSION/supervisors` before it forks. `c1_load_tree` treats recorded supervisors as tree leaders.
+  - **Lifetime:** the supervisor exits only on `ECHILD`, then appends to the root-level `.session.*.reaped` proof.
+  - **Cleanup:** TERM is forwarded by the supervisor. KILL is escalated as SIGUSR1 (the supervisor SIGKILLs its tree through pidfds after a start-time check). Cleanup waits for supervisors to exit, never SIGKILLs one, and skips its own ancestors (the watchdog runs cleanup inside its supervisor).
+  - **Verification:** `c1_verify_supervisors` fails closed when a preserved supervisor is alive or is gone without a proof.
+  - **Covered by regressions:** reviewer cases 3 and 4, orphan-after-scan, a killed supervisor, PID reuse, failed signals, interrupted cleanup and recovery, sampled supervisor lifetime, and four mutants (no subreaper ×2, early exit, a verify that ignores proofs).
+- **Existing tests updated to the stronger behaviour:**
+  - The reparented-child case now expects adoption and removal, not survival.
+  - The exec'd-unmarked-leader case now expects its supervisor to terminate it.
+  - The old descendant-capture mutation was removed: the capture is now defence in depth behind the supervisor, so removing it is no longer observable.
+- **T-1.** The port-race foreign listener is armed by the test shell outside the harness tree. The supervised stand-in only touches a trigger whose path is embedded in it. The case asserts that the foreign `0.0.0.0` listener exists, is unmarked and is unattributed. A negative control proves that a race which never fires fails the case.
+- **R-1.**
+  - The monitor's `gh` read-back is now asynchronous and budgeted: one read in flight; 30 s after a `private` read, 10 s after a failed read started; nominal 120/h, cap 360/h.
+  - Evidence goes stale at 75 s (`gh-stale`). The read-back timeout is 15 s; bootstrap is also 15 s, up from 5 s. Real `gh codespace ports` latency was **not** measured: it stays a real-Codespace verification item.
+  - The monitor's pf-signin sweeps use the cached fresh evidence instead of one `gh` call per 0.2 s sweep. HTTPS probes stay at 0.4 s.
+  - The `_` loop counter in `c1_teardown_novnc` (clobbered by `sleep`, which cut the TERM grace to about one step) was replaced.
+- **L-D.** The README documents the same-UID trust boundary and its assumptions. No process-isolation claim is made.
+
 ## C1 desktop-blocker remediation (round 3, on `ee6ded8`)
 
 Implementer's claims; verify independently. Nothing in `frontend/`, `backend/`, `scripts/`, `tests/` or `.github/` changed, and the pins are unchanged.
