@@ -1078,6 +1078,16 @@ c1_unauth_denied() {
   esac
 }
 
+# A 302 to github.dev/pf-signin is an observed Codespaces sign-in route,
+# not a documented security contract. It only qualifies with a fresh, separate
+# GitHub CLI read-back of the *same* port as private (see c1_privacy_check).
+# Never accept other github.dev paths, subdomains, userinfo, other schemes,
+# ports, fragments, or other redirect status codes.
+c1_codespaces_pf_signin_redirect() {
+  [[ "${1:-}" == 302 ]] || return 1
+  [[ "${2:-}" =~ ^https://github\\.dev/pf-signin(\\?[^#[:space:]]+)?$ ]]
+}
+
 # c1_privacy_check BASE PATH MARKER TOKENHDR [CACERT]
 # 0 = verified private. Sets C1_PRIVACY_STATE to private | public | unverified
 # (and C1_PRIVACY_DETAIL to a short, token-free reason). Private requires BOTH a
@@ -1092,7 +1102,15 @@ c1_privacy_check() {
   if grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe received the marker (HTTP $code)"; rm -f "$f"; return 1; fi
   # Any 2xx to an unauthenticated client is treated as exposure (fail closed).
   if [[ "$code" == 2?? ]]; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe got HTTP $code"; rm -f "$f"; return 1; fi
-  if ! c1_unauth_denied "$code" "${loc:-}"; then
+  if c1_codespaces_pf_signin_redirect "$code" "${loc:-}"; then
+    # This specific redirect is accepted only alongside independently verified
+    # current Private visibility; gh failure, org/public, or missing evidence
+    # remains unverified. Repeated monitor/gate probes re-check this each time.
+    if ! c1_gh_private "$C1_NOVNC_PORT"; then
+      C1_PRIVACY_DETAIL='github.dev sign-in redirect without confirmed private port visibility'
+      rm -f "$f"; return 1
+    fi
+  elif ! c1_unauth_denied "$code" "${loc:-}"; then
     C1_PRIVACY_DETAIL="unauthenticated probe was not positively denied (HTTP $code)"; rm -f "$f"; return 1
   fi
   read -r code loc <<<"$(c1_https_probe "$base$path" "$f" "$hdr" "$ca")" || true
