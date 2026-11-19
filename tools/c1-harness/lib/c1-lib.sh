@@ -10,7 +10,7 @@
 # PR #46 auth implementation; new PR #60 test and UI changes are explicitly
 # enumerated and require their own independent review before LIVE use.
 C1_AUTH_SHA_APPROVED='c46e2e8c67ee5a2668d113ceef15c5a4774cde69'
-C1_PW_SHA_APPROVED='2857285e33ff4a94bc394814f951325c48610799'
+C1_PW_SHA_APPROVED='dff702dd32cb02e684bfb6a87d012dd957e6b034'
 C1_PLAYWRIGHT_VERSION='1.65.1'
 # I-5: the Chromium build Playwright 1.65.1 pins (browsers.json rev 1255, both
 # chromium and chromium-headless-shell). R10 requires this literal value too.
