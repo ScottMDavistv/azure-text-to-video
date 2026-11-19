@@ -21,7 +21,7 @@ export const PHASES = {
 
 // N-1: R1 passes only if every mandatory preflight check actually ran and passed.
 export const REQUIRED_CHECKS = ['harness_clean', 'auth_ancestor_and_approved_diff', 'production_review_status_recorded', 'exact_head_clean_worktree',
-  'vite_host_guard', 'localhost_loopback_only', 'ports_free', 'clean_after_dependency_install', 'listener_evidence_available']
+  'vite_host_guard', 'webrtc_policy_pinned', 'localhost_loopback_only', 'ports_free', 'clean_after_dependency_install', 'listener_evidence_available']
 
 // I-5: R10 requires these literal versions in addition to internal consistency
 // (Playwright 1.65.1 pins Chromium 159.0.8154.6, browsers.json revision 1255,
