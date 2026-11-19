@@ -61,7 +61,7 @@ preflight() {
   c1_verify_harness_clean "$REPO" "$HARNESS_REL" || return 1; check harness_clean
   c1_fetch_commit "$REPO" "$AUTH" && c1_fetch_commit "$REPO" "$PW" || { c1_err 'cannot obtain approved commits'; return 1; }
   c1_verify_commits "$REPO" "$AUTH" "$PW" "$C1_AUTH_TO_PW_FILES" || return 1; check auth_ancestor_and_approved_diff
-  PROD_PENDING=$(c1_verify_prod_pending "$REPO" "$AUTH" "$PW" "$C1_AUTH_TO_PW_FILES" "$C1_PROD_REVIEW_PENDING") || return 1
+  PROD_PENDING=$(c1_verify_prod_pending "$REPO" "$AUTH" "$PW" "$C1_AUTH_TO_PW_FILES" "$C1_PROD_REVIEW_PENDING" "$C1_PROD_CERTIFIED") || return 1
   check production_review_status_recorded
   c1_prepare_worktree "$REPO" "$PW" "$WT" || return 1; check exact_head_clean_worktree
   c1_check_vite_host_guard "$WT" || return 1; check vite_host_guard

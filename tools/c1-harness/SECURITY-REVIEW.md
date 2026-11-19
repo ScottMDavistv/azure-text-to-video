@@ -17,7 +17,30 @@
 | — | Independent review of `ee6ded8` (C1 desktop initialization blocker): **FAIL** (H-1, M-1–M-3, L-1–L-4) | Independent read-only reviewer session |
 | this branch | **C1 desktop-blocker remediation** (P0, Issue #65): H-1, M-1–M-3, L-1–L-4 | Session E (`session_01QdenYPzwRjrGKn8DXdKNba`) |
 
-**Reviewer independence:** sessions B, D and E and the `cd33512` session are implementers and **must not review**. Session C authored no code but proposed these fixes, so a **new** session is required.
+| `695d8e8` | R13 marker cleared after the independent PR #60 PASS at `f4f1066` (App.tsx blob `a0b753b`) | Owner commit |
+| — | Independent R13 clearance review of `695d8e8`: **FAIL**, B-1 (emptying the pending list alone aborts preflight; 2 R13 tests broken) | Independent read-only reviewer session |
+| this branch | **R13 B-1 corrective remediation**: certified-production register | Session F (`session_01QdenYLLVZDgny7kyDACuTn`) |
+
+**Reviewer independence:** sessions B, D, E and F and the `cd33512` session are implementers and **must not review**. Session C authored no code but proposed these fixes, so a **new** session is required.
+
+## 2026-11-19 R13 B-1 corrective remediation on `695d8e8`: pending incremental independent review
+
+This is the implementer's account. Treat it as claims, not evidence. The scope is `tools/c1-harness/**` only; no production, workflow or previously certified harness behaviour changed.
+
+- **B-1.** At `695d8e8`, `C1_PROD_REVIEW_PENDING=''` made `c1_verify_prod_pending` reject `frontend/src/App.tsx` (still a changed production file in the approved diff), so preflight aborted and R13 could never report PASS.
+- **Fix: an explicit, fail-closed certified-production register.**
+  - `C1_PROD_REVIEW_PENDING=''` is preserved. The new `C1_PROD_CERTIFIED='frontend/src/App.tsx@a0b753b533165bb12bc516478c8036645f2f292a'` pins the blob that the independent PR #60 full-diff PASS at `f4f1066` certified.
+  - `c1_verify_prod_pending REPO AUTH PW ALLOWED PENDING CERTIFIED` now requires all six arguments; an omitted register is an error, never "nothing certified".
+  - Every allowlisted non-test path must be in **exactly one** of the two lists. Every entry must be well-formed (`path` or `path@40-hex`, no `..`, `//`, trailing `/`, whitespace, CR, leading `-`), unique across both lists, a production (non-`C1_TEST_INFRA_RE`) path in the approved diff, and changed between AUTH and PW. A git comparison error fails closed: it is no longer read as "differs".
+  - A certified entry is honoured only while `PW:path` is a blob **exactly equal** to the pinned blob. Any later change to the file fails preflight until it is re-certified.
+  - With nothing pending, preflight records `PROD_REVIEW_PENDING=none`, and the unchanged evidence logic reports R13 **PASS**. A pending entry still makes R13 INCOMPLETE.
+  - `frontend/src/App.tsx` is **not** added to `C1_TEST_INFRA_RE`; a Node test asserts that it is not matched.
+- **Tests.**
+  - Node #44 now expects the empty pending list, the exact certified constant, and the six-argument launcher call.
+  - The pinned-diff shell test now expects App.tsx certified at `a0b753b` with R13 `none`. A pinned negative test covers an altered blob, a missing clearance, and a pending+certified overlap.
+  - Nine fixture cases cover a valid control, mismatched blobs, a file changed after certification, malformed entries, unknown/out-of-diff/test-infra entries, duplicates and overlaps, unchanged entries, uncleared changed or newly added production code, and argument/git errors. Each negative case first proves the valid configuration passes on the same fixture, then requires rc=1, empty stdout and the specific error message.
+  - 12 deliberate-break mutants of the new checks (including the `C1_TEST_INFRA_RE` shortcut) were all detected.
+- **Still open, unchanged:** live C1, the real-Codespace instrument run, and **L-2 WebRTC/STUN egress**, a separate mandatory pre-live blocker.
 
 ## 2026-11-19 final focused remediation on `69a2bdc` (L-A, T-1, R-1, L-D): pending incremental independent review
 
@@ -79,10 +102,11 @@ Production (non-test) code in `81c352b..e187311`: **only `frontend/src/App.tsx`*
 +    } catch { setAuthMessage('Microsoft sign-out failed. Session content cleared.') }
 ```
 
-`frontend/src/c1BuildInfo.ts` is the test build-identity helper; it was among the original six approved files. **App.tsx is NOT treated as independently certified.** This is enforced, not only documented:
-- `C1_PROD_REVIEW_PENDING='frontend/src/App.tsx'`.
-- Preflight (`production_review_status_recorded`, required for R1) aborts if any allowlisted file outside the test/CI-infrastructure pattern is missing from that list. It also aborts if a listed file is outside the diff or unchanged.
-- The evidence records `frontend/src/App.tsx@<blob>`, and the new row **R13** stays **INCOMPLETE** while anything is pending, so the harness can never report READY until a separate security review certifies the change and a reviewed commit empties the list.
+`frontend/src/c1BuildInfo.ts` is the test build-identity helper; it was among the original six approved files.
+
+**Current R13 state (B-1 correction, see above):** the independent PR #60 full-diff PASS at `f4f1066` certified `frontend/src/App.tsx` at blob `a0b753b533165bb12bc516478c8036645f2f292a`. It is recorded in `C1_PROD_CERTIFIED` at that exact blob, `C1_PROD_REVIEW_PENDING` is empty, and R13 reports PASS (`none`). Preflight (`production_review_status_recorded`, required for R1) still aborts on any changed production file that is neither pending nor certified at its exact PW blob.
+
+*Historical (round 2, superseded):* App.tsx was not treated as independently certified. This was enforced: `C1_PROD_REVIEW_PENDING='frontend/src/App.tsx'`; preflight aborted if any allowlisted non-test file was missing from that list, or if a listed file was outside the diff or unchanged; the evidence recorded `frontend/src/App.tsx@<blob>`, and R13 stayed INCOMPLETE while anything was pending.
 
 Context for the reviewer, outside the pinned diff: between certified PR #46 `6b62c05` and the baseline `81c352b`, `main` merged PR #42. That changed `frontend/src/App.tsx` (account-identity tracking, race handling), `SecureStudio.tsx`, `secureJourney.{mjs,d.mts}`, and `vite.config.ts` (a dev proxy `/projects` → `127.0.0.1:8000`). **`entraAuth.ts`, `entraAuthCore.ts` and `package-lock.json` are byte-identical from `6b62c05` through `e187311`** (shell test). Whether that PR #42 production change on protected `main` needs its own C1-scoped review is an owner/reviewer decision. The harness treats `81c352b` as the baseline because the owner's reconciliation chose it.
 
@@ -99,7 +123,7 @@ Reviewer proposals and the `cd33512` implementation were treated as untrusted in
 |---|---|---|
 | **M-2a** | `c1_unauth_denied`: an unauthenticated result is a denial **only** for 401/403, or for a 301/302/303/307/308 whose `Location` is `https://github.com` or a strict `https://*.github.com` host (default port, no userinfo). This replaces `cd33512`'s unvalidated "any 302/303". Every other result → `unverified`: reset/000, timeout, DNS/TLS/refused, 5xx, other 4xx, a redirect elsewhere, http, or a missing Location. It is shared by the decoy check, the noVNC re-check, the gate and the monitor. | Mock modes `flaky`, `ambiguous`, `unauth5xx`, `unauth404`, `hang`, `badredirect`, `lookalike`, `userinfo`, `httpredirect`, `noloc` → unverified; `unauth401`/`unauth403`/`subdomain` → verified; a 30-case classifier table; DNS/refused/TLS probes; monitor teardown on `flaky`; no listener or noVNC after a failed verification; the password is printed only on the verified branch (static) |
 | **N-2** | R3: absent, SKIPPED, FAIL **or unknown** verdict → FAIL (`cd33512` counted unknown verdicts as PASS). INCOMPLETE → R3 INCOMPLETE (kept from `cd33512`; never PASS, never READY). PASS only when every expected test is PASS. **Inventory updated to the 14 offline tests of the pinned `e187311` suite** (8 C1 + 6 Tier1); a test checks it against the pinned spec files. | Node: INCOMPLETE → R3 INCOMPLETE, overall INCOMPLETE; FAIL/SKIPPED/absent/no-result/unknown → FAIL; all PASS → READY; inventory ↔ pinned specs |
-| **R13** (new) | Owner condition 4; see above | Node and shell: pending → INCOMPLETE; unrecorded → FAIL; malformed meta rejected; an unlisted production file, a pending file outside the diff, or an unchanged pending file → preflight abort |
+| **R13** (new; round-2 behaviour, extended by the B-1 correction) | Owner condition 4; see above | Node and shell: pending → INCOMPLETE; unrecorded → FAIL; malformed meta rejected; an unlisted production file, a pending file outside the diff, or an unchanged pending file → preflight abort |
 | L-6 | 1 s monitor interval; 6080 must close ≤ 2.5 s after a public flip | Measured ~0.7 s |
 | L-7 | Phases that produced a report show only the summary, pass or fail. Terminal identity rules withhold `Signed in:`, display/user-name fields, and `name: "…"`. | Node |
 | L-8 | GitHub token rule (`gh[opsur]_…`, `github_pat_…`) in the evidence sanitizer and the terminal | Node, plus the `--filter` CLI end to end |
@@ -160,7 +184,7 @@ Before independent approval: execute `bash tools/c1-harness/tests/test_c1_lib.sh
 and applicable security-invariant tests on this exact head. Measure monitor
 shutdown with slow/reset/private-to-public flips in a real **private**
 Codespace, including both 6080 and 5173, with no Entra authentication.
-Keep the `frontend/src/App.tsx` R13 pending-review entry intact. PR #60 at
+Keep the `frontend/src/App.tsx` R13 pending-review entry intact (superseded on 2026-11-19: certified, see the B-1 correction). PR #60 at
 `b1e30d3` changes workflow files only; its environment isolation remains
 UNVERIFIED until the owner checks GitHub's `design-management-control`
 environment settings. Preserve manual workflow approvals and do not merge or
@@ -179,7 +203,9 @@ deploy from this evidence.
 
 ## Requested verdict
 
-APPROVE / REQUEST CHANGES for the consolidated round-2 remediation at this head, with findings. Separately, decide on the **App.tsx** change (R13). Keep PR #74 and PR #60 **draft**. Harness evidence cannot certify C1 until R13 is cleared by a separate review, the real-Codespace run and Chromium 159 are done, and a supervised session's review package is independently reviewed.
+PASS / FAIL for the **R13 B-1 corrective remediation**, as an incremental review of `695d8e8..` this head, with findings. Keep PR #74 and PR #60 **draft**. Harness evidence cannot certify C1 until that correction is independently certified, the real-Codespace run and Chromium 159 are done, L-2 (WebRTC/STUN egress) is closed, and a supervised session's review package is independently reviewed.
+
+*Historical (superseded):* the round-2 request was APPROVE / REQUEST CHANGES for the consolidated round-2 remediation, plus a separate decision on the App.tsx change (R13). That decision was the PR #60 PASS at `f4f1066`.
 
 ---
 

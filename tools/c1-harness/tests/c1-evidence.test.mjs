@@ -511,11 +511,21 @@ test('R13: uncertified production files keep the session INCOMPLETE (separate re
   assert.match(ev, /Production files pending separate review \| frontend\/src\/App\.tsx@a0b753b/)
 })
 
-test('R13: the launcher records the pending-review list from the pinned library constant', () => {
+test('R13: the launcher records the pending-review list from the pinned library constants (pending empty; App.tsx certified at its exact PR #60 blob)', () => {
   const sess = readFileSync(join(here, '../c1-session.sh'), 'utf8')
-  assert.match(sess, /PROD_PENDING=\$\(c1_verify_prod_pending "\$REPO" "\$AUTH" "\$PW" "\$C1_AUTH_TO_PW_FILES" "\$C1_PROD_REVIEW_PENDING"\) \|\| return 1/)
+  assert.match(sess, /PROD_PENDING=\$\(c1_verify_prod_pending "\$REPO" "\$AUTH" "\$PW" "\$C1_AUTH_TO_PW_FILES" "\$C1_PROD_REVIEW_PENDING" "\$C1_PROD_CERTIFIED"\) \|\| return 1/)
   assert.match(sess, /printf 'PROD_REVIEW_PENDING=%s\\n' "\$PROD_PENDING"/)
-  assert.match(libText, /^C1_PROD_REVIEW_PENDING='frontend\/src\/App\.tsx'$/m)
+  assert.match(libText, /^C1_PROD_REVIEW_PENDING=''$/m)
+  assert.match(libText, /^C1_PROD_CERTIFIED='frontend\/src\/App\.tsx@a0b753b533165bb12bc516478c8036645f2f292a'$/m)
+  assert.equal(libText.match(/^C1_PROD_CERTIFIED=/gm).length, 1)
+  assert.equal(libText.match(/^C1_PROD_REVIEW_PENDING=/gm).length, 1)
+  // The rejected shortcut: production App.tsx must never be relabelled as test infrastructure.
+  const infra = new RegExp(libText.match(/^C1_TEST_INFRA_RE='([^']+)'$/m)[1])
+  assert.equal(infra.test('frontend/src/App.tsx'), false)
+  assert.equal(infra.test('frontend/e2e/entra-c1.spec.mjs'), true)
+  // With nothing pending, the launcher records "none" and R13 is PASS.
+  assert.equal(parseMeta('PROD_REVIEW_PENDING=none').PROD_REVIEW_PENDING, 'none')
+  assert.equal(row(ready({ meta: { ...meta, PROD_REVIEW_PENDING: 'none' } }), 'R13').verdict, 'PASS')
 })
 
 test('egress markers recognise the pinned guards\' exact-origin diagnostics', () => {

@@ -104,25 +104,128 @@ f 'rejects a harness file flagged skip-worktree (L-1)' c1_verify_harness_clean "
 git -C "$R" update-index --no-skip-worktree tools/c1-harness/x.sh
 t 'harness clean check passes again after flags are cleared' c1_verify_harness_clean "$R" tools/c1-harness
 
-prod_pending_fixture() {   # App.tsx (production) is allowlisted between AUTH and PROD; App.tsx must then be pending review
+prod_pending_fixture() {   # App.tsx (production) is allowlisted between AUTH and PROD; App.tsx must then be pending review or certified
   local exp2=$'frontend/e2e/entra-c1.spec.mjs\nfrontend/playwright.config.mjs\nfrontend/src/App.tsx' out
   "${G[@]}" -C "$R" checkout -q -b prodfix "$PW"
   echo 'app v2' >"$R/frontend/src/App.tsx"; "${G[@]}" -C "$R" commit -qam prod
   local prod; prod=$(git -C "$R" rev-parse HEAD)
   c1_verify_commits "$R" "$AUTH" "$prod" "$exp2"
-  out=$(c1_verify_prod_pending "$R" "$AUTH" "$prod" "$exp2" 'frontend/src/App.tsx')
+  out=$(c1_verify_prod_pending "$R" "$AUTH" "$prod" "$exp2" 'frontend/src/App.tsx' '')
   [[ "$out" == "frontend/src/App.tsx@$(git -C "$R" rev-parse "$prod:frontend/src/App.tsx")" ]]
-  if c1_verify_prod_pending "$R" "$AUTH" "$prod" "$exp2" ''; then echo 'unlisted production file accepted'; return 1; fi
-  if c1_verify_prod_pending "$R" "$AUTH" "$prod" "$exp2" $'frontend/src/App.tsx\nfrontend/src/entraAuth.ts'; then echo 'pending file outside allowlist accepted'; return 1; fi
-  [[ "$(c1_verify_prod_pending "$R" "$AUTH" "$PW" "$EXP" '')" == none ]]
+  if c1_verify_prod_pending "$R" "$AUTH" "$prod" "$exp2" '' ''; then echo 'unlisted production file accepted'; return 1; fi
+  if c1_verify_prod_pending "$R" "$AUTH" "$prod" "$exp2" $'frontend/src/App.tsx\nfrontend/src/entraAuth.ts' ''; then echo 'pending file outside allowlist accepted'; return 1; fi
+  [[ "$(c1_verify_prod_pending "$R" "$AUTH" "$PW" "$EXP" '' '')" == none ]]
   "${G[@]}" -C "$R" checkout -q other
 }
 t 'uncertified production files in the approved diff must be recorded as pending review, with exact blob SHA' prod_pending_fixture
 prod_pending_unchanged() {  # a pending path that does not differ AUTH->PW is rejected (keeps the list honest)
   local exp2=$'frontend/e2e/entra-c1.spec.mjs\nfrontend/playwright.config.mjs\nfrontend/src/App.tsx'
-  ! c1_verify_prod_pending "$R" "$AUTH" "$PW" "$exp2" 'frontend/src/App.tsx'
+  ! c1_verify_prod_pending "$R" "$AUTH" "$PW" "$exp2" 'frontend/src/App.tsx' ''
 }
 t 'a pending-review path that is unchanged between AUTH and PW is rejected' prod_pending_unchanged
+
+# ---- R13 certified-production register (B-1 correction) ----
+# Fixture: CERT changes production App.tsx (v2) and adds production newProd.ts;
+# CERT3 changes App.tsx again (v3) after "certification". Every negative case
+# below first proves the matching VALID configuration passes on the same
+# fixture, then requires rc=1 AND the specific rejection message, so a case can
+# never pass because of an unrelated environment or git failure.
+"${G[@]}" -C "$R" checkout -q -b certfix "$PW"
+echo 'app v2' >"$R/frontend/src/App.tsx"; echo 'export const p = 1' >"$R/frontend/src/newProd.ts"
+"${G[@]}" -C "$R" add -A && "${G[@]}" -C "$R" commit -qm cert
+CERT=$(git -C "$R" rev-parse HEAD)
+echo 'app v3' >"$R/frontend/src/App.tsx"; "${G[@]}" -C "$R" commit -qam cert3
+CERT3=$(git -C "$R" rev-parse HEAD)
+"${G[@]}" -C "$R" checkout -q other
+CEXP=$'frontend/e2e/entra-c1.spec.mjs\nfrontend/playwright.config.mjs\nfrontend/src/App.tsx\nfrontend/src/newProd.ts'
+APPB=$(git -C "$R" rev-parse "$CERT:frontend/src/App.tsx")
+NEWB=$(git -C "$R" rev-parse "$CERT:frontend/src/newProd.ts")
+AUTHAPPB=$(git -C "$R" rev-parse "$AUTH:frontend/src/App.tsx")
+CERTOK="frontend/src/App.tsx@$APPB"$'\n'"frontend/src/newProd.ts@$NEWB"
+# r13_rejects REGEX ARGS... -> 0 only if c1_verify_prod_pending ARGS returns 1,
+# prints nothing on stdout, and its stderr matches REGEX.
+r13_rejects() {
+  local re=$1 rc=0 out; shift
+  out=$(c1_verify_prod_pending "$@" 2>"$TMP/r13err") || rc=$?
+  (( rc == 1 )) || { echo "expected rc=1, got rc=$rc"; return 1; }
+  [[ -z "$out" ]] || { echo "unexpected stdout: $out"; return 1; }
+  grep -qE -- "$re" "$TMP/r13err" || { echo "stderr did not match /$re/:"; cat "$TMP/r13err"; return 1; }
+}
+r13_cert_valid() {
+  c1_verify_commits "$R" "$AUTH" "$CERT" "$CEXP"
+  [[ "$(c1_verify_prod_pending "$R" "$AUTH" "$CERT" "$CEXP" '' "$CERTOK" 2>"$TMP/r13log")" == none ]]
+  grep -qF "production file frontend/src/App.tsx certified at exact blob $APPB" "$TMP/r13log"
+  [[ "$(c1_verify_prod_pending "$R" "$AUTH" "$CERT" "$CEXP" 'frontend/src/newProd.ts' "frontend/src/App.tsx@$APPB")" == "frontend/src/newProd.ts@$NEWB" ]]
+  [[ "$(c1_verify_prod_pending "$R" "$AUTH" "$CERT" "$CEXP" $'\nfrontend/src/newProd.ts\n' $'\n'"frontend/src/App.tsx@$APPB"$'\n')" == "frontend/src/newProd.ts@$NEWB" ]]
+}
+t 'R13 certified: exact-blob certified production files PASS (none pending); pending + certified mix records only the pending blob' r13_cert_valid
+r13_mismatch() {
+  r13_cert_valid
+  r13_rejects 'certified file frontend/src/App\.tsx blob .* does not match PW blob' "$R" "$AUTH" "$CERT" "$CEXP" '' "frontend/src/App.tsx@$AUTHAPPB"$'\n'"frontend/src/newProd.ts@$NEWB"
+  r13_rejects 'certified file frontend/src/App\.tsx blob 000000000000 does not match' "$R" "$AUTH" "$CERT" "$CEXP" '' "frontend/src/App.tsx@$(printf '0%.0s' {1..40})"$'\n'"frontend/src/newProd.ts@$NEWB"
+  r13_rejects 'certified file frontend/src/newProd\.ts blob .* does not match' "$R" "$AUTH" "$CERT" "$CEXP" '' "frontend/src/App.tsx@$APPB"$'\n'"frontend/src/newProd.ts@$APPB"
+}
+t 'R13 certified: a certified blob that does not match the blob at PW is rejected' r13_mismatch
+r13_changed_after_cert() {  # App.tsx changed again after certification -> the old certification no longer clears it
+  [[ "$(c1_verify_prod_pending "$R" "$AUTH" "$CERT3" "$CEXP" 'frontend/src/App.tsx' "frontend/src/newProd.ts@$NEWB")" == "frontend/src/App.tsx@$(git -C "$R" rev-parse "$CERT3:frontend/src/App.tsx")" ]]
+  r13_rejects 'certified file frontend/src/App\.tsx blob .* re-certification required' "$R" "$AUTH" "$CERT3" "$CEXP" '' "$CERTOK"
+}
+t 'R13 certified: a production file modified after certification fails closed until re-certified' r13_changed_after_cert
+r13_malformed() {
+  r13_cert_valid
+  local bad
+  for bad in 'frontend/src/App.tsx' "frontend/src/App.tsx@${APPB:0:12}" "frontend/src/App.tsx@${APPB^^}" "frontend/src/App.tsx@${APPB}0" \
+             "frontend/src/App.tsx@$APPB " " frontend/src/App.tsx@$APPB" "frontend/src/App.tsx @$APPB" "frontend/src/App.tsx@$APPB@$APPB" \
+             "frontend/src/App.tsx,frontend/src/newProd.ts@$NEWB" "-frontend/src/App.tsx@$APPB" "frontend/src/App.tsx"$'\r'"@$APPB" \
+             "frontend/src/App.tsx@$APPB"$'\r' "@$APPB"; do
+    r13_rejects 'malformed certified entry' "$R" "$AUTH" "$CERT" "$CEXP" '' "$bad"$'\n'"frontend/src/newProd.ts@$NEWB" || { echo "case: $(printf %q "$bad")"; return 1; }
+  done
+  for bad in "frontend/src/../src/App.tsx@$APPB" "frontend//src/App.tsx@$APPB" "frontend/src/@$APPB"; do
+    r13_rejects 'malformed certified entry' "$R" "$AUTH" "$CERT" "$CEXP" '' "$bad"$'\n'"frontend/src/newProd.ts@$NEWB" || { echo "case: $(printf %q "$bad")"; return 1; }
+  done
+  for bad in "frontend/src/App.tsx@$APPB" 'frontend/src/App.tsx ' '-frontend/src/App.tsx' 'frontend/src/../src/App.tsx'; do
+    r13_rejects 'malformed pending-review entry' "$R" "$AUTH" "$CERT" "$CEXP" "$bad" "frontend/src/newProd.ts@$NEWB" || { echo "case: $(printf %q "$bad")"; return 1; }
+  done
+}
+t 'R13 certified: malformed certified and pending entries are rejected' r13_malformed
+r13_unknown() {
+  r13_cert_valid
+  local eb; eb=$(git -C "$R" rev-parse "$CERT:frontend/src/entraAuth.ts")
+  r13_rejects 'certified file frontend/src/entraAuth\.ts is not in the approved diff' "$R" "$AUTH" "$CERT" "$CEXP" '' "$CERTOK"$'\n'"frontend/src/entraAuth.ts@$eb"
+  r13_rejects 'certified file frontend/src/ghost\.ts is not in the approved diff' "$R" "$AUTH" "$CERT" "$CEXP" '' "$CERTOK"$'\n'"frontend/src/ghost.ts@$APPB"
+  r13_rejects 'pending-review file frontend/src/entraAuth\.ts is not in the approved diff' "$R" "$AUTH" "$CERT" "$CEXP" 'frontend/src/entraAuth.ts' "$CERTOK"
+  r13_rejects 'certified file frontend/playwright\.config\.mjs is test infrastructure' "$R" "$AUTH" "$CERT" "$CEXP" '' "$CERTOK"$'\n'"frontend/playwright.config.mjs@$(git -C "$R" rev-parse "$CERT:frontend/playwright.config.mjs")"
+  r13_rejects 'pending-review file frontend/e2e/entra-c1\.spec\.mjs is test infrastructure' "$R" "$AUTH" "$CERT" "$CEXP" 'frontend/e2e/entra-c1.spec.mjs' "$CERTOK"
+}
+t 'R13 certified: unknown, out-of-diff and test-infrastructure entries are rejected' r13_unknown
+r13_duplicate() {
+  r13_cert_valid
+  r13_rejects 'frontend/src/App\.tsx is listed more than once \(certified and certified\)' "$R" "$AUTH" "$CERT" "$CEXP" '' "$CERTOK"$'\n'"frontend/src/App.tsx@$APPB"
+  r13_rejects 'frontend/src/App\.tsx is listed more than once \(certified and certified\)' "$R" "$AUTH" "$CERT" "$CEXP" '' "$CERTOK"$'\n'"frontend/src/App.tsx@$AUTHAPPB"
+  r13_rejects 'frontend/src/newProd\.ts is listed more than once \(pending-review and pending-review\)' "$R" "$AUTH" "$CERT" "$CEXP" $'frontend/src/newProd.ts\nfrontend/src/newProd.ts' "frontend/src/App.tsx@$APPB"
+  r13_rejects 'frontend/src/App\.tsx is listed more than once \(pending-review and certified\)' "$R" "$AUTH" "$CERT" "$CEXP" 'frontend/src/App.tsx' "$CERTOK"
+}
+t 'R13 certified: duplicate and overlapping pending/certified entries are rejected' r13_duplicate
+r13_unchanged() {   # PW where App.tsx is unchanged vs AUTH; allowlist widened only for this negative case
+  local exp2=$'frontend/e2e/entra-c1.spec.mjs\nfrontend/playwright.config.mjs\nfrontend/src/App.tsx'
+  r13_rejects 'certified file frontend/src/App\.tsx does not differ between AUTH and PW' "$R" "$AUTH" "$PW" "$exp2" '' "frontend/src/App.tsx@$AUTHAPPB"
+}
+t 'R13 certified: a certified path that is unchanged between AUTH and PW is rejected' r13_unchanged
+r13_uncleared() {
+  r13_cert_valid
+  r13_rejects 'production file frontend/src/App\.tsx is allowlisted but neither pending independent review nor certified' "$R" "$AUTH" "$CERT" "$CEXP" '' "frontend/src/newProd.ts@$NEWB"
+  r13_rejects 'production file frontend/src/newProd\.ts is allowlisted but neither pending' "$R" "$AUTH" "$CERT" "$CEXP" '' "frontend/src/App.tsx@$APPB"
+  r13_rejects 'production file frontend/src/App\.tsx is allowlisted but neither' "$R" "$AUTH" "$CERT" "$CEXP" '' ''
+}
+t 'R13 certified: changed or newly added production code lacking clearance fails closed' r13_uncleared
+r13_args_and_git_errors() {
+  r13_cert_valid
+  r13_rejects 'requires REPO AUTH PW ALLOWED PENDING CERTIFIED' "$R" "$AUTH" "$CERT" "$CEXP" ''
+  r13_rejects 'requires REPO AUTH PW ALLOWED PENDING CERTIFIED' "$R" "$AUTH" "$CERT" "$CEXP" '' "$CERTOK" extra
+  r13_rejects 'PW must be a full 40-hex SHA' "$R" "$AUTH" "${CERT:0:12}" "$CEXP" '' "$CERTOK"
+  r13_rejects 'cannot compare certified file frontend/src/App\.tsx between AUTH and PW \(git rc' "$R" "$(printf 'f%.0s' {1..40})" "$CERT" "$CEXP" '' "$CERTOK"
+}
+t 'R13 certified: missing arguments and git comparison errors fail closed (never read as "differs")' r13_args_and_git_errors
 echo '# preflight checks'
 FILTERABLE=1
 t 'localhost resolving to loopback is accepted' c1_check_localhost $'127.0.0.1\n::1'
@@ -2240,8 +2343,27 @@ if [[ -n "${TOP:=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)
    && git -C "$TOP" cat-file -e "$C1_AUTH_SHA_APPROVED^{commit}" 2>/dev/null; then
   t 'pinned AUTH is an ancestor of PW and the allowlist equals the real diff exactly (never widened)' \
     c1_verify_commits "$TOP" "$C1_AUTH_SHA_APPROVED" "$C1_PW_SHA_APPROVED" "$C1_AUTH_TO_PW_FILES"
-  t 'pinned diff: App.tsx is the only production file and is recorded pending separate review' bash -c \
-    'source "$1"; o=$(c1_verify_prod_pending "$2" "$C1_AUTH_SHA_APPROVED" "$C1_PW_SHA_APPROVED" "$C1_AUTH_TO_PW_FILES" "$C1_PROD_REVIEW_PENDING"); [[ "$o" =~ ^frontend/src/App\.tsx@[0-9a-f]{40}$ ]]' _ "$HERE/../lib/c1-lib.sh" "$TOP"
+  pinned_r13() {   # B-1: the pinned register clears App.tsx only at its PR #60-certified blob; nothing is pending
+    local o
+    [[ "$C1_PROD_REVIEW_PENDING" == '' ]]
+    [[ "$C1_PROD_CERTIFIED" == 'frontend/src/App.tsx@a0b753b533165bb12bc516478c8036645f2f292a' ]]
+    [[ "$(git -C "$TOP" rev-parse "$C1_PW_SHA_APPROVED:frontend/src/App.tsx")" == a0b753b533165bb12bc516478c8036645f2f292a ]]
+    [[ "$(git -C "$TOP" diff --no-renames --name-only "$C1_AUTH_SHA_APPROVED" "$C1_PW_SHA_APPROVED" | grep -vE "$C1_TEST_INFRA_RE")" == frontend/src/App.tsx ]]
+    [[ ! frontend/src/App.tsx =~ $C1_TEST_INFRA_RE ]]
+    o=$(c1_verify_prod_pending "$TOP" "$C1_AUTH_SHA_APPROVED" "$C1_PW_SHA_APPROVED" "$C1_AUTH_TO_PW_FILES" "$C1_PROD_REVIEW_PENDING" "$C1_PROD_CERTIFIED")
+    [[ "$o" == none ]]
+  }
+  t 'pinned diff: App.tsx is the only production file and is certified at exact blob a0b753b; nothing pending (R13 none)' pinned_r13
+  pinned_r13_altered() {   # a deliberately altered certified blob for the real App.tsx fails closed
+    local alt=${C1_PROD_CERTIFIED%?}; [[ "${C1_PROD_CERTIFIED: -1}" == a ]] && alt+=b || alt+=a
+    r13_rejects 'certified file frontend/src/App\.tsx blob a0b753b53316 does not match PW blob a0b753b53316; re-certification required' \
+      "$TOP" "$C1_AUTH_SHA_APPROVED" "$C1_PW_SHA_APPROVED" "$C1_AUTH_TO_PW_FILES" "$C1_PROD_REVIEW_PENDING" "$alt"
+    r13_rejects 'production file frontend/src/App\.tsx is allowlisted but neither' \
+      "$TOP" "$C1_AUTH_SHA_APPROVED" "$C1_PW_SHA_APPROVED" "$C1_AUTH_TO_PW_FILES" '' ''
+    r13_rejects 'frontend/src/App\.tsx is listed more than once \(pending-review and certified\)' \
+      "$TOP" "$C1_AUTH_SHA_APPROVED" "$C1_PW_SHA_APPROVED" "$C1_AUTH_TO_PW_FILES" 'frontend/src/App.tsx' "$C1_PROD_CERTIFIED"
+  }
+  t 'pinned diff: an altered certified App.tsx blob, a missing clearance, or a pending+certified overlap all fail closed' pinned_r13_altered
   t 'Entra auth modules are byte-identical between the auth baseline and the tested head' \
     git -C "$TOP" diff --quiet "$C1_AUTH_SHA_APPROVED" "$C1_PW_SHA_APPROVED" -- frontend/src/entraAuth.ts frontend/src/entraAuthCore.ts frontend/package-lock.json
   pinned_vite_guard() {

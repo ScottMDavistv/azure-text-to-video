@@ -36,14 +36,22 @@ frontend/src/c1BuildInfo.ts'
 # Production (non-test) files inside C1_AUTH_TO_PW_FILES whose AUTH -> PW change
 # has NOT been independently security-certified. Each is recorded in the
 # evidence with its exact blob SHA at PW, and row R13 stays INCOMPLETE (so the
-# session can never be READY) until a separate review certifies it and this
-# list is emptied in a reviewed commit. R13 clearance: independent PR #60
-# full-diff development-only PASS at f4f1066af0a0def2b595a14c211341c27733064c
-# certified frontend/src/App.tsx blob a0b753b533165bb12bc516478c8036645f2f292a.
-# Live C1 and WebRTC/STUN egress L-2 remain separate, unmet acceptance gates.
+# session can never be READY) until a separate review certifies it, it moves
+# from this list to C1_PROD_CERTIFIED below, and both changes land in a
+# reviewed commit.
 C1_PROD_REVIEW_PENDING=''
+# Production files inside C1_AUTH_TO_PW_FILES whose AUTH -> PW change WAS
+# independently security-certified, pinned as "path@blob" (exact 40-hex blob at
+# PW). An entry is honoured only while PW:path is still exactly that blob, so
+# any later change to the file fails preflight until it is re-certified.
+# R13 clearance: independent PR #60 full-diff development-only PASS at
+# f4f1066af0a0def2b595a14c211341c27733064c certified frontend/src/App.tsx at
+# blob a0b753b533165bb12bc516478c8036645f2f292a. Live C1 and WebRTC/STUN egress
+# L-2 remain separate, unmet acceptance gates.
+C1_PROD_CERTIFIED='frontend/src/App.tsx@a0b753b533165bb12bc516478c8036645f2f292a'
 # Allowlisted paths that are test/CI infrastructure, not production runtime code.
-# Any other allowlisted path must appear in C1_PROD_REVIEW_PENDING.
+# Any other allowlisted path must appear in exactly one of C1_PROD_REVIEW_PENDING
+# or C1_PROD_CERTIFIED. Production files are never added here to pass R13.
 C1_TEST_INFRA_RE='^(frontend/e2e/|frontend/\.gitignore$|frontend/playwright\.config\.mjs$|frontend/src/c1BuildInfo\.ts$|\.github/workflows/frontend-quality-gates\.yml$)'
 C1_APT_PACKAGES='xvfb x11vnc novnc websockify fluxbox xauth iproute2'
 C1_NOVNC_PORT=6080
@@ -73,24 +81,65 @@ c1_verify_commits() {
   fi
 }
 
-# c1_verify_prod_pending REPO AUTH PW ALLOWED PENDING -> every allowlisted
-# non-test path is listed as pending review, and every pending path really is
-# an allowlisted file that differs between AUTH and PW. Prints one
-# "path@blobsha" per pending file (blob at PW), or "none".
+# _c1_prod_entry_ok KIND PATH -- shared R13 entry rules, called only from
+# c1_verify_prod_pending (reads its locals repo/auth/pw/allowed/seen by bash
+# dynamic scope): well-formed, unique across BOTH lists, a production path in
+# the approved diff, and changed between AUTH and PW. Any git error fails.
+_c1_prod_entry_ok() {
+  local kind=$1 p=$2 rc=0
+  [[ "$p" =~ ^[A-Za-z0-9_][A-Za-z0-9_./-]{0,199}$ && "$p" != *..* && "$p" != */ && "$p" != *//* ]] || { c1_err "malformed $kind entry: $p"; return 1; }
+  [[ -z "${seen[$p]+x}" ]] || { c1_err "production file $p is listed more than once (${seen[$p]} and $kind)"; return 1; }
+  seen[$p]=$kind
+  grep -qxF -- "$p" <<<"$allowed" || { c1_err "$kind file $p is not in the approved diff"; return 1; }
+  [[ ! "$p" =~ $C1_TEST_INFRA_RE ]] || { c1_err "$kind file $p is test infrastructure, not production code"; return 1; }
+  git -C "$repo" diff --quiet "$auth" "$pw" -- "$p" || rc=$?
+  (( rc == 1 )) && return 0
+  (( rc == 0 )) && { c1_err "$kind file $p does not differ between AUTH and PW"; return 1; }
+  c1_err "cannot compare $kind file $p between AUTH and PW (git rc $rc)"; return 1
+}
+
+# c1_verify_prod_pending REPO AUTH PW ALLOWED PENDING CERTIFIED -> FAIL-CLOSED
+# R13 production-review check. Every allowlisted non-test path must be listed
+# in exactly one of PENDING (bare paths) or CERTIFIED ("path@40-hex-blob").
+# Every listed entry must be well-formed, unique, a production (non-test) path
+# in the approved diff, and changed between AUTH and PW; a certified entry is
+# honoured only if its blob equals the blob of that path at PW. Prints one
+# "path@blobsha" per pending file (blob at PW), or "none" when nothing is
+# pending. All six arguments are required (an omitted CERTIFIED is an error,
+# never "nothing certified").
 c1_verify_prod_pending() {
-  local repo=$1 auth=$2 pw=$3 allowed=$4 pending=$5 f
-  local -a recs=()
+  (( $# == 6 )) || { c1_err 'c1_verify_prod_pending requires REPO AUTH PW ALLOWED PENDING CERTIFIED'; return 1; }
+  local repo=$1 auth=$2 pw=$3 allowed=$4 pending=$5 certified=$6 f e b actual
+  local -a recs=() pend=() certp=()
+  local -A seen=()
+  local cert_re='^([A-Za-z0-9_][A-Za-z0-9_./-]{0,199})@([0-9a-f]{40})$'
+  c1_is_sha "$pw" || { c1_err 'PW must be a full 40-hex SHA'; return 1; }
+  while IFS= read -r e; do
+    [[ -n "$e" ]] || continue
+    _c1_prod_entry_ok pending-review "$e" || return 1
+    pend+=("$e")
+  done <<<"$pending"
+  while IFS= read -r e; do
+    [[ -n "$e" ]] || continue
+    [[ "$e" =~ $cert_re ]] || { c1_err "malformed certified entry (need path@40-hex-blob): $e"; return 1; }
+    f=${BASH_REMATCH[1]} b=${BASH_REMATCH[2]}
+    _c1_prod_entry_ok certified "$f" || return 1
+    [[ "$(git -C "$repo" cat-file -t "$pw:$f" 2>/dev/null)" == blob ]] || { c1_err "certified file $f is not a blob at PW"; return 1; }
+    actual=$(git -C "$repo" rev-parse --verify -q "$pw:$f") || { c1_err "certified file $f is missing at PW"; return 1; }
+    [[ "$actual" == "$b" ]] || { c1_err "certified file $f blob ${b:0:12} does not match PW blob ${actual:0:12}; re-certification required"; return 1; }
+    certp+=("$f")
+  done <<<"$certified"
+  # Coverage: no production change may be unclassified.
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     [[ "$f" =~ $C1_TEST_INFRA_RE ]] && continue
-    grep -qxF -- "$f" <<<"$pending" || { c1_err "production file $f is allowlisted but not marked pending independent review"; return 1; }
+    [[ -n "${seen[$f]+x}" ]] || { c1_err "production file $f is allowlisted but neither pending independent review nor certified"; return 1; }
   done <<<"$allowed"
-  while IFS= read -r f; do
-    [[ -n "$f" ]] || continue
-    grep -qxF -- "$f" <<<"$allowed" || { c1_err "pending-review file $f is not in the approved diff"; return 1; }
-    git -C "$repo" diff --quiet "$auth" "$pw" -- "$f" && { c1_err "pending-review file $f does not differ between AUTH and PW"; return 1; }
-    recs+=("$f@$(git -C "$repo" rev-parse "$pw:$f")") || return 1
-  done <<<"$pending"
+  for f in "${pend[@]}"; do
+    actual=$(git -C "$repo" rev-parse --verify -q "$pw:$f") || { c1_err "pending-review file $f is missing at PW"; return 1; }
+    recs+=("$f@$actual")
+  done
+  for f in "${certp[@]}"; do c1_log "production file $f certified at exact blob $(git -C "$repo" rev-parse "$pw:$f")"; done
   if (( ${#recs[@]} )); then (IFS=,; printf '%s\n' "${recs[*]}"); else echo none; fi
 }
 
