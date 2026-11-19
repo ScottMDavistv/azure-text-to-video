@@ -34,6 +34,8 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function checkLaunchArguments(browser, expected) {
   const cdp = await browser.newBrowserCDPSession()
   try {
+    // CDP exposes effective switches only with --enable-automation; both
+    // positive and guarded browsers use it to keep the control comparable.
     const commandLine = await cdp.send('Browser.getBrowserCommandLine')
     const flags = commandLine.arguments.filter(a => a.startsWith('--force-webrtc-ip-handling-policy='))
     assert.deepEqual(flags, expected ? [WEBRTC_UDP_POLICY_ARG] : [], 'actual Chromium command line does not have the expected WebRTC policy')
@@ -60,7 +62,7 @@ async function gather(page, stunPort) {
 }
 
 async function exerciseBrowser(guarded, stunPort, webPort) {
-  const browser = await chromium.launch({ args: guarded ? [WEBRTC_UDP_POLICY_ARG] : [] })
+  const browser = await chromium.launch({ args: guarded ? ['--enable-automation', WEBRTC_UDP_POLICY_ARG] : ['--enable-automation'] })
   try {
     await checkLaunchArguments(browser, guarded)
     // Browser policy must apply to newly created, independent contexts as well.
