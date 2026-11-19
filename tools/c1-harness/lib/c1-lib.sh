@@ -37,9 +37,11 @@ frontend/src/c1BuildInfo.ts'
 # has NOT been independently security-certified. Each is recorded in the
 # evidence with its exact blob SHA at PW, and row R13 stays INCOMPLETE (so the
 # session can never be READY) until a separate review certifies it and this
-# list is emptied in a reviewed commit. frontend/src/App.tsx: e187311 adds the
-# "Signed out locally. Microsoft SSO session may remain active." status.
-C1_PROD_REVIEW_PENDING='frontend/src/App.tsx'
+# list is emptied in a reviewed commit. R13 clearance: independent PR #60
+# full-diff development-only PASS at f4f1066af0a0def2b595a14c211341c27733064c
+# certified frontend/src/App.tsx blob a0b753b533165bb12bc516478c8036645f2f292a.
+# Live C1 and WebRTC/STUN egress L-2 remain separate, unmet acceptance gates.
+C1_PROD_REVIEW_PENDING=''
 # Allowlisted paths that are test/CI infrastructure, not production runtime code.
 # Any other allowlisted path must appear in C1_PROD_REVIEW_PENDING.
 C1_TEST_INFRA_RE='^(frontend/e2e/|frontend/\.gitignore$|frontend/playwright\.config\.mjs$|frontend/src/c1BuildInfo\.ts$|\.github/workflows/frontend-quality-gates\.yml$)'
