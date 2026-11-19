@@ -55,7 +55,7 @@ export const ROWS = [
   { id: 'R3', label: 'Offline synthetic suite (all ' + OFFLINE_EXPECTED.length + ' expected tests, C1 + Tier1)', kind: 'all', phase: 'offline', expect: OFFLINE_EXPECTED },
   { id: 'R4', label: 'Unconfigured SPA is fail-closed', kind: 'test', phase: 'unconfigured', title: 'M-1: missing SPA configuration is fail-closed' },
   { id: 'R5', label: 'Localhost routing and canonical localhost redirect', kind: 'redirect', phase: 'offline', title: 'M2 browser: loopback-origin redirect' },
-  { id: 'R6', label: 'Live sign-in, initial consent, claims, silent token, verified logout', kind: 'test', phase: 'live', title: 'LIVE: popup login, validated claims' },
+  { id: 'R6', label: 'Live sign-in, initial consent, claims, silent token, local MSAL cache clearing', kind: 'test', phase: 'live', title: 'LIVE: popup login, validated claims' },
   { id: 'R7', label: 'Cancelled login returns user_cancelled', kind: 'test', phase: 'live', title: 'LIVE: deliberately cancelled popup', passCode: 'user_cancelled' },
   { id: 'R8', label: 'Consent denial fails closed (access_denied + AADSTS65004 + operator attestations)', kind: 'consent', phase: 'consent-denial', title: 'SUPERVISED consent denial' },
   { id: 'R9', label: 'Cancelled logout leaves a consistent, fail-closed local state', kind: 'test', phase: 'cancelled-logout', title: 'SUPERVISED cancelled logout' },
@@ -339,6 +339,7 @@ export function renderEvidence({ meta, phases, result, generated }) {
   }
   L.push('', '## C1 matrix', '', '| Row | Requirement | Result | Sanitized MSAL code | Detail |', '|---|---|---|---|---|')
   for (const r of result.rows) L.push('| ' + r.id + ' | ' + r.label + ' | **' + r.verdict + '** | ' + (r.code ?? '-') + ' | ' + (r.detail || '-') + ' |')
+  L.push('', 'Microsoft provider sign-out: **INCOMPLETE**. Separate evidence is required to establish that the Microsoft session ended.')
   L.push('', '## Test-by-test', '', '| Phase | Test | Result | Code |', '|---|---|---|---|')
   for (const t of result.allTests.filter(t => t.verdict !== 'SKIPPED')) {
     L.push('| ' + t.phase + ' | ' + t.title + ' | ' + t.verdict + ' | ' + (t.code ? t.code + (t.aadsts ? ' / ' + t.aadsts : '') : '-') + ' |')

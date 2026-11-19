@@ -134,6 +134,8 @@ test('complete supervised session with all rows passing is READY FOR INDEPENDENT
   assert.equal(r.allTests.find(t => t.observation).observation.serverSignoutConfirmed, 'false')
   const ev = assertSanitized(renderEvidence({ meta, phases: allPhases(), result: r, generated: '2026-11-17T00:00:00Z' }))
   assert.match(ev, /never issues C1 certification/)
+  assert.match(ev, /\| R6 \| .*local MSAL cache clearing \| \*\*PASS\*\*/)
+  assert.match(ev, /Microsoft provider sign-out: \*\*INCOMPLETE\*\*/)
   assertSanitized(renderReviewPackage({ evidence: ev, meta }))
 })
 

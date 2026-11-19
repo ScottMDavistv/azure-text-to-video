@@ -25,6 +25,7 @@ STATE_DIR/mode (re-read on every request) selects the behaviour:
   unauth401    unauthenticated -> 401
   unauth403    unauthenticated -> 403
   subdomain    unauthenticated -> 307 to https://auth.github.com/login
+  pf-signin    unauthenticated -> 302 to the exact observed github.dev sign-in path
 GET /repos/OWNER/REPO with "Authorization: token <token>" returns
 {"owner": {"type": <STATE_DIR/owner>}} (GitHub API stand-in).
 """
@@ -69,6 +70,9 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self.reply(200, json.dumps({'owner': {'type': state('owner', 'User')}}).encode())
             return self.reply(401, b'{}')
         authed = bool(token) and self.headers.get('X-Github-Token') == token
+        if authed and mode.startswith('pf-'):
+            with open(os.path.join(STATE, 'authenticated-probes'), 'a') as log:
+                log.write('authenticated\n')
         if mode == 'down':
             return self.reply(502, b'not forwarded')
         if mode == 'public':
@@ -95,6 +99,13 @@ class H(http.server.BaseHTTPRequestHandler):
             'userinfo': (302, 'https://github.com@evil.example/login'),
             'httpredirect': (302, 'http://github.com/login'),
             'subdomain': (307, 'https://auth.github.com/login?return_to=x'),
+            'pf-signin': (302, 'https://github.dev/pf-signin?return_to=fixture'),
+            'pf-wrong-scheme': (302, 'http://github.dev/pf-signin'),
+            'pf-wrong-host': (302, 'https://github.dev.example.invalid/pf-signin'),
+            'pf-wrong-path': (302, 'https://github.dev/pf-signin/extra'),
+            'pf-wrong-status': (307, 'https://github.dev/pf-signin'),
+            'pf-userinfo': (302, 'https://github.dev@example.invalid/pf-signin'),
+            'pf-fragment': (302, 'https://github.dev/pf-signin#fragment'),
         }
         if mode in redirects:
             code, loc = redirects[mode]

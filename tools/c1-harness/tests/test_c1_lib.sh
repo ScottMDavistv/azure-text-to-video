@@ -154,7 +154,7 @@ markerbig() {   # large environment must not hide the marker (pipe/SIGPIPE regre
   c1_pid_has_marker "$p" "$s"; local r=$?; kill "$p"; return $r
 }
 t 'session marker found in a process with a very large environment' markerbig
-t 'approved SHAs are pinned constants with no environment override' bash -c 'C1_PW_SHA_APPROVED=bad C1_AUTH_SHA_APPROVED=bad; source "$1"; [[ $C1_PW_SHA_APPROVED == e1873111e2304a7a739e0f35e2ecdca1d43de44d && $C1_AUTH_SHA_APPROVED == 81c352b2c6f7fdae4e94f2ff4e98a7e1c2bdf6c5 ]]' _ "$HERE/../lib/c1-lib.sh"
+t 'approved SHAs are pinned constants with no environment override' bash -c 'C1_PW_SHA_APPROVED=bad C1_AUTH_SHA_APPROVED=bad; source "$1"; [[ $C1_PW_SHA_APPROVED == f4f1066af0a0def2b595a14c211341c27733064c && $C1_AUTH_SHA_APPROVED == c46e2e8c67ee5a2668d113ceef15c5a4774cde69 ]]' _ "$HERE/../lib/c1-lib.sh"
 t 'toolchain pins: Playwright 1.65.1 and Chromium 159.0.8154.6, no environment override (I-5)' bash -c 'C1_PLAYWRIGHT_VERSION=9 C1_CHROMIUM_VERSION=9; source "$1"; [[ $C1_PLAYWRIGHT_VERSION == 1.65.1 && $C1_CHROMIUM_VERSION == 159.0.8154.6 ]]' _ "$HERE/../lib/c1-lib.sh"
 t 'launcher scrubs mode/secret-adjacent variables before running tests' bash -c 'grep -q "unset C1_LIVE C1_UNCONFIGURED C1_MUTATION_MODE C1_EXPECTED_SHA" "$1" && grep -q "PWDEBUG DEBUG" "$1"' _ "$HERE/../c1-session.sh"
 t 'launcher never passes trace/video/screenshot or mutation mode to Playwright' bash -c '! grep -Eq -- "--trace|--video|--screenshot|C1_MUTATION_MODE=1|--update-snapshots" "$1"' _ "$HERE/../c1-session.sh"
@@ -348,6 +348,52 @@ c1_cleanup_all "$2"'
 t 'N-8 negative control: -e-only scan misses dangling .pids evidence' n8_scan_negative_control pids
 t 'N-8 negative control: -e-only scan misses dangling .inodes evidence' n8_scan_negative_control inodes
 
+n10_pid_archive() (
+  local mode=$1 root="$TMP/n10-$1" s reg target
+  mkdir -p "$root"
+  s="$root/session.n10"
+  reg="$root/.session.n10.pids"
+  target="$root/pid-target"
+  if [[ $mode == empty ]]; then
+    : >"$reg"
+  else
+    printf '123456789 1\n' >"$target"
+    ln -s "$target" "$reg"
+  fi
+  if c1_verify_cleanup "$s" || c1_recover_before_start "$root"; then return 1; fi
+  if [[ $mode == empty ]]; then
+    [[ -f "$reg" && ! -s "$reg" ]]
+  else
+    [[ -L "$reg" && $(cat "$target") == '123456789 1' ]]
+  fi
+)
+n10_pid_archive_mutation() (
+  local original mutated guard='! -f "$preg" || -L "$preg" || ! -r "$preg" || ! -s "$preg"'
+  original=$(declare -f c1_verify_cleanup)
+  mutated=${original/"$guard"/'! -f "$preg" || ! -r "$preg"'}
+  [[ $mutated != "$original" ]] || return 1
+  eval "$mutated"
+  ! n10_pid_archive empty && ! n10_pid_archive symlink
+)
+t 'N-10: empty PID archive blocks recovery and is retained' n10_pid_archive empty
+t 'N-10: symlinked PID archive blocks recovery even with a valid target' n10_pid_archive symlink
+t 'N-10: archive tests detect removal of the empty-file and symlink guards' n10_pid_archive_mutation
+
+n10_pid_identity() (
+  local root="$TMP/n10-identity" s reg child
+  mkdir -p "$root"; s="$root/session.n10"; reg="$root/.session.n10.pids"
+  sleep 60 & child=$!
+  trap 'kill "$child" 2>/dev/null || true' EXIT
+  printf '%s 1\n' "$child" >"$reg"
+  c1_proc_start() { return 1; }
+  if c1_verify_cleanup "$s"; then return 1; fi
+  [[ -s "$reg" ]]
+  kill "$child"; wait "$child" 2>/dev/null || true
+  trap - EXIT
+  c1_verify_cleanup "$s"
+  [[ ! -e "$reg" ]]
+)
+t 'N-10: unreadable live PID identity is retained and a retired valid record is removed' n10_pid_identity
 
 # N-6: malformed or empty inode archives must block and survive recovery.
 invalid_preserved_inode() {
@@ -418,7 +464,7 @@ if (( EUID != 0 )) || command -v setpriv >/dev/null; then
     unreadable_archive_probe "$HERE/../lib/c1-lib.sh" pids
   unreadable_pid_guard_mutant_caught() {
     local d="$TMP/n7-mutant" source_lib="$HERE/../lib/c1-lib.sh"
-    sed 's/if \[\[ ! -f "\$preg" || ! -r "\$preg" \]\]; then/if false; then/' \
+    sed 's/if \[\[ ! -f "\$preg" || -L "\$preg" || ! -r "\$preg" || ! -s "\$preg" \]\]; then/if false; then/' \
       "$source_lib" >"$d"
     ! cmp -s "$source_lib" "$d" || return 1
     ! unreadable_archive_probe "$d" pids
@@ -441,6 +487,64 @@ group_members() {      # a harness group member that dropped the marker (env -i)
   ! alive "$child" && ! alive "$leader"
 }
 t 'cleanup removes unmarked members of a verified harness process group' group_members
+detached_descendant_cleanup() (
+  local mode=$1 s leader child child_start
+  s=$(c1_session_new "$ROOT")
+  leader=$(c1_spawn "$s" tree-fixture bash -c 'env -i setsid sleep 300 & echo $! >"$1/child"; wait' _ "$s")
+  for _ in $(seq 1 30); do [[ -s "$s/child" ]] && break; sleep 0.05; done
+  child=$(cat "$s/child")
+  child_start=$(c1_proc_start "$child")
+  trap '[[ "$(c1_proc_start "$child")" != "$child_start" ]] || kill -KILL "$child" 2>/dev/null || true' EXIT
+  [[ -n "$child_start" ]]
+  for _ in $(seq 1 30); do [[ $(c1_proc_stat_field "$child" 4) == "$child" ]] && break; sleep 0.05; done
+  [[ $(c1_proc_stat_field "$child" 4) == "$child" && $(c1_proc_stat_field "$child" 2) == "$leader" ]]
+  if c1_pid_has_marker "$child" "$s"; then return 1; fi
+  if [[ $mode == orphan ]]; then
+    c1_harness_listeners "$s" >/dev/null
+    grep -Fxq "$child $child_start" "$s/descendants"
+    kill -KILL "$leader"
+    for _ in $(seq 1 30); do [[ $(c1_proc_stat_field "$child" 2) != "$leader" ]] && break; sleep 0.05; done
+  fi
+  c1_cleanup_session "$ROOT" "$s"
+  if [[ $mode == orphan ]]; then
+    alive "$child"
+    if c1_verify_cleanup "$s"; then return 1; fi
+    grep -Fxq "$child $child_start" "$ROOT/.${s##*/}.pids"
+    kill -KILL "$child"
+  fi
+  for _ in $(seq 1 30); do alive "$child" || break; sleep 0.05; done
+  if alive "$child"; then return 1; fi
+  c1_verify_cleanup "$s"
+)
+t 'L-A: cleanup signals an attributed env-scrubbed detached child' detached_descendant_cleanup attached
+t 'L-A: cleanup retains evidence and refuses success for an already reparented known child' detached_descendant_cleanup orphan
+detached_descendant_mutation() (
+  local ROOT="$TMP/no-descendant-capture"
+  c1_tree_descendant_identities() { :; }
+  ! detached_descendant_cleanup attached
+)
+t 'L-A: detached-child test detects removal of descendant capture' detached_descendant_mutation
+
+desktop_environment() (
+  local s output
+  s=$(c1_session_new "$ROOT")
+  trap 'c1_cleanup_session "$ROOT" "$s"' EXIT
+  export GITHUB_TOKEN=fixture AZURE_CLIENT_ID=fixture FAL_KEY=fixture ARBITRARY_SECRET=fixture
+  export DISPLAY=:123 XAUTHORITY="$s/Xauthority"
+  c1_spawn_desktop "$s" desktop-environment env >/dev/null
+  for _ in $(seq 1 20); do [[ -s "$s/log/desktop-environment.log" ]] && break; sleep 0.05; done
+  output="$s/log/desktop-environment.log"
+  grep -Fxq "C1_HARNESS_SESSION=$s" "$output" && grep -Fxq 'DISPLAY=:123' "$output" &&
+    grep -Fxq "XAUTHORITY=$XAUTHORITY" "$output" &&
+    ! grep -Eq '^(GITHUB_TOKEN|AZURE_CLIENT_ID|FAL_KEY|ARBITRARY_SECRET)=' "$output"
+)
+desktop_environment_mutation() (
+  c1_spawn_desktop() { c1_spawn "$@"; }
+  ! desktop_environment
+)
+t 'L-C: desktop subprocess retains display configuration and drops launcher secrets' desktop_environment
+t 'L-C: desktop environment test detects removal of env isolation' desktop_environment_mutation
+
 nonleader_marked() {   # a marked process inside an UNRELATED group: kill it, never its group
   local s lead; s=$(c1_session_new "$ROOT")
   setsid bash -c 'env C1_HARNESS_SESSION="$0" sleep 300 & exec sleep 300' "$s" </dev/null >/dev/null 2>&1 & lead=$!
@@ -523,18 +627,25 @@ installerenv() {        # I-3: credentials and tool overrides never reach instal
     MY_API_SECRET=x DB_PASSWORD=x NODE_OPTIONS=--require=/evil NODE_PATH=/evil npm_config_registry=http://evil.invalid \
     NPM_CONFIG_USERCONFIG=/evil PLAYWRIGHT_DOWNLOAD_HOST=http://evil.invalid PW_X=1 NODE_TLS_REJECT_UNAUTHORIZED=0 \
     __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=.app.github.dev VITE_X=1 \
+    AZURE_CLIENT_ID=x AWS_ACCESS_KEY_ID=x FAL_KEY=x OPENAI_API_KEY=x CUSTOM_CONFIG=x BASH_ENV=/evil PYTHONPATH=/evil \
     HTTPS_PROXY=http://proxy.invalid:3128 no_proxy=localhost NODE_EXTRA_CA_CERTS=/etc/ssl/proxy.pem SSL_CERT_FILE=/etc/ssl/x.pem
   mapfile -d '' -t e < <(c1_installer_env)
   out=$("${e[@]}" env)
   local v
   for v in GITHUB_TOKEN GH_TOKEN GITHUB_CODESPACE_TOKEN CODESPACE_VSCODE_FOLDER ACTIONS_RUNTIME_TOKEN MY_API_SECRET DB_PASSWORD \
            NODE_OPTIONS NODE_PATH npm_config_registry NPM_CONFIG_USERCONFIG PLAYWRIGHT_DOWNLOAD_HOST PW_X \
-           NODE_TLS_REJECT_UNAUTHORIZED __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS VITE_X; do
+           NODE_TLS_REJECT_UNAUTHORIZED __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS VITE_X AZURE_CLIENT_ID AWS_ACCESS_KEY_ID \
+           FAL_KEY OPENAI_API_KEY CUSTOM_CONFIG BASH_ENV PYTHONPATH; do
     if grep -q "^$v=" <<<"$out"; then echo "leaked $v"; return 1; fi
   done
   for v in PATH HOME HTTPS_PROXY no_proxy NODE_EXTRA_CA_CERTS SSL_CERT_FILE; do grep -q "^$v=" <<<"$out" || { echo "dropped $v"; return 1; }; done
 }
 t 'installer environment drops GitHub tokens, secrets and tool overrides; keeps PATH/HOME/proxy/CA trust (I-3)' installerenv
+installerenv_mutation() (
+  c1_installer_env() { printf '%s\0' env -u GITHUB_TOKEN -u GH_TOKEN; }
+  ! installerenv
+)
+t 'installer environment test detects a denylist regression' installerenv_mutation
 installer_calls() {     # I-3 behavioural: npm ci / npm install / playwright install / install-deps all get the scrubbed env
   local fe="$TMP/ife/frontend" cache="$TMP/icache" bin="$TMP/ibin" f
   mkdir -p "$fe" "$cache" "$bin"
@@ -558,11 +669,11 @@ printf '%s\n' "$@" >"$C1_SUDO_ARGS_LOG"
 exec "$@"
 C1_MOCK_SUDO
   chmod +x "$bin/sudo"
-  export PATH="$bin:$PATH" GITHUB_TOKEN=ghu_fakefakefake GH_TOKEN=x NODE_OPTIONS=--require=/evil MY_SECRET=x
+  export PATH="$bin:$PATH" GITHUB_TOKEN=ghu_fakefakefake GH_TOKEN=x NODE_OPTIONS=--require=/evil MY_SECRET=x FAL_KEY=x
   c1_install_node_deps "$fe" "$cache"
   [[ -s "$TMP/npm.env" && -s "$TMP/npx.env" ]]
   [[ $(grep -c '^PATH=' "$TMP/npm.env") -ge 2 && $(grep -c '^PATH=' "$TMP/npx.env") -ge 2 ]]   # npm ci+install; npx install+install-deps
-  ! grep -Eq '^(GITHUB_TOKEN|GH_TOKEN|NODE_OPTIONS|MY_SECRET)=' "$TMP/npm.env" "$TMP/npx.env"
+  ! grep -Eq '^(GITHUB_TOKEN|GH_TOKEN|NODE_OPTIONS|MY_SECRET|FAL_KEY)=' "$TMP/npm.env" "$TMP/npx.env"
   # Negative paths: the mocked sudo must never forward unsanitized secrets,
   # and must refuse a call without -n or without the expected env boundary.
   if (( EUID != 0 )); then
@@ -753,6 +864,7 @@ if command -v openssl >/dev/null && command -v curl >/dev/null && command -v pyt
 
   pf_signin_with_gh_readback() (
     local vis=$1 marker_mode=$2 origin_mode=${3:-matching} calls="$PV/pf-calls-$1-$2-${3:-matching}" rc=0
+    local mockbin="$TMP/pf-oracle-bin"
     : >"$calls"
     c1_codespace_base() {
       if [[ $origin_mode == matching ]]; then printf '%s' "$BASE"; else printf 'https://other-6080.app.github.dev'; fi
@@ -769,15 +881,25 @@ if command -v openssl >/dev/null && command -v curl >/dev/null && command -v pyt
     }
     local gh_calls="$PV/pf-gh-$1-$2-${3:-matching}"
     : >"$gh_calls"
-    c1_gh_private() { printf 'gh\n' >>"$gh_calls"; [[ $vis == private ]]; }
+    mkdir -p "$mockbin"
+    cat >"$mockbin/gh" <<'MOCK_GH'
+#!/usr/bin/env bash
+[[ "$#" == 6 && "$*" == 'codespace ports -c fixture --json sourcePort,visibility' ]] || exit 3
+printf 'gh\n' >>"$GH_CALLS"
+if [[ "$GH_VIS" == missing ]]; then exit 1; fi
+printf '[{"sourcePort":6080,"visibility":"%s"}]\n' "$GH_VIS"
+MOCK_GH
+    # Verify the invocation at the executable boundary.
+    chmod +x "$mockbin/gh"
+    export PATH="$mockbin:$PATH" CODESPACE_NAME=fixture GH_CALLS=$gh_calls GH_VIS=$vis
     c1_privacy_check "$BASE" '/nonce-marker.txt' nonce-marker "$PV/hdr" "$CA" || rc=$?
     if [[ $origin_mode != matching ]]; then
       (( rc != 0 )) && [[ $C1_PRIVACY_STATE == unverified ]] &&
         [[ ! -s "$calls" && ! -s "$gh_calls" ]]
     elif [[ $vis == private && $marker_mode == valid ]]; then
-      (( rc == 0 )) && [[ $C1_PRIVACY_STATE == private ]] && grep -qx auth "$calls" && grep -qx gh "$gh_calls"
+      (( rc == 0 )) && [[ $C1_PRIVACY_STATE == private ]] && [[ $(cat "$calls") == auth && $(cat "$gh_calls") == gh ]]
     elif [[ $vis != private ]]; then
-      (( rc != 0 )) && [[ $C1_PRIVACY_STATE == unverified ]] && [[ ! -s "$calls" ]]
+      (( rc != 0 )) && [[ $C1_PRIVACY_STATE == unverified ]] && [[ ! -s "$calls" && $(cat "$gh_calls") == gh ]]
     else
       (( rc != 0 )) && [[ $C1_PRIVACY_STATE == unverified ]] && grep -qx auth "$calls"
     fi
@@ -789,7 +911,7 @@ if command -v openssl >/dev/null && command -v curl >/dev/null && command -v pyt
     original=$(declare -f c1_privacy_check)
     [[ $original == *'unexpected forwarding origin'* ]] || return 1
     mutated=$(printf '%s\n' "$original" |
-      awk 'index($0, "if [[ \"$base\" != \"$(c1_codespace_base") { drop=1 }
+      awk 'index($0, "if [[ \"$base\" != \"$(c1_codespace_base") && $0 !~ /&&/ { drop=1 }
            drop && /^[[:space:]]*fi;/ { drop=0; next }
            !drop { print }')
     [[ $mutated != "$original" && $mutated != *'unexpected forwarding origin'* ]] || return 1
@@ -806,6 +928,183 @@ if command -v openssl >/dev/null && command -v curl >/dev/null && command -v pyt
   t 'Codespaces redirect refuses unavailable GH visibility before token probe' pf_signin_with_gh_readback missing valid
   t 'Codespaces redirect refuses mismatched forwarding origin before token probe' pf_signin_with_gh_readback private valid mismatched
   t 'Codespaces redirect refuses wrong authenticated nonce despite GH private' pf_signin_with_gh_readback private invalid
+
+  forwarding_origin_pinned() (
+    export CODESPACE_NAME=fixture
+    unset GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN
+    [[ $(c1_codespace_base 6080) == https://fixture-6080.app.github.dev ]]
+    GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN=app.github.dev c1_codespace_base 6080 >/dev/null
+    local host
+    for host in attacker.example app.github.dev.evil.example app-github.dev app.github.dev:443 App.Github.Dev; do
+      if GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN=$host c1_codespace_base 6080; then return 1; fi
+      if GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN=$host c1_codespace_url 6080; then return 1; fi
+    done
+  )
+  untrusted_origin_never_receives_header() (
+    local trace="$TMP/untrusted-curl-trace"
+    : >"$trace"
+    export CODESPACE_NAME=fixture
+    unset GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN
+    c1_https_probe() {
+      local out=$2 hdr=${3:-}
+      printf 'probe\n' >>"$trace"
+      if [[ -n "$hdr" ]]; then printf 'marker\n' >"$out"; printf '200 \n'; else printf '403 \n'; fi
+    }
+    if c1_privacy_check 'https://fixture-6080.attacker.example' /marker marker "$PV/hdr" "$CA"; then return 1; fi
+    [[ ! -s "$trace" && $C1_PRIVACY_STATE == unverified ]]
+  )
+  forwarding_origin_mutation() (
+    local original mutated
+    original=$(declare -f c1_privacy_check)
+    mutated=$(awk 'index($0, "if [[ \"$base\" != \"$(c1_codespace_base") && !seen { drop=1; seen=1 }
+      drop && /^[[:space:]]*fi;/ { drop=0; next } !drop { print }' <<<"$original")
+    [[ $mutated != "$original" ]] || return 1
+    eval "$mutated"
+    ! untrusted_origin_never_receives_header
+  )
+  t 'L-B: only the exact trusted forwarding domain can construct a Codespaces URL' forwarding_origin_pinned
+  t 'L-B: an untrusted forwarding origin is rejected before any token-bearing probe' untrusted_origin_never_receives_header
+  t 'L-B: token destination test detects removal of the origin guard' forwarding_origin_mutation
+
+  curl_probe_no_user_config() (
+    local bin="$TMP/curl-probe-bin" out="$TMP/curl-probe-body" result
+    mkdir -p "$bin"
+    cat >"$bin/curl" <<'MOCK_CURL'
+#!/usr/bin/env bash
+[[ "$1" == --disable ]] || exit 9
+if [[ "$*" == *partial* ]]; then printf '200 '; exit 18; fi
+printf '403 '
+MOCK_CURL
+    chmod +x "$bin/curl"
+    export PATH="$bin:$PATH"
+    result=$(c1_https_probe "$BASE/marker" "$out") && [[ $result == '403 ' ]] || return 1
+    result=$(c1_https_probe "$BASE/partial" "$out" "$PV/hdr") && [[ $result == '000 ' ]]
+  )
+  curl_probe_config_mutation() (
+    local original mutated
+    original=$(declare -f c1_https_probe)
+    mutated=${original/'curl --disable '/'curl '}
+    [[ $mutated != "$original" ]] || return 1
+    eval "$mutated"
+    ! curl_probe_no_user_config
+  )
+  t 'L-B/R-3: curl disables user config and rejects partial success on a failed transfer' curl_probe_no_user_config
+  t 'L-B: probe test detects removal of curl config isolation' curl_probe_config_mutation
+
+  gh_readback() (
+    local mode=$1 bin="$TMP/gh-readback-$1" start elapsed rc=0
+    # shellcheck disable=SC2034  # dynamically read by the sourced library
+    local C1_GH_READ_TIMEOUT=0.2
+    mkdir -p "$bin"
+    cat >"$bin/gh" <<'MOCK_GH'
+#!/usr/bin/env bash
+case $GH_FIXTURE in
+  private) printf '[{"sourcePort":6080,"visibility":"private"}]\n' ;;
+  duplicate) printf '[{"sourcePort":6080,"visibility":"private"},{"sourcePort":6080,"visibility":"public"}]\n' ;;
+  wrong-port) printf '[{"sourcePort":5173,"visibility":"private"}]\n' ;;
+  malformed) printf '{"sourcePort":6080,"visibility":"private"}\n' ;;
+  invalid-status) printf '[{"sourcePort":6080,"visibility":"private\\ninvalid"}]\n' ;;
+  command-failed) printf '[{"sourcePort":6080,"visibility":"private"}]\n'; exit 1 ;;
+  hang)
+    trap '' TERM
+    printf '[{"sourcePort":6080,"visibility":"private"}]\n'
+    sleep 1.3
+    ;;
+esac
+MOCK_GH
+    chmod +x "$bin/gh"
+    export PATH="$bin:$PATH" CODESPACE_NAME=c1-test GH_FIXTURE=$mode
+    start=${EPOCHREALTIME/./}
+    c1_gh_private 6080 || rc=$?
+    elapsed=$(( ${EPOCHREALTIME/./} - start ))
+    if [[ $mode == private ]]; then
+      (( rc == 0 )) && [[ $C1_GH_VIS == private ]]
+    else
+      (( rc == 2 && elapsed < 1000000 )) && [[ -z $C1_GH_VIS ]]
+    fi
+  )
+  gh_timeout_mutation() (
+    local original mutated remove='timeout --kill-after=0.1s "$C1_GH_READ_TIMEOUT" '
+    original=$(declare -f c1_gh_visibility)
+    mutated=${original/"$remove"/}
+    [[ $mutated != "$original" ]] || return 1
+    eval "$mutated"
+    ! gh_readback hang
+  )
+  t 'gh read-back accepts one exact private port' gh_readback private
+  t 'gh read-back rejects duplicate records for the protected port' gh_readback duplicate
+  t 'gh read-back rejects private visibility for a different port' gh_readback wrong-port
+  t 'gh read-back rejects malformed JSON shape' gh_readback malformed
+  t 'gh read-back rejects malformed visibility text' gh_readback invalid-status
+  t 'gh read-back rejects valid JSON from a failed CLI' gh_readback command-failed
+  t 'gh read-back times out a TERM-ignoring CLI and discards partial private output' gh_readback hang
+  t 'gh read-back test detects removal of the actual timeout' gh_timeout_mutation
+
+  pf_signin_https_integration() (
+    local s ws wsst bin="$TMP/pf-integration-bin" start elapsed
+    # shellcheck disable=SC2034  # dynamically read by the sourced library
+    local C1_NOVNC_PORT=$DP C1_PRIVACY_TIMEOUT=4
+    s=$(c1_session_new "$ROOT")
+    trap 'mode private; c1_cleanup_session "$ROOT" "$s"' EXIT
+    export C1_HARNESS_SESSION=$s CODESPACE_NAME=fixture-only
+    export GH_FIXTURE_STATE="$s/visibility" GH_FIXTURE_CALLS="$s/gh-calls" GH_FIXTURE_PORT=$DP
+    mkdir -p "$bin" "$s/web"
+    cat >"$bin/gh" <<'MOCK_GH'
+#!/usr/bin/env bash
+printf '%s\n' called >>"$GH_FIXTURE_CALLS"
+case $(cat "$GH_FIXTURE_STATE") in
+  private) printf '[{"sourcePort":%s,"visibility":"private"}]\n' "$GH_FIXTURE_PORT" ;;
+  hang)
+    trap '' TERM
+    printf '[{"sourcePort":%s,"visibility":"private"}]\n' "$GH_FIXTURE_PORT"
+    sleep 2
+    ;;
+esac
+MOCK_GH
+    chmod +x "$bin/gh"
+    export PATH="$bin:$PATH"
+    # Only the expected origin is redirected to the loopback TLS fixture.
+    c1_codespace_base() { [[ $1 == "$DP" ]] && printf '%s' "$BASE"; }
+    mode pf-signin
+    printf 'private\n' >"$GH_FIXTURE_STATE"
+    if c1_privacy_check "$BASE" /marker marker "$PV/bad.hdr" "$CA"; then return 1; fi
+    [[ $C1_PRIVACY_STATE == unverified ]]
+    : >"$GH_FIXTURE_CALLS"
+    c1_verify_private_with_decoy "$s" "$DP" "$BASE" "$PV/hdr" "$CA"
+    [[ $(wc -l <"$GH_FIXTURE_CALLS") == 1 ]]
+
+    printf '<title>noVNC</title>\n' >"$s/web/vnc.html"
+    ws=$(c1_spawn "$s" desktop-fixture python3 -I -m http.server --bind 127.0.0.1 --directory "$s/web" "$DP")
+    wsst=$(c1_proc_start "$ws")
+    for _ in $(seq 1 20); do c1_port_free "$DP" || break; sleep 0.05; done
+    c1_privacy_gate "$s" "$DP" "$BASE" "$PV/hdr" "$ws" "$wsst" 1 "$CA"
+    [[ $(wc -l <"$GH_FIXTURE_CALLS") == 2 ]]
+
+    printf 'hang\n' >"$GH_FIXTURE_STATE"
+    start=${EPOCHREALTIME/./}
+    c1_privacy_monitor_loop "$s" "$BASE" "$PV/hdr" "$ws" "$wsst" "$CA" 0.2 "$DP" 1
+    elapsed=$(( ${EPOCHREALTIME/./} - start ))
+    (( elapsed < 2500000 ))
+    [[ $(wc -l <"$GH_FIXTURE_CALLS") == 3 ]]
+    grep -q ' unverified$' "$s/privacy-failed"
+    c1_port_free "$DP"
+  )
+  t 'HTTPS pf-signin redirect uses the decoy, desktop gate and first-failure monitor teardown' pf_signin_https_integration
+
+  pf_signin_https_reject() (
+    local route=$1 trace="$PV/state/authenticated-probes"
+    : >"$trace"
+    trap 'mode private' EXIT
+    mode "$route"
+    c1_codespace_base() {
+      if [[ $route == pf-signin ]]; then printf 'https://other-6080.app.github.dev'; else printf '%s' "$BASE"; fi
+    }
+    if c1_privacy_check "$BASE" /marker marker "$PV/hdr" "$CA"; then return 1; fi
+    [[ $C1_PRIVACY_STATE == unverified && ! -s "$trace" ]]
+  )
+  for route in pf-wrong-scheme pf-wrong-host pf-wrong-path pf-wrong-status pf-userinfo pf-fragment pf-signin; do
+    t "R-3: TLS forwarder refuses $route without token delivery (pf-signin case uses a mismatched origin)" pf_signin_https_reject "$route"
+  done
   # shellcheck disable=SC2034  # read by the library
   transport_failures() {
     C1_PROBE_MAX_TIME=3
@@ -1103,8 +1402,8 @@ watchdog_teardown_end_to_end() {
 }
 t 'L-9: real watchdog terminates marked launcher and removes session after teardown-failed' watchdog_teardown_end_to_end
 
-t 'L-6: monitor-scoped probe deadline is 0.4s and fast teardown is enabled' bash -c \
-  'grep -Fq "local C1_PROBE_MAX_TIME=0.4 C1_MONITOR_FAST_TEARDOWN=1" "$1" &&
+t 'L-6/R-1: monitor-scoped HTTPS and gh deadlines are 0.4s with fast teardown' bash -c \
+  'grep -Fq "local C1_PROBE_MAX_TIME=0.4 C1_GH_READ_TIMEOUT=0.4 C1_MONITOR_FAST_TEARDOWN=1" "$1" &&
    grep -Fq "local wait_steps=20" "$1" &&
    grep -Fq "wait_steps=5" "$1" &&
    grep -Fq -- "--max-time" "$1" && grep -Fq "C1_PROBE_MAX_TIME" "$1"' _ "$HERE/../lib/c1-lib.sh"
@@ -1711,12 +2010,12 @@ echo '# harness diff scope after trusted-main workflow reconciliation'
 TOP=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)
 # This is the separate PR #60 trusted-main *integration* baseline. It is NOT
 # the pinned C1 test-suite head and must never widen C1_AUTH_TO_PW_FILES.
-C1_PR60_WORKFLOW_BASE='c0cc7254e4154fd15fedf33704ac8510bcec88a6'
+C1_PR60_WORKFLOW_BASE='f4f1066af0a0def2b595a14c211341c27733064c'
 if [[ -n "$TOP" ]] && git -C "$TOP" cat-file -e "$C1_PR60_WORKFLOW_BASE^{commit}" 2>/dev/null \
    && git -C "$TOP" merge-base --is-ancestor "$C1_PR60_WORKFLOW_BASE" HEAD 2>/dev/null; then
   t 'harness branch changes only tools/c1-harness/** relative to trusted PR60 workflow base' \
     bash -c '! git -C "$1" diff --name-only "$2" HEAD | grep -v "^tools/c1-harness/"' _ "$TOP" "$C1_PR60_WORKFLOW_BASE"
-  t 'approved frontend suite is byte-identical to pinned e187311 suite at HEAD' \
+  t 'approved frontend suite is byte-identical to pinned PR60 suite at HEAD' \
     git -C "$TOP" diff --quiet "$C1_PW_SHA_APPROVED" HEAD -- frontend
   t 'trusted PR60 workflow and backend files are unmodified by PR74 harness' \
     git -C "$TOP" diff --quiet "$C1_PR60_WORKFLOW_BASE" HEAD -- backend scripts tests .github

@@ -53,7 +53,7 @@ check() { CHECKS+=("$1"); }
 # errexit, so a failed verification would silently continue.)
 preflight() {
   local t major
-  for t in git node npm sha256sum setsid realpath awk getent mktemp curl python3 od; do
+  for t in git node npm sha256sum setsid realpath awk getent mktemp curl python3 od timeout; do
     command -v "$t" >/dev/null || { c1_err "required tool missing: $t"; return 1; }
   done
   major=$(node -p 'process.versions.node.split(".")[0]')
@@ -220,7 +220,7 @@ start_private_desktop() {
   c1_start_display_vnc "$S" "$pass" || return 1
   c1_log "verifying Codespaces port $C1_NOVNC_PORT privacy with a decoy (no desktop behind it yet)"
   if command -v gh >/dev/null 2>&1 && [[ -n "${CODESPACE_NAME:-}" ]]; then
-    gh codespace ports visibility "$C1_NOVNC_PORT:private" -c "$CODESPACE_NAME" >/dev/null 2>&1 || true
+    timeout --kill-after=0.1s "$C1_GH_READ_TIMEOUT" gh codespace ports visibility "$C1_NOVNC_PORT:private" -c "$CODESPACE_NAME" >/dev/null 2>&1 || true
   fi
   c1_verify_private_with_decoy "$S" "$C1_NOVNC_PORT" "$BASE" "$HDR" || { PORT_PRIVATE=failed; return 1; }
   # "Private to organization" also requires GitHub sign-in, so the probe alone

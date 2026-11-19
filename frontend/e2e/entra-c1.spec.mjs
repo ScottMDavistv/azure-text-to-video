@@ -288,7 +288,27 @@ test('Static source invariants (not runtime evidence)', async () => {
   assertSourceInvariants()
 })
 
-test('LIVE: popup login, validated claims, silent acquisition and confirmed cache-clearing logout', async ({ page, context, browser }) => {
+async function assertLocalMsalSignedOut(page) {
+  const state = await page.evaluate(async () => {
+    const { initializeAuth, getSignedInAccount, acquireApiToken } = await import('/src/entraAuth.ts')
+    const client = await initializeAuth()
+    let noAccountTokenRejection = false
+    try {
+      await acquireApiToken()
+    } catch (error) {
+      noAccountTokenRejection = error?.message === 'Sign in with Microsoft before requesting API permission'
+    }
+    return {
+      activeEmpty: client.getActiveAccount() === null,
+      allEmpty: client.getAllAccounts().length === 0,
+      appAccountEmpty: (await getSignedInAccount()) === null,
+      noAccountTokenRejection,
+    }
+  })
+  expect(state).toEqual({ activeEmpty: true, allEmpty: true, appAccountEmpty: true, noAccountTokenRejection: true })
+}
+
+test('LIVE: popup login, validated claims, silent acquisition and verified local MSAL cache clearing', async ({ page, context, browser }) => {
   test.skip(!live, 'C1 live requires explicit authorized supervised account and SPA')
   const audit = await observeContext(context)
   await page.goto('/')
@@ -334,20 +354,16 @@ test('LIVE: popup login, validated claims, silent acquisition and confirmed cach
   await assertMemoryOnly(page, context)
   await page.getByRole('button', { name: 'Sign out' }).click()
   await page.pause() // operator completes Microsoft logout popup, then resumes
-  await expect(page.getByRole('button', { name: 'Sign in with Microsoft' })).toBeVisible()
-  const signedOut = await page.evaluate(async () => {
-    const { initializeAuth, getSignedInAccount, acquireApiToken } = await import('/src/entraAuth.ts')
-    const client = await initializeAuth()
-    let rejectsToken = false
-    try { await acquireApiToken() } catch { rejectsToken = true }
-    return { activeEmpty: (await getSignedInAccount()) === null, allEmpty: client.getAllAccounts().length === 0, rejectsToken }
-  })
-  expect(signedOut).toEqual({ activeEmpty: true, allEmpty: true, rejectsToken: true })
+  await expect(page.getByRole('status').first()).toHaveText('Signed out locally. Microsoft SSO session may remain active.')
+  await expect(page.getByRole('button', { name: 'Sign in with Microsoft' })).toBeEnabled()
+  await assertLocalMsalSignedOut(page)
   await page.reload()
+  await expect(page.getByRole('button', { name: 'Sign in with Microsoft' })).toBeEnabled()
   await expect(page.getByText(/^Signed in:/)).toHaveCount(0)
+  await assertLocalMsalSignedOut(page)
   await assertMemoryOnly(page, context)
   expect(audit.problems).toEqual([])
-  console.log('C1 LIVE supervised assertion complete: sha=' + sha + ' browser=' + browser.version() + ' utc=' + new Date().toISOString())
+  console.log('C1 LIVE supervised assertion complete: local_msal_logout=PASS microsoft_provider_signout=INCOMPLETE sha=' + sha + ' browser=' + browser.version() + ' utc=' + new Date().toISOString())
 })
 
 test('LIVE: deliberately cancelled popup returns MSAL user_cancelled, not a generic failure', async ({ page, context }) => {
@@ -370,13 +386,17 @@ test('LIVE: deliberately cancelled popup returns MSAL user_cancelled, not a gene
       }
     }
   })
-  let popupObserved = false
-  context.on('page', popup => { if (popup !== page) popupObserved = true })
-  await page.getByRole('button', { name: 'Sign in with Microsoft' }).click()
+  const [popup] = await Promise.all([
+    page.waitForEvent('popup'),
+    page.getByRole('button', { name: 'Sign in with Microsoft' }).click(),
+  ])
   await page.pause() // operator deliberately closes/cancels actual Microsoft popup
   await expect.poll(() => page.evaluate(() => window.__c1CancelCode)).toBe('user_cancelled')
-  expect(popupObserved).toBe(true)
+  await expect.poll(() => popup.isClosed()).toBe(true)
+  await expect(page.getByRole('status').first()).toContainText('Microsoft sign-in failed')
+  await expect(page.getByRole('button', { name: 'Sign in with Microsoft' })).toBeEnabled()
   await expect(page.getByText(/^Signed in:/)).toHaveCount(0)
+  await assertLocalMsalSignedOut(page)
   await assertMemoryOnly(page, context)
   expect(audit.problems).toEqual([])
 })

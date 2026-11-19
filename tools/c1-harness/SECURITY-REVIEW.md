@@ -113,7 +113,7 @@ Environment: Anthropic cloud sandbox, Ubuntu 24.04.5, Node 22.23.4, x11vnc 0.9.1
 ## 2026-11-17 L-6/L-9 focused follow-up — pending independent execution and review
 
 The incremental follow-up after `a705ce2f` targets only `tools/c1-harness/**`.
-The production launcher now polls the noVNC edge every **0.2 s**; the
+The production launcher waits **0.2 s** between noVNC privacy sweeps; the
 privacy monitor locally caps each unauthenticated/authenticated HTTPS probe at
 **0.4 s**, treats the *first* ambiguous observation as unverifiable and tears
 down, and locally bounds TERM/KILL grace to five 0.1-second steps each.
@@ -190,7 +190,7 @@ APPROVE / REQUEST CHANGES for the consolidated round-2 remediation at this head,
    It polls for up to 120 s.
 4. Organization-wide visibility also requires sign-in, so the probe alone cannot exclude it. The harness therefore requires either a `gh` read-back of `private` or a repository owner type of `User` (GitHub API, read with the token).
 5. The decoy stops, and websockify starts on the same port. `/vnc.html` is re-probed the same way, using the `noVNC` signature, before the password is printed and before each supervised phase.
-6. A background monitor re-probes every 15 s. It stops noVNC immediately if the port is seen public, or after 3 consecutive unverifiable checks.
+6. In this historical run, a background monitor re-probed every 15 s and stopped noVNC on public visibility or after three consecutive unverifiable checks. The current cadence and first-failure teardown policy are documented in the README.
 
 **Assumptions the reviewer must confirm in a real Codespace:**
 - an unauthenticated request to a private port returns a redirect or 401/403 rather than a 2xx;
