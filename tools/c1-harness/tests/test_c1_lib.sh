@@ -257,7 +257,7 @@ markerbig() {   # large environment must not hide the marker (pipe/SIGPIPE regre
   c1_pid_has_marker "$p" "$s"; local r=$?; kill "$p"; return $r
 }
 t 'session marker found in a process with a very large environment' markerbig
-t 'approved SHAs are pinned constants with no environment override' bash -c 'C1_PW_SHA_APPROVED=bad C1_AUTH_SHA_APPROVED=bad; source "$1"; [[ $C1_PW_SHA_APPROVED == 0ea5a2aa715af3b5ac1dcbad5b38514c218911aa && $C1_AUTH_SHA_APPROVED == c46e2e8c67ee5a2668d113ceef15c5a4774cde69 ]]' _ "$HERE/../lib/c1-lib.sh"
+t 'approved SHAs are pinned constants with no environment override' bash -c 'C1_PW_SHA_APPROVED=bad C1_AUTH_SHA_APPROVED=bad; source "$1"; [[ $C1_PW_SHA_APPROVED == 2857285e33ff4a94bc394814f951325c48610799 && $C1_AUTH_SHA_APPROVED == c46e2e8c67ee5a2668d113ceef15c5a4774cde69 ]]' _ "$HERE/../lib/c1-lib.sh"
 t 'toolchain pins: Playwright 1.65.1 and Chromium 159.0.8154.6, no environment override (I-5)' bash -c 'C1_PLAYWRIGHT_VERSION=9 C1_CHROMIUM_VERSION=9; source "$1"; [[ $C1_PLAYWRIGHT_VERSION == 1.65.1 && $C1_CHROMIUM_VERSION == 159.0.8154.6 ]]' _ "$HERE/../lib/c1-lib.sh"
 t 'launcher scrubs mode/secret-adjacent variables before running tests' bash -c 'grep -q "unset C1_LIVE C1_UNCONFIGURED C1_MUTATION_MODE C1_EXPECTED_SHA" "$1" && grep -q "PWDEBUG DEBUG" "$1"' _ "$HERE/../c1-session.sh"
 t 'launcher never passes trace/video/screenshot or mutation mode to Playwright' bash -c '! grep -Eq -- "--trace|--video|--screenshot|C1_MUTATION_MODE=1|--update-snapshots" "$1"' _ "$HERE/../c1-session.sh"
