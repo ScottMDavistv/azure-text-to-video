@@ -769,7 +769,7 @@ if command -v openssl >/dev/null && command -v curl >/dev/null && command -v pyt
     }
     local gh_calls="$PV/pf-gh-$1-$2-${3:-matching}"
     : >"$gh_calls"
-    c1_gh_private() { printf 'gh\\n' >>"$gh_calls"; [[ $vis == private ]]; }
+    c1_gh_private() { printf 'gh\n' >>"$gh_calls"; [[ $vis == private ]]; }
     c1_privacy_check "$BASE" '/nonce-marker.txt' nonce-marker "$PV/hdr" "$CA" || rc=$?
     if [[ $origin_mode != matching ]]; then
       (( rc != 0 )) && [[ $C1_PRIVACY_STATE == unverified ]] &&
@@ -788,8 +788,10 @@ if command -v openssl >/dev/null && command -v curl >/dev/null && command -v pyt
     local original mutated
     original=$(declare -f c1_privacy_check)
     [[ $original == *'unexpected forwarding origin'* ]] || return 1
-    mutated=$(printf '%s\\n' "$original" |
-      sed '/if \\[\\[ "\\$base" != "\\$(c1_codespace_base "\\$C1_NOVNC_PORT")" \\]\\]; then/,/^[[:space:]]*fi$/d')
+    mutated=$(printf '%s\n' "$original" |
+      awk 'index($0, "if [[ \"$base\" != \"$(c1_codespace_base") { drop=1 }
+           drop && /^[[:space:]]*fi;/ { drop=0; next }
+           !drop { print }')
     [[ $mutated != "$original" && $mutated != *'unexpected forwarding origin'* ]] || return 1
     eval "$mutated"
     if pf_signin_with_gh_readback private valid mismatched; then
