@@ -95,6 +95,12 @@ def test_compiled_arm_rejects_adversarial_mutation(label, mutate_job, mutate_ale
     changed_job = mutate_job(JOB) if mutate_job is not None else JOB
     changed_alert = mutate_alert(ALERT) if mutate_alert is not None else ALERT
     assert changed_job != JOB or changed_alert != ALERT, label
+    # Authenticate each probe: mutated Bicep must compile successfully.
+    # A syntax error is not proof that the semantic validator caught the risk.
+    if changed_job != JOB:
+        module._compile(changed_job, "adversarial-job.bicep")
+    if changed_alert != ALERT:
+        module._compile(changed_alert, "adversarial-alert.bicep")
     with pytest.raises(module.ReadinessError):
         module.validate_sources(changed_job, changed_alert)
 
