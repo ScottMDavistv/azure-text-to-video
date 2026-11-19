@@ -10,12 +10,13 @@
 # PR #46 auth implementation; new PR #60 test and UI changes are explicitly
 # enumerated and require their own independent review before LIVE use.
 C1_AUTH_SHA_APPROVED='c46e2e8c67ee5a2668d113ceef15c5a4774cde69'
-C1_PW_SHA_APPROVED='f4f1066af0a0def2b595a14c211341c27733064c'
+C1_PW_SHA_APPROVED='a0321aa4ee322ebaa141572a635548f4da5b8c8f'
 C1_PLAYWRIGHT_VERSION='1.65.1'
 # I-5: the Chromium build Playwright 1.65.1 pins (browsers.json rev 1255, both
 # chromium and chromium-headless-shell). R10 requires this literal value too.
 C1_CHROMIUM_VERSION='159.0.8154.6'
-# Exact verified diff from the main baseline to the tested PR #60 head. Anything
+# Exact verified diff from main to the L-2 frontend checkpoint (stacked on
+# independently certified PR #60 f4f1066). Anything
 # else (e.g. src/entraAuth.ts) => reject. This list must equal
 # `git diff --no-renames --name-only AUTH PW`; it is never widened to pass.
 C1_AUTH_TO_PW_FILES='.github/workflows/frontend-quality-gates.yml
@@ -27,6 +28,8 @@ frontend/e2e/c1-lockfile-check.mjs
 frontend/e2e/c1-mutation-check.mjs
 frontend/e2e/c1-mutations.mjs
 frontend/e2e/c1-source-policy.mjs
+frontend/e2e/c1-webrtc-policy.mjs
+frontend/e2e/c1-webrtc-udp-check.mjs
 frontend/e2e/entra-c1.spec.mjs
 frontend/e2e/entra-tier1.spec.mjs
 frontend/e2e/run-browser-mutations.mjs
