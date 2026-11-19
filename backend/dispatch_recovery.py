@@ -150,7 +150,7 @@ def dispatch_queued_job(job_id, *, table=None, send=None, now=None):
         table.update_entity(
             entity={"PartitionKey": "video", "RowKey": job_id,
                     "dispatchState": "sent",
-                    "dispatchUpdatedAt": _utc().isoformat()},
+                    "dispatchUpdatedAt": now.isoformat()},
             mode=UpdateMode.MERGE, etag=_etag(latest),
             match_condition=MatchConditions.IfNotModified,
         )
