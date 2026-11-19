@@ -1102,6 +1102,12 @@ c1_privacy_check() {
   # Any 2xx to an unauthenticated client is treated as exposure (fail closed).
   if [[ "$code" == 2?? ]]; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe got HTTP $code"; rm -f "$f"; return 1; fi
   if c1_codespaces_pf_signin_redirect "$code" "${loc:-}"; then
+    # Bind the independently checked port visibility to the exact forwarding
+    # origin under probe; never let a private 6080 attest to a different URL.
+    if [[ "$base" != "$(c1_codespace_base "$C1_NOVNC_PORT")" ]]; then
+      C1_PRIVACY_DETAIL='github.dev sign-in redirect for unexpected forwarding origin'
+      rm -f "$f"; return 1
+    fi
     # This specific redirect is accepted only alongside independently verified
     # current Private visibility; gh failure, org/public, or missing evidence
     # remains unverified. Repeated monitor/gate probes re-check this each time.
