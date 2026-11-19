@@ -7,9 +7,13 @@ import { createServer } from 'node:http'
 import { networkInterfaces } from 'node:os'
 import { once } from 'node:events'
 import { WEBRTC_UDP_POLICY_ARG } from './c1-webrtc-policy.mjs'
+import config from '../playwright.config.mjs'
 
 if (process.env.C1_LIVE === '1') throw new Error('L-2 probe refuses live Entra mode')
 if (process.env.C1_MUTATION_MODE === '1') throw new Error('L-2 probe refuses mutation mode')
+// A guard that exists only in this probe, but not in the actual test config,
+// cannot count as protection. Assert configuration and launch command line.
+assert.deepEqual(config.use.launchOptions?.args, [WEBRTC_UDP_POLICY_ARG], 'Playwright suite must actually enforce L-2')
 const iface = Object.values(networkInterfaces()).flat().find(x => x && x.family === 'IPv4' && !x.internal)?.address
 if (!iface) throw new Error('L-2 NOT VERIFIED: no non-loopback IPv4 interface for positive-control STUN probe')
 const timeout = Number(process.env.C1_UDP_PROBE_TIMEOUT_MS || 4500)
