@@ -845,17 +845,466 @@ c1_verify_cleanup() {
     if (( unresolved )); then ok=1; else rm -f -- "$preg" || ok=1; fi
   fi
   reg="$(dirname -- "$s")/.${s##*/}.inodes"
-  if [[ -e "$reg" ]]; then
-    if c1_listen_tables; then
-      while read -r ino addr; do [[ -n "$ino" ]] && live[$ino]=$addr; done <<<"$C1_LT_PROC"$'\n'"$C1_LT_SS"
-      while read -r ino; do
-        [[ "$ino" =~ ^[0-9]+$ ]] || continue
-        [[ -z "${live[$ino]:-}" ]] || { c1_err "harness listener inode $ino is still listening on ${live[$ino]}"; ok=1; }
-      done <"$reg"
+  if [[ -e "$reg" || -L "$reg" ]]; then
+    # N-6: never equate an unreadable, empty, malformed, or non-regular
+    # preserved inode register with proof of listener closure.
+    local inode_unresolved=0 line
+    if [[ ! -f "$reg" || -L "$reg" || ! -r "$reg" || ! -s "$reg" ]]; then
+      c1_err 'preserved listener inode evidence is not a readable nonempty regular file'
+      inode_unresolved=1
+    elif ! c1_listen_tables; then
+      c1_err 'cannot prove recorded harness listeners are closed (listener evidence unavailable)'
+      inode_unresolved=1
     else
-      c1_err 'cannot prove recorded harness listeners are closed (listener evidence unavailable)'; ok=1
+      while read -r ino addr; do [[ -n "$ino" ]] && live[$ino]=$addr; done <<<"$C1_LT_PROC"
+  return $ok
+}
+
+# ----------------------------------------------------------------- desktop --
+
+c1_free_display() {
+  local n
+  for n in $(seq 99 140); do
+    [[ ! -e "/tmp/.X11-unix/X$n" && ! -e "/tmp/.X$n-lock" ]] && { printf ':%s' "$n"; return 0; }
+  done
+  return 1
+}
+
+# Finite reads only: `tr </dev/urandom | head` dies of SIGPIPE under pipefail.
+c1_gen_password() {
+  local p=''
+  while (( ${#p} < 8 )); do p+=$(head -c 64 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9'); done
+  printf '%s' "${p:0:8}"
+}
+
+# Command builders are separate so the security flags can be regression-tested.
+c1_cmd_xvfb()   { printf '%s\n' Xvfb "$1" -screen 0 1600x1000x24 -nolisten tcp -nolisten local -auth "$2/Xauthority"; }
+# H-1: `-rfbport 0` disables only the IPv4 listener. LibVNCServer defaults
+# ipv6port=5900 and binds the wildcard [::]:5900 unless `-rfbportv6 0` is also
+# given (`-no6`/`-noipv6` alone were verified insufficient). Both are passed.
+c1_cmd_x11vnc() { printf '%s\n' x11vnc -display "$1" -auth "$2/Xauthority" -rfbport 0 -rfbportv6 0 -no6 -unixsock "$2/vnc.sock" \
+                    -passwdfile "rm:$2/vncpass" -forever -noxdamage -nolookup -norc -nossl -quiet -o "$2/log/x11vnc.log"; }
+c1_cmd_websockify() { printf '%s\n' websockify --web "$C1_NOVNC_WEB" --unix-target="$2/vnc.sock" "127.0.0.1:$1"; }
+
+# c1_close_inherited_fds -> close every fd above 2 in the CURRENT shell (L-1).
+# Used only inside c1_spawn's child subshell, so a harness process can never
+# inherit (and be misattributed with, or expose) a listening socket of its parent.
+c1_close_inherited_fds() {
+  local f n
+  local -a fds=()
+  for f in "/proc/${BASHPID:-$$}/fd/"*; do fds+=("${f##*/}"); done
+  for n in "${fds[@]}"; do
+    [[ "$n" =~ ^[0-9]+$ ]] && (( n > 2 )) || continue
+    exec {n}>&-
+  done
+}
+
+# c1_spawn SESSION NAME CMD...  start detached in own process group, record pid
+c1_spawn() {
+  local s=$1 name=$2; shift 2
+  ( c1_close_inherited_fds; exec env C1_HARNESS_SESSION="$s" setsid "$@" ) >"$s/log/$name.log" 2>&1 </dev/null &
+  local pid=$! st=''
+  disown "$pid" 2>/dev/null || true   # no job-status noise when cleanup kills it
+  for _ in 1 2 3 4 5 6 7 8 9 10; do st=$(c1_proc_start "$pid"); [[ -n "$st" ]] && break; sleep 0.02; done
+  # A process that already exited records no start time and is never signalled by PID.
+  if [[ -n "$st" ]]; then printf '%s %s\n' "$pid" "$st" >>"$s/pids"; fi
+  printf '%s' "$pid"
+}
+
+# c1_start_display_vnc SESSION PASSWORD -> Xvfb + fluxbox + x11vnc (no TCP at all);
+# exports DISPLAY/XAUTHORITY. The VNC server listens only on a 0600 Unix socket.
+c1_start_display_vnc() {
+  local s=$1 pass=$2 disp
+  local -a cmd
+  [[ "${C1_HARNESS_SESSION:-}" == "$s" ]] || { c1_err 'session marker not exported'; return 1; }
+  disp=$(c1_free_display) || { c1_err 'no free X display'; return 1; }
+  touch "$s/Xauthority" && chmod 600 "$s/Xauthority"
+  xauth -q -f "$s/Xauthority" add "$disp" . "$(mcookie)" || return 1
+  mapfile -t cmd < <(c1_cmd_xvfb "$disp" "$s")
+  c1_spawn "$s" xvfb "${cmd[@]}" >/dev/null
+  for _ in $(seq 1 50); do [[ -S "/tmp/.X11-unix/X${disp#:}" ]] && break; sleep 0.1; done
+  [[ -S "/tmp/.X11-unix/X${disp#:}" ]] || { c1_err 'Xvfb failed to start'; return 1; }
+  export DISPLAY=$disp XAUTHORITY="$s/Xauthority"
+  c1_spawn "$s" fluxbox fluxbox >/dev/null
+  ( umask 077; printf '%s\n' "$pass" >"$s/vncpass" )
+  mapfile -t cmd < <(c1_cmd_x11vnc "$disp" "$s")
+  c1_spawn "$s" x11vnc "${cmd[@]}" >/dev/null
+  for _ in $(seq 1 50); do [[ -S "$s/vnc.sock" ]] && break; sleep 0.1; done
+  [[ -S "$s/vnc.sock" ]] || { c1_err 'x11vnc failed to start'; return 1; }
+  chmod 600 "$s/vnc.sock" 2>/dev/null || true
+  for _ in $(seq 1 30); do [[ ! -e "$s/vncpass" ]] && break; sleep 0.1; done
+  [[ ! -e "$s/vncpass" ]] || { c1_err 'x11vnc did not consume the one-time password file'; return 1; }
+  c1_assert_no_listeners_before_novnc "$s"
+}
+
+# c1_assert_no_listeners_before_novnc SESSION -> nothing attributable to the
+# session may listen on TCP (IPv4 or IPv6, any address) before noVNC starts.
+# Fails closed when the evidence is unavailable. Offending rows (address, pid,
+# comm, inode; never environ/argv) go to the terminal and the evidence (M-2);
+# marked processes not started by the desktop are reported (L-2).
+c1_assert_no_listeners_before_novnc() {
+  local s=$1 got orph
+  orph=$(c1_harness_orphans "$s")
+  if [[ -n "$orph" ]]; then c1_warn "marked processes not started by the desktop: ${orph//$'\n'/; }"; fi
+  if ! got=$(c1_harness_listeners "$s"); then
+    c1_err 'listener evidence unavailable before noVNC start; failing closed'
+    c1_listener_state "$s" failed-unavailable 'pre-novnc evidence unavailable'
+    return 1
+  fi
+  if [[ -n "$got" ]]; then
+    c1_err 'unexpected TCP listener before noVNC start:'
+    printf '[c1]   %s\n' "${got//$'\n'/$'\n'[c1]   }" >&2
+    c1_listener_state "$s" failed-unexpected "pre-novnc: $got${orph:+; orphans: $orph}"
+    return 1
+  fi
+}
+
+# c1_start_websockify SESSION PORT -> noVNC/websockify on 127.0.0.1:PORT only; prints pid.
+# On failure after the spawn, the spawned websockify is torn down (returns 1),
+# or 2 if the port could not be verified closed afterwards.
+c1_start_websockify() {
+  local s=$1 port=$2 pid st
+  local -a cmd
+  c1_port_free "$port" || { c1_err "port $port is already in use; run: c1-session.sh cleanup"; return 1; }
+  mapfile -t cmd < <(c1_cmd_websockify "$port" "$s")
+  pid=$(c1_spawn "$s" websockify "${cmd[@]}")
+  st=$(c1_proc_start "$pid")
+  for _ in $(seq 1 50); do c1_port_free "$port" || break; sleep 0.1; done
+  if c1_port_free "$port"; then c1_err 'noVNC/websockify failed to listen'
+  elif c1_assert_desktop_listeners "$s" "$port"; then printf '%s' "$pid"; return 0
+  fi
+  c1_teardown_novnc "$s" "$port" "$pid" "$st" websockify-start || return 2
+  return 1
+}
+
+# c1_start_desktop SESSION PORT PASSWORD  (local/test helper: display+VNC+noVNC;
+# the launcher instead verifies Codespaces privacy between the two steps)
+c1_start_desktop() {
+  local s=$1 port=$2 pass=$3
+  c1_port_free "$port" || { c1_err "port $port is already in use; run: c1-session.sh cleanup"; return 1; }
+  c1_start_display_vnc "$s" "$pass" || return 1
+  c1_start_websockify "$s" "$port" >/dev/null
+}
+
+# Every harness TCP listener must be exactly the loopback noVNC port: Xvfb and
+# x11vnc must expose none (X uses a Unix socket, VNC a 0600 Unix socket).
+c1_assert_desktop_listeners() {
+  local s=$1 port=$2 got addrs
+  if ! got=$(c1_harness_listeners "$s"); then
+    c1_err 'listener evidence unavailable after noVNC start; failing closed'
+    c1_listener_state "$s" failed-unavailable 'desktop evidence unavailable'
+    return 1
+  fi
+  addrs=$(awk 'NF {print $1}' <<<"$got" | LC_ALL=C sort -u)
+  if ! c1_assert_loopback_only <<<"$addrs" || [[ "$addrs" != "127.0.0.1:$port" ]]; then
+    c1_err "unexpected harness listener set (expected exactly 127.0.0.1:$port):"
+    printf '[c1]   %s\n' "${got:-none}" | sed '2,$s/^/[c1]   /' >&2
+    c1_listener_state "$s" failed-unexpected "desktop: ${got:-none}"
+    return 1
+  fi
+  c1_listener_state "$s" verified "$got"
+}
+
+# ------------------------------------------------- Codespaces port privacy --
+# Fail-closed technical verification (M-2). GitHub documents that a PRIVATE
+# forwarded port is reachable only with GitHub authentication (browser sign-in,
+# or `X-Github-Token: $GITHUB_TOKEN` for non-browser clients), while a PUBLIC
+# port needs none. So: an unauthenticated probe must NOT receive a per-session
+# nonce served by a decoy (no VNC behind it), and an authenticated probe MUST.
+# Only then is the real noVNC started, and the check is repeated before the
+# password is shown, before each supervised phase, and by a background monitor.
+# There is no typed-confirmation fallback.
+
+C1_PRIVACY_TIMEOUT=120
+C1_PROBE_MAX_TIME=15
+C1_NOVNC_RETRIES=10
+C1_NOVNC_SIGNATURE='noVNC'
+C1_PRIVACY_DETAIL=''
+
+# c1_codespace_base PORT -> https://NAME-PORT.DOMAIN (Codespaces variables only)
+c1_codespace_base() {
+  [[ "${CODESPACE_NAME:-}" =~ ^[A-Za-z0-9-]+$ ]] || return 1
+  local dom=${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-app.github.dev}
+  [[ "$dom" =~ ^[a-z0-9.-]+$ ]] || return 1
+  printf 'https://%s-%s.%s' "$CODESPACE_NAME" "$1" "$dom"
+}
+
+c1_codespace_url() { printf '%s/vnc.html?autoconnect=1&resize=remote' "$(c1_codespace_base "$1")"; }
+
+# c1_write_header_file FILE NAME VALUE  (0600; keeps tokens out of argv/env of curl)
+c1_write_header_file() { ( umask 077; printf '%s: %s\n' "$2" "$3" >"$1" ); }
+
+# c1_https_probe URL OUTFILE [HEADERFILE] [CACERT] -> prints "CODE REDIRECT_URL"
+# (CODE 000 on transport failure; REDIRECT_URL empty unless a 3xx carried one).
+# HTTPS only, no redirects followed, no proxy, minimal environment (no
+# inherited CURL_CA_BUNDLE/HTTPS_PROXY).
+c1_https_probe() {
+  local url=$1 out=$2 hdr=${3:-} ca=${4:-}
+  local -a a=(--silent --max-time "$C1_PROBE_MAX_TIME" --proto '=https' --noproxy '*' -o "$out" -w '%{http_code} %{redirect_url}')
+  if [[ -n "$hdr" ]]; then a+=(-H "@$hdr"); fi
+  if [[ -n "$ca" ]]; then a+=(--cacert "$ca"); fi
+  : >"$out"
+  env -i PATH="$PATH" curl "${a[@]}" -- "$url" 2>/dev/null || true
+}
+
+# c1_unauth_denied CODE [REDIRECT_URL] -> 0 only for a POSITIVE denial (M-2a):
+# HTTP 401/403, or a 30x redirect to https://github.com or an https subdomain
+# of github.com (GitHub sign-in), default port, no userinfo. Everything else
+# (000 reset/timeout/DNS/TLS failure, 5xx, other 4xx, a redirect anywhere else,
+# a malformed or missing Location) is ambiguous and NOT a denial.
+c1_unauth_denied() {
+  local code=$1 loc=${2:-} host
+  case $code in
+    401|403) return 0 ;;
+    301|302|303|307|308)
+      [[ "$loc" =~ ^https://([A-Za-z0-9.-]+)(:443)?(/[^[:space:]]*)?$ ]] || return 1
+      host=${BASH_REMATCH[1],,}
+      [[ "$host" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)*github\.com$ ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+# c1_privacy_check BASE PATH MARKER TOKENHDR [CACERT]
+# 0 = verified private. Sets C1_PRIVACY_STATE to private | public | unverified
+# (and C1_PRIVACY_DETAIL to a short, token-free reason). Private requires BOTH a
+# positive unauthenticated denial AND an authenticated 200 carrying the marker.
+c1_privacy_check() {
+  local base=$1 path=$2 marker=$3 hdr=$4 ca=${5:-} f code loc
+  C1_PRIVACY_STATE=unverified C1_PRIVACY_DETAIL='bad arguments'
+  [[ -n "$base" && -n "$marker" && -s "$hdr" ]] || return 1
+  f=$(mktemp "${TMPDIR:-/tmp}/c1probe.XXXXXXXX") || return 1
+  read -r code loc <<<"$(c1_https_probe "$base$path" "$f" "" "$ca")" || true
+  code=${code:-000}
+  if grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe received the marker (HTTP $code)"; rm -f "$f"; return 1; fi
+  # Any 2xx to an unauthenticated client is treated as exposure (fail closed).
+  if [[ "$code" == 2?? ]]; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe got HTTP $code"; rm -f "$f"; return 1; fi
+  if ! c1_unauth_denied "$code" "${loc:-}"; then
+    C1_PRIVACY_DETAIL="unauthenticated probe was not positively denied (HTTP $code)"; rm -f "$f"; return 1
+  fi
+  read -r code loc <<<"$(c1_https_probe "$base$path" "$f" "$hdr" "$ca")" || true
+  if [[ "${code:-}" == 200 ]] && grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=private C1_PRIVACY_DETAIL='denied unauthenticated; authenticated probe reached the marker'; rm -f "$f"; return 0; fi
+  C1_PRIVACY_DETAIL="authenticated probe did not reach the marker (HTTP ${code:-000})"
+  rm -f "$f"; return 1
+}
+
+c1_nonce() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
+c1_cmd_decoy() { printf '%s\n' python3 -I -m http.server --bind 127.0.0.1 --directory "$2/decoy" "$1"; }
+
+# c1_verify_private_with_decoy SESSION PORT BASE TOKENHDR [CACERT]
+# Serves a nonce on 127.0.0.1:PORT (no VNC behind it) until privacy is proven,
+# then stops the decoy. Returns 1 (and stops the decoy) on any other outcome.
+c1_verify_private_with_decoy() {
+  local s=$1 port=$2 base=$3 hdr=$4 ca=${5:-} nonce pid ok=1 deadline
+  local -a cmd
+  c1_port_free "$port" || { c1_err "port $port already in use"; return 1; }
+  nonce=$(c1_nonce); [[ ${#nonce} -eq 32 ]] || return 1
+  mkdir -p "$s/decoy"
+  printf 'C1 harness privacy decoy (no desktop behind this port)\n' >"$s/decoy/index.html"
+  printf '%s\n' "$nonce" >"$s/decoy/c1-privacy-$nonce.txt"
+  mapfile -t cmd < <(c1_cmd_decoy "$port" "$s")
+  pid=$(c1_spawn "$s" decoy "${cmd[@]}")
+  for _ in $(seq 1 50); do c1_port_free "$port" || break; sleep 0.1; done
+  deadline=$(( SECONDS + C1_PRIVACY_TIMEOUT ))
+  while (( SECONDS < deadline )); do
+    if c1_privacy_check "$base" "/c1-privacy-$nonce.txt" "$nonce" "$hdr" "$ca"; then ok=0; break; fi
+    if [[ $C1_PRIVACY_STATE == public ]]; then c1_err "port $port is reachable WITHOUT GitHub authentication (public); refusing to serve the desktop"; break; fi
+    sleep 3
+  done
+  (( ok == 0 )) || [[ $C1_PRIVACY_STATE == public ]] || c1_err "could not prove port $port is private and forwarded (authenticated probe never reached the decoy)"
+  local st; st=$(c1_proc_start "$pid")
+  c1_signal_owned TERM "$pid" "$s" "$st"
+  for _ in $(seq 1 50); do c1_port_free "$port" && break; sleep 0.1; done
+  c1_signal_owned KILL "$pid" "$s" "$st"
+  rm -rf -- "${s:?}/decoy"
+  c1_port_free "$port" || { c1_err 'decoy did not stop'; return 1; }
+  return $ok
+}
+
+# c1_verify_private_novnc BASE TOKENHDR [CACERT] -> privacy check against the real noVNC page
+c1_verify_private_novnc() {
+  local i
+  for (( i = 0; i < C1_NOVNC_RETRIES; i++ )); do
+    c1_privacy_check "$1" '/vnc.html' "$C1_NOVNC_SIGNATURE" "$2" "${3:-}" && return 0
+    [[ $C1_PRIVACY_STATE == public ]] && return 1
+    sleep 2
+  done
+  return 1
+}
+
+# c1_teardown_novnc SESSION PORT WSPID WSSTART [REASON]
+# Shared by the monitor and the launcher's privacy gate (L-9). Writes the
+# privacy-failed marker FIRST, then TERM -> wait -> KILL (ownership-verified),
+# and verifies that PORT no longer listens. Returns 1 (and records
+# "teardown-failed") if the port is still open: callers must fail closed.
+c1_teardown_novnc() {
+  local s=$1 port=$2 ws=$3 wsst=$4 reason=${5:-unverified}
+  # A monitor supplies a tighter local bound; other callers retain the 2 s
+  # TERM / KILL grace periods. Never accept arbitrary external step counts.
+  local wait_steps=20
+  [[ "${C1_MONITOR_FAST_TEARDOWN:-}" == 1 ]] && wait_steps=5
+  [[ "$reason" =~ ^[a-z0-9_-]{1,40}$ ]] || reason=unverified
+  printf '%s %s\n' "$(c1_utc)" "$reason" >>"$s/privacy-failed"
+  c1_signal_owned TERM "$ws" "$s" "$wsst"
+  for (( _=0; _<wait_steps; _++ )); do
+    if c1_port_free "$port" && ! c1_owned_pid "$ws" "$s" "$wsst"; then break; fi
+    sleep 0.1
+  done
+  c1_signal_owned KILL "$ws" "$s" "$wsst"
+  for (( _=0; _<wait_steps; _++ )); do c1_port_free "$port" && break; sleep 0.1; done
+  if ! c1_port_free "$port"; then
+    printf '%s teardown-failed\n' "$(c1_utc)" >>"$s/privacy-failed"
+    c1_err "port $port is still listening after the privacy teardown"
+    return 1
+  fi
+}
+
+# c1_gh_private PORT -> 0 if gh reads back "private"; 1 if gh reports anything
+# else (C1_GH_VIS=<sanitized value>); 2 if the read-back is unavailable.
+c1_gh_private() {
+  local v; C1_GH_VIS=''
+  v=$(c1_gh_visibility "$1") || v=''
+  [[ -n "$v" ]] || return 2
+  [[ "$v" =~ ^[a-z_-]{1,24}$ ]] || v=unknown
+  C1_GH_VIS=$v
+  [[ "$v" == private ]] || return 1
+}
+
+# c1_privacy_gate SESSION PORT BASE TOKENHDR WSPID WSSTART REQUIRE_GH [CACERT]
+# 0 = noVNC still verified private (and, when REQUIRE_GH=1, gh still reads back
+# "private"). Otherwise noVNC is torn down: 1 = torn down and port verified
+# closed; 2 = teardown could NOT be verified (caller must abort the session).
+c1_privacy_gate() {
+  local s=$1 port=$2 base=$3 hdr=$4 ws=$5 wsst=$6 req_gh=${7:-0} ca=${8:-} reason='' g=0
+  if [[ -e "$s/privacy-failed" ]]; then reason=monitor-flagged
+  elif ! c1_verify_private_novnc "$base" "$hdr" "$ca"; then reason=$C1_PRIVACY_STATE
+  elif (( req_gh )); then
+    c1_gh_private "$port" || g=$?
+    if (( g == 1 )); then reason="gh-visibility-$C1_GH_VIS"; elif (( g == 2 )); then reason=gh-unavailable; fi
+  fi
+  [[ -n "$reason" ]] || return 0
+  C1_GATE_REASON=$reason
+  c1_teardown_novnc "$s" "$port" "$ws" "$wsst" "$reason" || return 2
+  return 1
+}
+
+# c1_privacy_monitor_loop SESSION BASE TOKENHDR WSPID WSSTART [CACERT] [INTERVAL] [PORT] [REQUIRE_GH]
+# Background, marker-scoped: tears noVNC down (and flags the session) as soon as
+# the port is seen public or gh (REQUIRE_GH=1, L-10) reads back anything other
+# than "private" (e.g. org/public), or on the first unverifiable
+# observation (ambiguous HTTPS probe or unavailable gh read-back).
+c1_privacy_monitor_loop() {
+  local s=$1 base=$2 hdr=$3 ws=$4 wsst=$5 ca=${6:-} iv=${7:-0.2} port=${8:-$C1_NOVNC_PORT} req_gh=${9:-0}
+  # L-6: these are local to this monitor's shell/function calls; bootstrap
+  # privacy checks still use their full timeouts. One sweep is bounded to
+  # two HTTPS probes at <=0.4 s each; teardown gets <=1 s of grace.
+  local C1_PROBE_MAX_TIME=0.4 C1_MONITOR_FAST_TEARDOWN=1
+  local reason g
+  trap 'exit 0' TERM
+  while c1_owned_pid "$ws" "$s" "$wsst"; do
+    sleep "$iv"
+    reason=''
+    if c1_privacy_check "$base" '/vnc.html' "$C1_NOVNC_SIGNATURE" "$hdr" "$ca"; then
+      if (( ! req_gh )); then continue; fi
+      g=0; c1_gh_private "$port" || g=$?
+      if (( g == 0 )); then continue; fi
+      if (( g == 1 )); then reason="gh-visibility-$C1_GH_VIS"; else reason=gh-unavailable; fi
+    elif [[ $C1_PRIVACY_STATE == public ]]; then reason=public
+    else reason=unverified
     fi
-    (( ok )) || rm -f -- "$reg"
+    # A stalled/ambiguous edge is not a positive privacy proof. Fail closed
+    # on its first observation: three retry cycles cannot meet L-6's bound.
+    if [[ -n "$reason" ]]; then
+      # L-9: an unverifiable teardown must propagate failure to the watchdog.
+      c1_teardown_novnc "$s" "$port" "$ws" "$wsst" "$reason" || return 2
+      return 0
+    fi
+  done
+}
+
+# c1_repo_owner_type OWNER/REPO AUTHHDR [CACERT] [API_BASE] -> GitHub owner type (User | Organization)
+# (CACERT/API_BASE exist for the offline regression tests; the launcher passes neither.)
+c1_repo_owner_type() {
+  local repo=$1 hdr=$2 ca=${3:-} api=${4:-https://api.github.com} f code
+  [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && -s "$hdr" ]] || return 1
+  f=$(mktemp "${TMPDIR:-/tmp}/c1api.XXXXXXXX") || return 1
+  read -r code _ <<<"$(c1_https_probe "$api/repos/$repo" "$f" "$hdr" "$ca")" || true
+  if [[ "${code:-}" == 200 ]]; then
+    node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(String((j.owner&&j.owner.type)||""))' "$f" 2>/dev/null || true
+  fi
+  rm -f "$f"
+}
+
+# c1_gh_visibility PORT -> visibility via gh (requires codespace scope), or nothing
+c1_gh_visibility() {
+  [[ -n "${CODESPACE_NAME:-}" ]] && command -v gh >/dev/null 2>&1 || return 1
+  local out; out=$(gh codespace ports -c "$CODESPACE_NAME" --json sourcePort,visibility 2>/dev/null) || return 1
+  node -e 'const p=JSON.parse(process.argv[1]).find(x=>x.sourcePort===Number(process.argv[2]));if(p)process.stdout.write(String(p.visibility).toLowerCase())' "$out" "$1" 2>/dev/null
+}
+
+# --------------------------------------------------------------- watchdog --
+# L-3: a marker-scoped watchdog in its own session tears the harness session
+# down if the launcher disappears (SIGKILL, OOM, closed pty during cleanup).
+c1_watchdog_loop() {
+  local root=$1 s=$2 lpid=$3 lstart=$4
+  trap 'exit 0' TERM
+  # A SIGKILLed launcher can linger as an unreaped zombie with the same start
+  # time; zombie (Z) or dead (X) counts as gone.
+  while [[ "$(c1_proc_start "$lpid")" == "$lstart" && ! "$(c1_proc_stat_field "$lpid" 1)" =~ ^[ZX]$ ]]; do
+    # L-9: if port closure is unverified, stop only the exact recorded launcher
+    # after validating PID/start time and the active-session record.
+    if [[ -f "$s/privacy-failed" ]] && grep -q ' teardown-failed$' "$s/privacy-failed"; then
+      local active_pid active_start active_session
+      if read -r active_pid active_start active_session <"$root/active" &&
+         [[ "$active_pid" == "$lpid" && "$active_start" == "$lstart" && "$active_session" == "$s" ]] &&
+         [[ "$(c1_proc_start "$lpid")" == "$lstart" ]]; then
+        kill -TERM "$lpid" 2>/dev/null || true
+      fi
+      break
+    fi
+    sleep 1
+  done
+  c1_cleanup_session "$root" "$s"
+}
+
+# c1_start_watchdog ROOT SESSION LAUNCHER_PID LIBPATH
+c1_start_watchdog() {
+  local root=$1 s=$2 lpid=$3 lib=$4 lst
+  lst=$(c1_proc_start "$lpid"); [[ -n "$lst" ]] || return 1
+  # shellcheck disable=SC2016
+  c1_spawn "$s" watchdog bash -c 'source "$1"; c1_watchdog_loop "$2" "$3" "$4" "$5"' _ "$lib" "$root" "$s" "$lpid" "$lst" >/dev/null
+}
+
+# ------------------------------------------------------- environment (L-4) --
+# Test phases run under `env -i` with this allowlist only (no PLAYWRIGHT_*,
+# NODE_OPTIONS/NODE_PATH, npm_config_*, proxies or CA overrides are inherited).
+C1_ENV_ALLOW=(HOME PATH LANG LC_ALL TERM USER DISPLAY XAUTHORITY C1_HARNESS_SESSION)
+c1_clean_env() {
+  local v
+  printf '%s\0' env -i
+  for v in "${C1_ENV_ALLOW[@]}"; do
+    if [[ -n "${!v+x}" ]]; then printf '%s\0' "$v=${!v}"; fi
+  done
+}
+
+# c1_expected_browser FRONTEND NAME -> browserVersion from playwright-core/browsers.json
+c1_expected_browser() {
+  node -e 'const b=require(process.argv[1]+"/node_modules/playwright-core/browsers.json").browsers.find(x=>x.name===process.argv[2]);if(b)process.stdout.write(b.browserVersion)' "$1" "$2" 2>/dev/null
+}
+\n'"$C1_LT_SS"
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ ! "$line" =~ ^[1-9][0-9]*$ ]]; then
+          c1_err 'malformed preserved listener inode evidence; record retained'
+          inode_unresolved=1
+          continue
+        fi
+        ino=$line
+        if [[ -n "${live[$ino]:-}" ]]; then
+          c1_err "harness listener inode $ino is still listening on ${live[$ino]}"
+          inode_unresolved=1
+        fi
+      done <"$reg"
+    fi
+    if (( inode_unresolved )); then ok=1; else rm -f -- "$reg" || ok=1; fi
   fi
   return $ok
 }
