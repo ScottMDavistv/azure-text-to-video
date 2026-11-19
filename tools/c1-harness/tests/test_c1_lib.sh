@@ -300,6 +300,54 @@ malformed_preserved_pid() {
   c1_recover_before_start "$ROOT"
 }
 t 'N-4: malformed preserved PID lines remain unresolved across recovery' malformed_preserved_pid
+# N-8: dangling archived evidence must be inspected, retained, and must
+# prevent both cleanup and the next session, even though -e returns false.
+dangling_archive_recovery() {
+  local kind=$1 s reg rc=0; s=$(c1_session_new "$ROOT")
+  c1_cleanup_session "$ROOT" "$s"
+  reg="$ROOT/.${s##*/}.$kind"
+  ln -s "$s/never-created" "$reg"
+  [[ -L "$reg" && ! -e "$reg" ]] || return 1
+  c1_verify_cleanup "$s" >/dev/null 2>&1 || rc=$?
+  (( rc != 0 )) && [[ -L "$reg" ]] || return 1
+  rc=0; c1_cleanup_all "$ROOT" >/dev/null 2>&1 || rc=$?
+  (( rc != 0 )) && [[ -L "$reg" ]] || return 1
+  rc=0; c1_recover_before_start "$ROOT" >/dev/null 2>&1 || rc=$?
+  (( rc != 0 )) && [[ -L "$reg" && ! -e "$reg" ]] || return 1
+  rm -f -- "$reg"  # retire only this test's dangling symlink
+  c1_recover_before_start "$ROOT"
+}
+t 'N-8: dangling .pids evidence blocks cleanup and recovery without deletion' dangling_archive_recovery pids
+t 'N-8: dangling .inodes evidence blocks cleanup and recovery without deletion' dangling_archive_recovery inodes
+
+# Negative control: restore the vulnerable -e-only scan in an isolated copy.
+# Stub only verification to isolate scan sensitivity, not the mutation itself.
+n8_scan_negative_control() {
+  local kind=$1 d="$TMP/n8-mutant-$1" src="$HERE/../lib/c1-lib.sh"
+  mkdir -p "$d"
+  python3 -I - "$src" "$d/lib.sh" <<'PY'
+import pathlib, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+old = '    [[ -e "$record" || -L "$record" ]] || continue'
+new = '    [[ -e "$record" ]] || continue'
+assert source.count(old) == 1, 'missing exact N-8 scan guard'
+pathlib.Path(sys.argv[2]).write_text(source.replace(old, new))
+PY
+  ln -s "$d/missing-target" "$d/.session.n8.$kind"
+  [[ -L "$d/.session.n8.$kind" && ! -e "$d/.session.n8.$kind" ]] || return 1
+  local runner='source "$1"
+c1_verify_cleanup() { return 1; }
+c1_cleanup_all "$2"'
+  local rc=0
+  bash -c "$runner" _ "$src" "$d" >/dev/null 2>&1 || rc=$?
+  (( rc != 0 )) || return 1  # fixed scan must inspect the unresolved link
+  rc=0
+  bash -c "$runner" _ "$d/lib.sh" "$d" >/dev/null 2>&1 || rc=$?
+  (( rc == 0 )) && [[ -L "$d/.session.n8.$kind" ]]
+}
+t 'N-8 negative control: -e-only scan misses dangling .pids evidence' n8_scan_negative_control pids
+t 'N-8 negative control: -e-only scan misses dangling .inodes evidence' n8_scan_negative_control inodes
+
 
 # N-6: malformed or empty inode archives must block and survive recovery.
 invalid_preserved_inode() {
