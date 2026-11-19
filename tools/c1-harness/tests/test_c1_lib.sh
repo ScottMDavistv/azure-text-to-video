@@ -720,6 +720,65 @@ if command -v openssl >/dev/null && command -v curl >/dev/null && command -v pyt
     done
   }
   t 'unauthenticated-denial classifier: only 401/403 or https redirect to github.com[/subdomain] (M-2a)' unauth_table
+  # Codespaces browser forwarding currently issues an exact github.dev/pf-signin
+  # redirect. That route alone is NOT a privacy proof: the CLI must independently
+  # confirm the exact 6080 port is private, and the authenticated nonce must pass.
+  pf_signin_redirect_table() {
+    local bad
+    c1_codespaces_pf_signin_redirect 302 'https://github.dev/pf-signin' || return 1
+    c1_codespaces_pf_signin_redirect 302 'https://github.dev/pf-signin?return_to=fixture' || return 1
+    for bad in \
+      '301 https://github.dev/pf-signin' '307 https://github.dev/pf-signin' \
+      '302 http://github.dev/pf-signin' '302 https://github.dev/pf-signin/' \
+      '302 https://github.dev/pf-signin/extra' '302 https://github.dev/' \
+      '302 https://github.dev/pf-signin#fragment' \
+      '302 https://github.dev/pf-signin?x=1#fragment' \
+      '302 https://github.dev:443/pf-signin' \
+      '302 https://github.dev:8443/pf-signin' \
+      '302 https://github.dev@evil.example/pf-signin' \
+      '302 https://github.dev.evil.example/pf-signin' \
+      '302 https://evil.github.dev/pf-signin' \
+      '302 https://github.dev./pf-signin' \
+      '302 https://githubXdev/pf-signin' \
+      '302 https://github.dev/pf-signin?x=1#bad' \
+      '302 https://github.dev/pf-signin?'; do
+      local c l
+      read -r c l <<<"$bad"
+      if c1_codespaces_pf_signin_redirect "$c" "$l"; then
+        echo "accepted invalid Codespaces redirect: $bad"; return 1
+      fi
+    done
+  }
+  t 'exact Codespaces pf-signin matcher rejects spoofed/ambiguous redirects' pf_signin_redirect_table
+
+  pf_signin_with_gh_readback() (
+    local vis=$1 marker_mode=$2 calls="$PV/pf-calls-$1-$2" rc=0
+    : >"$calls"
+    c1_https_probe() {
+      local out=$2 hdr=${3:-}
+      if [[ -z "$hdr" ]]; then
+        printf '302 https://github.dev/pf-signin?return_to=fixture\\n'
+      else
+        printf 'auth\\n' >>"$calls"
+        if [[ $marker_mode == valid ]]; then printf 'nonce-marker\\n' >"$out"; else printf 'wrong-marker\\n' >"$out"; fi
+        printf '200 \\n'
+      fi
+    }
+    c1_gh_private() { [[ $vis == private ]]; }
+    c1_privacy_check "$BASE" '/nonce-marker.txt' nonce-marker "$PV/hdr" "$CA" || rc=$?
+    if [[ $vis == private && $marker_mode == valid ]]; then
+      (( rc == 0 )) && [[ $C1_PRIVACY_STATE == private ]] && grep -qx auth "$calls"
+    elif [[ $vis != private ]]; then
+      (( rc != 0 )) && [[ $C1_PRIVACY_STATE == unverified ]] && [[ ! -s "$calls" ]]
+    else
+      (( rc != 0 )) && [[ $C1_PRIVACY_STATE == unverified ]] && grep -qx auth "$calls"
+    fi
+  )
+  t 'Codespaces redirect requires GH private readback plus authenticated nonce' pf_signin_with_gh_readback private valid
+  t 'Codespaces redirect refuses public GH visibility before token probe' pf_signin_with_gh_readback public valid
+  t 'Codespaces redirect refuses org GH visibility before token probe' pf_signin_with_gh_readback org valid
+  t 'Codespaces redirect refuses unavailable GH visibility before token probe' pf_signin_with_gh_readback missing valid
+  t 'Codespaces redirect refuses wrong authenticated nonce despite GH private' pf_signin_with_gh_readback private invalid
   # shellcheck disable=SC2034  # read by the library
   transport_failures() {
     C1_PROBE_MAX_TIME=3
