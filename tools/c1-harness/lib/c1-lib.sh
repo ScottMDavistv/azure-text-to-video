@@ -799,7 +799,7 @@ c1_cleanup_all() {
   # A crash may leave only the post-cleanup inode/PID registers. Verify them,
   # never discard them to make a subsequent cleanup appear successful.
   for record in "$root"/.session.*.inodes "$root"/.session.*.pids; do
-    [[ -e "$record" ]] || continue
+    [[ -e "$record" || -L "$record" ]] || continue
     name=${record##*/}; name=${name#.}; s="$root/${name%.*}"
     [[ -n "${checked[$s]:-}" ]] && continue
     c1_verify_cleanup "$s" || failed=1
