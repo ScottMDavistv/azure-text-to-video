@@ -301,6 +301,87 @@ malformed_preserved_pid() {
 }
 t 'N-4: malformed preserved PID lines remain unresolved across recovery' malformed_preserved_pid
 
+# N-6: malformed or empty inode archives must block and survive recovery.
+invalid_preserved_inode() {
+  local payload=$1 s reg rc=0; s=$(c1_session_new "$ROOT")
+  c1_cleanup_session "$ROOT" "$s"
+  reg="$ROOT/.$(basename "$s").inodes"
+  printf "%s" "$payload" >"$reg"
+  c1_verify_cleanup "$s" 2>/dev/null || rc=$?
+  (( rc != 0 )) && [[ -f "$reg" ]] || return 1
+  c1_recover_before_start "$ROOT" 2>/dev/null && return 1
+  [[ -f "$reg" ]] || return 1
+  rm -f -- "$reg"  # retire only the test fixture archive
+  c1_recover_before_start "$ROOT"
+}
+t "N-6: malformed inode archive fails closed" invalid_preserved_inode "garbage"
+t "N-6: zero inode archive fails closed" invalid_preserved_inode "0"
+t "N-6: unexpected extra fields fail closed" invalid_preserved_inode "123 456"
+t "N-6: empty inode archive fails closed" invalid_preserved_inode ""
+
+symlink_preserved_inode() {
+  local s reg target rc=0; s=$(c1_session_new "$ROOT")
+  c1_cleanup_session "$ROOT" "$s"
+  reg="$ROOT/.$(basename "$s").inodes"; target="$ROOT/inode-test-target"
+  printf "123456789\n" >"$target"
+  ln -s "$target" "$reg"
+  c1_verify_cleanup "$s" 2>/dev/null || rc=$?
+  (( rc != 0 )) && [[ -L "$reg" && -s "$target" ]] || return 1
+  rm -f -- "$reg" "$target"
+  c1_recover_before_start "$ROOT"
+}
+t "N-6: symlinked inode archive rejected without affecting target" symlink_preserved_inode
+# N-6/N-7: execute the actual cleanup logic with real read permission
+# denial. Stub unrelated port/listener checks to isolate the archive guard.
+unreadable_archive_probe() {
+  local library=$1 kind=$2 d s reg rc=0 runner
+  d=$(mktemp -d /tmp/c1-unread-archive.XXXXXX) || return 1
+  chmod 777 "$d"
+  cp -- "$library" "$d/lib.sh"; chmod 644 "$d/lib.sh"
+  s="$d/session.unreadable"; reg="$d/.session.unreadable.$kind"
+  if [[ "$kind" == pids ]]; then printf '123456789 1\n' >"$reg"
+  else printf '123456789\n' >"$reg"; fi
+  chmod 000 "$reg"
+  runner='source "$1"
+c1_marked_pids() { :; }
+c1_port_free() { return 0; }
+c1_listen_tables() { C1_LT_PROC=""; C1_LT_SS=""; return 0; }
+rc=0
+c1_verify_cleanup "$2" >/dev/null 2>&1 || rc=$?
+(( rc != 0 )) && [[ -e "$3" ]]'
+  if (( EUID == 0 )); then
+    if command -v setpriv >/dev/null; then
+      setpriv --reuid=65534 --regid=65534 --clear-groups bash -c "$runner" _ "$d/lib.sh" "$s" "$reg" || rc=$?
+    else
+      rm -rf -- "$d"
+      return 2
+    fi
+  else
+    bash -c "$runner" _ "$d/lib.sh" "$s" "$reg" || rc=$?
+  fi
+  chmod 600 "$reg" 2>/dev/null || true
+  rm -rf -- "$d"
+  (( rc == 0 ))
+}
+if (( EUID != 0 )) || command -v setpriv >/dev/null; then
+  t 'N-6: unreadable inode archive fails closed and is retained (real EACCES)' \
+    unreadable_archive_probe "$HERE/../lib/c1-lib.sh" inodes
+  t 'N-7: unreadable PID archive fails closed and is retained (real EACCES)' \
+    unreadable_archive_probe "$HERE/../lib/c1-lib.sh" pids
+  unreadable_pid_guard_mutant_caught() {
+    local d="$TMP/n7-mutant" source_lib="$HERE/../lib/c1-lib.sh"
+    sed 's/if \[\[ ! -f "\$preg" || ! -r "\$preg" \]\]; then/if false; then/' \
+      "$source_lib" >"$d"
+    ! cmp -s "$source_lib" "$d" || return 1
+    ! unreadable_archive_probe "$d" pids
+  }
+  t 'N-7 negative control: disabled PID readability guard is detected' unreadable_pid_guard_mutant_caught
+else
+  skip 'N-6/N-7 unreadable archive EACCES tests (root requires setpriv)'
+fi
+
+
+
 group_members() {      # a harness group member that dropped the marker (env -i) is still removed
   local s leader child; s=$(c1_session_new "$ROOT")
   leader=$(c1_spawn "$s" grp bash -c 'env -i sleep 300 & echo $! >"$0/child"; wait' "$s")
