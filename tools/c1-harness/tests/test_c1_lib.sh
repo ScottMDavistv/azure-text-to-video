@@ -2373,6 +2373,18 @@ if [[ -n "${TOP:=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)
     c1_check_vite_host_guard "$d"
   }
   t 'the pinned PR #60 Vite/Playwright configuration passes the 5173 host-guard check (L-11)' pinned_vite_guard
+  pinned_webrtc_policy() {
+    local d="$TMP/pinwebrtc" f
+    mkdir -p "$d/frontend/e2e" "$d/harness/supplemental"
+    for f in e2e/c1-webrtc-policy.mjs e2e/c1-webrtc-udp-check.mjs playwright.config.mjs; do
+      git -C "$TOP" show "$C1_PW_SHA_APPROVED:frontend/$f" >"$d/frontend/$f"
+    done
+    cp "$HERE/../supplemental/playwright.supplemental.config.mjs" "$d/harness/supplemental/"
+    c1_check_webrtc_policy "$d" "$d/harness"
+    sed -i 's/launchOptions: { args: \[WEBRTC_UDP_POLICY_ARG\] }/launchOptions: { args: [] }/' "$d/frontend/playwright.config.mjs"
+    ! c1_check_webrtc_policy "$d" "$d/harness"
+  }
+  t 'L-2 pinned browser policies and STUN positive/zero controls are required; dropped flag fails closed' pinned_webrtc_policy
 else skip 'pinned PR #60 integration (pinned commits not in local history)'; fi
 
 echo '# harness diff scope after trusted-main workflow reconciliation'
