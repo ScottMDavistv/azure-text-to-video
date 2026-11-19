@@ -822,7 +822,7 @@ c1_verify_cleanup() {
   (( rc == 0 )) || { if (( rc == 2 )); then c1_err "cannot prove port $C1_APP_PORT is closed (listener evidence unavailable)"; else c1_err "port $C1_APP_PORT still listening"; fi; ok=1; }
   local preg pid st
   preg="$(dirname -- "$s")/.${s##*/}.pids"
-  if [[ -e "$preg" ]]; then
+  if [[ -e "$preg" || -L "$preg" ]]; then
     local unresolved=0 extra
     if [[ ! -f "$preg" || ! -r "$preg" ]]; then
       c1_err 'preserved PID evidence is not a readable regular file'
