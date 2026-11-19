@@ -65,9 +65,9 @@ def test_action_group_must_be_full_resource_id():
      .replace("replicaTimeout: 300", "replicaTimeout: 86400", 1), None),
     ("P6 plaintext provider secret", lambda s: s.replace(
         "name: 'ENABLE_PROJECT_ROUTES', value: 'false'",
-        "name: 'ENABLE_PROJECT_ROUTES', value: 'false' }\\n"
+        "name: 'ENABLE_PROJECT_ROUTES', value: 'false' }\n"
         "            { name: 'FAL_API_KEY', value: 'sample-secret'", 1), None),
-    ("P7 unconditional extra job", lambda s: s + "\\n" + s[
+    ("P7 unconditional extra job", lambda s: s + "\n" + s[
         s.index("resource scheduledReconciler "):s.index("output scheduledJobName")]
         .replace("resource scheduledReconciler ", "resource rogueJob ", 1)
         .replace("= if (activateReconciliation) {", "= {", 1)
