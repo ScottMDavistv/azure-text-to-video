@@ -36,7 +36,7 @@ const offlineAllPass = () => report([
 const meta = {
   AUTH_SHA: AUTH, PW_SHA: SHA, HARNESS_SHA: 'a'.repeat(40), HARNESS_CLEAN: 'true',
   CHECKOUT_VERIFIED: 'PASS', LOCALHOST: 'PASS', MODE: 'supervised',
-  CHECKS: 'harness_clean,auth_ancestor_and_approved_diff,production_review_status_recorded,exact_head_clean_worktree,vite_host_guard,localhost_loopback_only,ports_free,clean_after_dependency_install,listener_evidence_available',
+  CHECKS: 'harness_clean,auth_ancestor_and_approved_diff,production_review_status_recorded,exact_head_clean_worktree,vite_host_guard,webrtc_policy_pinned,localhost_loopback_only,ports_free,clean_after_dependency_install,listener_evidence_available',
   PLAYWRIGHT_VERSION: '1.65.1', EXPECTED_PLAYWRIGHT_VERSION: '1.65.1',
   BROWSER_VERSION: '159.0.8154.6', EXPECTED_BROWSER_VERSION: '159.0.8154.6',
   BROWSER_HEADED_VERSION: '159.0.8154.6', EXPECTED_HEADED_BROWSER_VERSION: '159.0.8154.6',
@@ -361,7 +361,7 @@ test('L-2: per-test summary lines are sanitized and title-allowlisted', () => {
 })
 
 test('N-1: R1 FAILS when any mandatory preflight check is missing from the evidence', () => {
-  for (const drop of ['auth_ancestor_and_approved_diff', 'exact_head_clean_worktree', 'harness_clean', 'clean_after_dependency_install', 'vite_host_guard']) {
+  for (const drop of ['auth_ancestor_and_approved_diff', 'exact_head_clean_worktree', 'harness_clean', 'clean_after_dependency_install', 'vite_host_guard', 'webrtc_policy_pinned']) {
     const CHECKS = meta.CHECKS.split(',').filter(c => c !== drop).join(',')
     const r = ready({ meta: { ...meta, CHECKS } })
     assert.equal(row(r, 'R1').verdict, 'FAIL', drop); assert.match(row(r, 'R1').detail, new RegExp('MISSING: ' + drop))
@@ -476,6 +476,15 @@ test('I-5: R10 requires the literal Playwright 1.65.1 and Chromium 159.0.8154.6,
   }
   assert.equal(row(ready({}), 'R10').verdict, 'PASS')
   assert.equal(row(ready({ meta: { ...meta, MODE: 'offline-only', ...c153 } }), 'R10').verdict, 'FAIL')
+})
+
+test('L-2: webRTC browser policy is mandatory in preflight evidence and suite', () => {
+  assert.ok(REQUIRED_CHECKS.includes('webrtc_policy_pinned'))
+  const sess = readFileSync(join(here, '../c1-session.sh'), 'utf8')
+  assert.match(sess, /c1_check_webrtc_policy "\\$WT" "\\$HERE" \\|\\| return 1; check webrtc_policy_pinned/)
+  assert.match(sess, /c1-webrtc-udp-check\\.mjs/)
+  assert.match(libText, /c1_check_webrtc_policy\\(\\)/)
+  assert.match(libText, /C1_PROD_CERTIFIED='frontend\\/src\\/App\\.tsx@a0b753b/)
 })
 
 test('REQUIRED_CHECKS includes the L-11 Vite host-guard check, and the launcher records it', () => {
