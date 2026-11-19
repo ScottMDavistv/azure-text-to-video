@@ -757,11 +757,11 @@ if command -v openssl >/dev/null && command -v curl >/dev/null && command -v pyt
     c1_https_probe() {
       local out=$2 hdr=${3:-}
       if [[ -z "$hdr" ]]; then
-        printf '302 https://github.dev/pf-signin?return_to=fixture\\n'
+        printf '302 https://github.dev/pf-signin?return_to=fixture\n'
       else
-        printf 'auth\\n' >>"$calls"
-        if [[ $marker_mode == valid ]]; then printf 'nonce-marker\\n' >"$out"; else printf 'wrong-marker\\n' >"$out"; fi
-        printf '200 \\n'
+        printf 'auth\n' >>"$calls"
+        if [[ $marker_mode == valid ]]; then printf 'nonce-marker\n' >"$out"; else printf 'wrong-marker\n' >"$out"; fi
+        printf '200 \n'
       fi
     }
     c1_gh_private() { [[ $vis == private ]]; }
