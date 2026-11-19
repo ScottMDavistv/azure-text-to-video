@@ -767,16 +767,37 @@ if command -v openssl >/dev/null && command -v curl >/dev/null && command -v pyt
         printf '200 \n'
       fi
     }
-    c1_gh_private() { [[ $vis == private ]]; }
+    local gh_calls="$PV/pf-gh-$1-$2-${3:-matching}"
+    : >"$gh_calls"
+    c1_gh_private() { printf 'gh\\n' >>"$gh_calls"; [[ $vis == private ]]; }
     c1_privacy_check "$BASE" '/nonce-marker.txt' nonce-marker "$PV/hdr" "$CA" || rc=$?
-    if [[ $vis == private && $marker_mode == valid ]]; then
-      (( rc == 0 )) && [[ $C1_PRIVACY_STATE == private ]] && grep -qx auth "$calls"
+    if [[ $origin_mode != matching ]]; then
+      (( rc != 0 )) && [[ $C1_PRIVACY_STATE == unverified ]] &&
+        [[ ! -s "$calls" && ! -s "$gh_calls" ]]
+    elif [[ $vis == private && $marker_mode == valid ]]; then
+      (( rc == 0 )) && [[ $C1_PRIVACY_STATE == private ]] && grep -qx auth "$calls" && grep -qx gh "$gh_calls"
     elif [[ $vis != private ]]; then
       (( rc != 0 )) && [[ $C1_PRIVACY_STATE == unverified ]] && [[ ! -s "$calls" ]]
     else
       (( rc != 0 )) && [[ $C1_PRIVACY_STATE == unverified ]] && grep -qx auth "$calls"
     fi
   )
+  # Mutate only the loaded function in a subshell: without the production origin
+  # guard, the mismatched-origin rejection oracle MUST fail.
+  pf_signin_origin_binding_mutation() (
+    local original mutated
+    original=$(declare -f c1_privacy_check)
+    [[ $original == *'unexpected forwarding origin'* ]] || return 1
+    mutated=$(printf '%s\\n' "$original" |
+      sed '/if \\[\\[ "\\$base" != "\\$(c1_codespace_base "\\$C1_NOVNC_PORT")" \\]\\]; then/,/^[[:space:]]*fi$/d')
+    [[ $mutated != "$original" && $mutated != *'unexpected forwarding origin'* ]] || return 1
+    eval "$mutated"
+    if pf_signin_with_gh_readback private valid mismatched; then
+      echo 'origin-binding mutation escaped rejection oracle'
+      return 1
+    fi
+  )
+  t 'Codespaces origin-binding test detects removed production guard (mutation control)' pf_signin_origin_binding_mutation
   t 'Codespaces redirect requires GH private readback plus authenticated nonce' pf_signin_with_gh_readback private valid
   t 'Codespaces redirect refuses public GH visibility before token probe' pf_signin_with_gh_readback public valid
   t 'Codespaces redirect refuses org GH visibility before token probe' pf_signin_with_gh_readback org valid
