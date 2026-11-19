@@ -293,9 +293,122 @@ session() {
   # --- automated offline phases (approved suite, unmodified) ---------------
   run_phase static-mutation "$FE" pw_env static-mutation node e2e/c1-mutation-check.mjs
   if [[ -f "$FE/e2e/run-browser-mutations.mjs" ]]; then
-    run_phase browser-mutation "$FE" pw_env browser-mutation node e2e/run-browser-mutations.mjs
+    # R2B now includes the L-2 UDP/STUN positive control and guarded zero-delivery
+    # probe. A failed or unverifiable UDP probe is an absolute pre-LIVE stop.
+    run_phase browser-mutation "$FE" pw_env browser-mutation bash -ec 'node e2e/run-browser-mutations.mjs && node e2e/c1-webrtc-udp-check.mjs'
+    if ! tail -n 1 "$S/phases" | grep -Eq '^browser-mutation[|]ran[|][^|]*[|][^|]*[|]0 "$FE" pw_env offline npx --no-install playwright test --config=playwright.config.mjs --reporter=json
+  run_phase unconfigured "$FE" pw_env unconfigured C1_UNCONFIGURED=1 npx --no-install playwright test --config=playwright.config.mjs --reporter=json
+  # --- supervised phases ----------------------------------------------------
+  if (( offline_only )); then
+    skip_phase consent-denial; skip_phase live; skip_phase cancelled-logout
   else
-    skip_phase browser-mutation
+    pass=$(c1_gen_password)
+    if ! start_private_desktop "$pass"; then
+      pass=''
+      c1_err 'private desktop NOT served; supervised rows stay INCOMPLETE and the privacy row FAILS'
+      skip_phase consent-denial; skip_phase live; skip_phase cancelled-logout
+    else
+      bhver=$(cd "$FE" && clean_node --input-type=module -e \
+        "import { chromium } from '@playwright/test'; const b = await chromium.launch({ headless: false }); console.log(b.version()); await b.close()" || echo unknown)
+      print_access "$pass"; pass=''
+      read -r -p "Press Enter once the desktop is visible in your browser: " answer
+      while :; do
+        read -r -p "Public SPA client ID (GUID; NOT a secret, not saved): " CLIENT_ID
+        [[ "$CLIENT_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] && break
+        c1_warn 'not a GUID; try again (Ctrl-C aborts and cleans up)'
+      done
+      stage_supplemental
+      if privacy_gate && ask_phase consent-denial 'STEP A — Consent denial' \
+'Use a test account that has NEVER consented to this app (or revoke its consent first at
+https://myapps.microsoft.com). In the desktop: sign in; on the Microsoft PERMISSIONS (consent)
+prompt click Cancel. Then click Resume (▶) in the Playwright Inspector.'; then
+        att_prior=$(ask_yes_no 'Attestation 1/2: this test account has NO existing consent to this app.')
+        run_supplemental consent-denial
+        att_prompt=$(ask_yes_no 'Attestation 2/2: Microsoft showed the PERMISSIONS (consent) prompt and you clicked Cancel on it.')
+      elif ! grep -q '^consent-denial|' "$S/phases"; then skip_phase consent-denial; fi
+      if privacy_gate && ask_phase live 'STEP B — Approved LIVE suite: initial consent + sign-in, then cancelled login' \
+'Test 1: complete Microsoft sign-in, MFA and initial consent in the popup, then Resume. Automated checks
+run. When it clicks Sign out, complete the Microsoft sign-out popup, then Resume.
+Test 2: a sign-in popup opens; CLOSE it without signing in, then Resume.'; then
+        run_phase live "$FE" pw_env live C1_LIVE=1 C1_EXPECTED_SHA="$PW" VITE_ENTRA_SPA_CLIENT_ID="$CLIENT_ID" \
+          npx --no-install playwright test --config=playwright.config.mjs --headed --workers=1 --reporter=json
+      elif ! grep -q '^live|' "$S/phases"; then skip_phase live; fi
+      if privacy_gate && ask_phase cancelled-logout 'STEP C — Cancelled logout' \
+'Sign in normally in the popup, then Resume. The harness clicks Sign out: when the Microsoft
+"Pick an account to sign out" popup appears, CLOSE it (X) without choosing an account, then Resume.'; then
+        run_supplemental cancelled-logout
+      elif ! grep -q '^cancelled-logout|' "$S/phases"; then skip_phase cancelled-logout; fi
+      CLIENT_ID=''
+      [[ ! -e "$S/privacy-failed" ]] || PORT_PRIVATE=failed
+    fi
+  fi
+  # --- sanitized evidence -----------------------------------------------------
+  # M-3: the desktop listener verdict is evidence in its own right; a missing or
+  # unreadable record in supervised mode is "unavailable", never "verified".
+  local lstate=not-started ldetail=''
+  if (( ! offline_only )); then
+    lstate=unavailable
+    if [[ -r "$S/listener-state" ]]; then { IFS= read -r lstate; IFS= read -r ldetail; } <"$S/listener-state" || true; fi
+    [[ "$lstate" =~ ^(verified|failed-unexpected|failed-unavailable)$ ]] || lstate=unavailable
+    # The record must describe exactly the loopback noVNC listener to stay "verified".
+    [[ "$lstate" != verified || "$ldetail" =~ ^127\.0\.0\.1:$C1_NOVNC_PORT\ pid=[0-9]+\ comm=[A-Za-z0-9._-]*\ ino=[0-9]+$ ]] || lstate=unavailable
+  fi
+  {
+    printf 'AUTH_SHA=%s\nPW_SHA=%s\nHARNESS_SHA=%s\nHARNESS_CLEAN=true\n' "$AUTH" "$PW" "$(git -C "$REPO" rev-parse HEAD)"
+    printf 'CHECKOUT_VERIFIED=PASS\nCHECKS=%s\n' "$(IFS=,; echo "${CHECKS[*]}")"
+    printf 'PLAYWRIGHT_VERSION=%s\nEXPECTED_PLAYWRIGHT_VERSION=%s\n' "$pwver" "$C1_PLAYWRIGHT_VERSION"
+    printf 'BROWSER_VERSION=%s\nEXPECTED_BROWSER_VERSION=%s\n' "$bver" "$expb"
+    printf 'BROWSER_HEADED_VERSION=%s\nEXPECTED_HEADED_BROWSER_VERSION=%s\nNODE_VERSION=%s\n' "$bhver" "$expbh" "$(node --version)"
+    printf 'SESSION_START=%s\nSESSION_END=%s\n' "$start" "$(c1_utc)"
+    printf 'MODE=%s\nCODESPACES=%s\nPORT_PRIVATE=%s\nLOCALHOST=PASS\n' \
+      "$( (( offline_only )) && echo offline-only || echo supervised)" "$([[ "${CODESPACES:-}" == true ]] && echo true || echo false)" "$PORT_PRIVATE"
+    printf 'ATTEST_NO_PRIOR_CONSENT=%s\nATTEST_CONSENT_PROMPT_CANCELLED=%s\n' "$att_prior" "$att_prompt"
+    printf 'PROD_REVIEW_PENDING=%s\n' "$PROD_PENDING"
+    printf 'LISTENER_EVIDENCE=%s\nLISTENER_DETAIL=%s\n' "$lstate" "$ldetail"
+  } >"$S/meta"
+  # Exact-head re-check AFTER the run: nothing may have changed the checkout or harness.
+  c1_verify_clean_tree "$WT" "$PW" || sed -i 's/^CHECKOUT_VERIFIED=PASS$/CHECKOUT_VERIFIED=FAIL/' "$S/meta"
+  c1_verify_harness_clean "$REPO" "$HARNESS_REL" || sed -i 's/^HARNESS_CLEAN=true$/HARNESS_CLEAN=false/' "$S/meta"
+  local outv; outv=$(clean_node "$HERE/lib/c1-evidence.mjs" --session="$S" --out="$EVIDENCE_DIR")
+  local ev rp verdict; ev=$(sed -n 1p <<<"$outv"); rp=$(sed -n 2p <<<"$outv"); verdict=$(sed -n 3p <<<"$outv")
+  # --- cleanup and verification ---------------------------------------------
+  local sess=$S; S=''
+  unset C1_HARNESS_SESSION
+  local cv='PASS — desktop and test processes stopped, ports 5173/6080 closed, session directory (VNC socket, X cookie, probe token files, raw reports, browser profiles) deleted'
+  if ! c1_cleanup_session "$ROOT" "$sess" || ! c1_verify_cleanup "$sess"; then cv='FAIL — see terminal; run c1-session.sh cleanup'; fi
+  sed -i "s|@@C1_CLEANUP_VERDICT@@|$cv ($(c1_utc))|" "$ev" "$rp"
+  [[ "$cv" == PASS* ]] || { verdict=FAIL; sed -i 's/^\*\*Harness summary: [A-Z ]*\.\*\*/**Harness summary: FAIL.**/' "$ev" "$rp"; }
+  printf '\nC1 harness summary: %s\nEvidence:        %s\nReview package:  %s\n' "$verdict" "$ev" "$rp"
+  printf 'Paste the review package into a SEPARATE Claude session for independent security review.\n'
+  # Exit status: non-zero on FAIL or failed cleanup; INCOMPLETE/READY exit 0.
+  [[ "$cv" == PASS* && "$verdict" != FAIL ]]
+}
+
+main() {
+  local sub=${1:-run} offline=0
+  [[ "$sub" == --offline-only ]] && { sub=run; offline=1; }
+  [[ "${2:-}" == --offline-only ]] && offline=1
+  case $sub in
+    run) session "$offline" ;;
+    preflight) scrub_env; c1_recover_before_start "$ROOT" || return 1; preflight || return 1; install_deps || return 1; c1_log "preflight PASS: ${CHECKS[*]}" ;;
+    cleanup) c1_cleanup_all "$ROOT"; c1_port_free "$C1_NOVNC_PORT" && c1_log 'no harness sessions remain' ;;
+    purge) c1_cleanup_all "$ROOT"
+           if [[ -e "$WT" ]]; then git -C "$REPO" worktree remove --force "$WT" 2>/dev/null || c1_safe_rm "$WT" "$CACHE"; fi
+           git -C "$REPO" worktree prune; rm -f "$CACHE"/deps-ok-*; c1_log 'purged cached approved worktree' ;;
+    selftest) bash "$HERE/tests/test_c1_lib.sh" && node --test "$HERE"/tests/*.test.mjs ;;
+    -h|--help|help) usage ;;
+    *) usage; return 2 ;;
+  esac
+}
+
+main "$@"
+; then
+      c1_err 'L-2 browser mutation or WebRTC UDP proof failed; live C1 is forbidden'
+      return 1
+    fi
+  else
+    c1_err 'L-2 browser mutation runner missing; live C1 is forbidden'
+    return 1
   fi
   run_phase offline "$FE" pw_env offline npx --no-install playwright test --config=playwright.config.mjs --reporter=json
   run_phase unconfigured "$FE" pw_env unconfigured C1_UNCONFIGURED=1 npx --no-install playwright test --config=playwright.config.mjs --reporter=json
