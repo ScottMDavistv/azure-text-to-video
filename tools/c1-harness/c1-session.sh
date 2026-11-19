@@ -65,6 +65,7 @@ preflight() {
   check production_review_status_recorded
   c1_prepare_worktree "$REPO" "$PW" "$WT" || return 1; check exact_head_clean_worktree
   c1_check_vite_host_guard "$WT" || return 1; check vite_host_guard
+  c1_check_webrtc_policy "$WT" "$HERE" || return 1; check webrtc_policy_pinned
   c1_check_localhost || return 1; check localhost_loopback_only
   c1_port_free "$C1_APP_PORT" || { c1_err "port $C1_APP_PORT in use; stop the existing dev server (fresh server is mandatory)"; return 1; }
   c1_port_free "$C1_NOVNC_PORT" || { c1_err "port $C1_NOVNC_PORT in use; run: c1-session.sh cleanup"; return 1; }
