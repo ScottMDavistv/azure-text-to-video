@@ -664,6 +664,24 @@ c1_check_vite_host_guard() {
     || { c1_err 'approved Playwright webServer does not start Vite with --host 127.0.0.1'; return 1; }
 }
 
+# c1_check_webrtc_policy WORKTREE HARNESS_DIR -> fail-closed source-binding
+# check before the browser starts. This is a static binding check, NOT a
+# substitute for the real UDP positive-control/zero-delivery browser phase.
+c1_check_webrtc_policy() {
+  local fe=$1/frontend harness=$2
+  local policy=$fe/e2e/c1-webrtc-policy.mjs probe=$fe/e2e/c1-webrtc-udp-check.mjs
+  local cfg=$fe/playwright.config.mjs supp=$harness/supplemental/playwright.supplemental.config.mjs
+  local flag="--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+  [[ -f "$policy" && -f "$probe" && -f "$cfg" && -f "$supp" ]] || { c1_err 'L-2: required browser policy/probe/config missing'; return 1; }
+  grep -Fxq "export const WEBRTC_UDP_POLICY_ARG = '$flag'" "$policy" || { c1_err 'L-2: pinned browser policy absent'; return 1; }
+  grep -Fq "import { WEBRTC_UDP_POLICY_ARG } from './e2e/c1-webrtc-policy.mjs'" "$cfg" || { c1_err 'L-2: configured tests do not import the pinned WebRTC policy'; return 1; }
+  grep -Fq 'launchOptions: { args: [WEBRTC_UDP_POLICY_ARG] }' "$cfg" || { c1_err 'L-2: configured tests do not enforce the browser policy'; return 1; }
+  grep -Fq 'launchOptions: { args: [WEBRTC_UDP_POLICY_ARG] }' "$supp" || { c1_err 'L-2: supplemental live browser lacks policy'; return 1; }
+  grep -Fq "join(frontend, 'e2e/c1-webrtc-policy.mjs')" "$supp" || { c1_err 'L-2: supplemental policy is not sourced from pinned frontend'; return 1; }
+  grep -Fq 'assert.ok(udpPackets.length > 0' "$probe" || { c1_err 'L-2: missing unrestricted-browser UDP positive control'; return 1; }
+  grep -Fq 'assert.equal(udpPackets.length, 0' "$probe" || { c1_err 'L-2: missing zero-delivery assertion'; return 1; }
+}
+
 c1_missing_apt_packages() {
   local p
   for p in $C1_APT_PACKAGES; do
