@@ -2,7 +2,7 @@
 
 ## Tier 1: unattended on frontend pull requests
 
-The existing `Frontend Quality Gates` pull-request workflow runs the committed frontend unit tests, a pinned Playwright browser suite, seven intentionally defective *browser-level* mutations in disposable temporary Git worktrees, lint and the production build. It runs **against the exact PR head SHA**, then restores GitHub's PR merge checkout for lint/build compatibility checks. GitHub Actions job uses read-only permissions and no deployment credentials or Microsoft identity. The job has a 25-minute upper bound and its browser step a 15-minute limit. It uses standard GitHub-hosted runners and therefore consumes GitHub Actions minutes; any spending limits and availability of included credits remain controlled in GitHub billing settings.
+The existing `Frontend Quality Gates` pull-request workflow runs frontend unit tests, a pinned Playwright browser suite, seven browser mutations in disposable Git worktrees, lint and the production build. The browser step checks out the exact PR head SHA, then restores GitHub's PR merge checkout for lint and build compatibility checks. The job has read-only permissions, a 15-minute limit and a 15-minute browser step limit. The GitHub-hosted runner consumes GitHub Actions minutes.
 
 The synthetic browser tests initialize the real `entraAuth.ts` and interact with the real React UI, but replace instance methods of the MSAL client in browser memory. They exercise synthetic login, token scope acquisition, logout, login denial, cancelled login, consent failure after an interaction-required fallback, and cancelled logout. **No real Entra token is issued** and the synthetic tests cannot demonstrate MFA, tenant registration or a real delegated grant.
 
@@ -22,7 +22,7 @@ PR #46 is merged into `main` (reviewed auth head `6b62c05aad50620f60f4d26ad2821b
 
 ### Minimal owner procedure
 
-1. Keep Codespaces ports 5900 and 5901 **unforwarded**; use only privately forwarded, authenticated port **6080** to access the noVNC desktop. Xvfb is display `:99` and noVNC proxies VNC `127.0.0.1:5901`.
+1. Use the independently reviewed C1 harness for the supervised Codespaces desktop. Verify private, authenticated forwarding for noVNC on port **6080** through the harness before sign-in. Keep X11 and VNC TCP ports unforwarded and use the harness-managed Unix socket for VNC.
 2. Use an authorized **dedicated non-admin test account** with no financial/provider privileges; do not place its password, recovery factors, access tokens, cookies or browser profile in the repo, GitHub secrets, ChatGPT, or Claude. Follow tenant MFA/Conditional Access policies; do not disable or circumvent them.
 3. Check out a clean worktree at the exact reviewed PR #60 SHA, confirm the current GitHub PR head still matches, and run:
    ```bash
@@ -34,7 +34,7 @@ PR #46 is merged into `main` (reviewed auth head `6b62c05aad50620f60f4d26ad2821b
    C1_LIVE=1 npx playwright test --config=playwright.config.mjs --headed --workers=1 --grep '^LIVE:'
    ```
 4. In the private noVNC desktop, complete sign-in and consent using only the verified Microsoft domain. Pause/resume the Playwright Inspector. Perform the separate consent-denial and cancelled-logout checks using an appropriately unconsented test user where tenant policy permits; if tenant consent or app registration changes would be required, STOP and request separate approval.
-5. Record only exact SHA, browser/version, UTC time, test outcomes, and sanitized MSAL error codes (never JWTs, tokens, HAR, cookies, auth screenshots or personal account information). Independently send that evidence to Claude for a LIVE C1 verdict. Require Claude to verify registered SPA redirect, delegated `access_as_user`, account cache after login/logout, Microsoft redirect hosts, and all leftover LIVE-ONLY cases.
+5. Record only the exact SHA, browser/version, UTC time, test outcomes and sanitized MSAL error codes. The independent reviewer verifies the registered SPA redirect, delegated `access_as_user`, Microsoft redirect hosts, local MSAL account/cache state and each supervised cancellation outcome. Microsoft provider sign-out stays **INCOMPLETE** pending separate evidence that the provider session ended.
 6. Tear down the temporary browser/VNC session, remove temp test output, and close private forwarded port 6080.
 
 ### Should Tier 2 itself become unattended?

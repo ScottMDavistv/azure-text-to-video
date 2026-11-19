@@ -41,16 +41,21 @@ async function installSyntheticAccount(page, { deniedLogin = false, cancelledLog
     const auth = await initializeAuth()
     const account = { homeAccountId: 'synthetic-only', username: 'tier1@example.invalid', name: 'Tier 1 Synthetic Account' }
     let active = null
-    window.__tier1 = { loginScopes: [], tokenScopes: [], popupScopes: [], logoutCalls: 0, redirectCalls: 0, cleared: [], activeId: () => active?.homeAccountId ?? null }
+    let cachedAccount = null
+    window.__tier1 = { loginScopes: [], tokenScopes: [], popupScopes: [], logoutCalls: 0, redirectCalls: 0, cleared: [], activeId: () => active?.homeAccountId ?? null, cachedId: () => cachedAccount?.homeAccountId ?? null }
     auth.loginPopup = async ({ scopes }) => {
       window.__tier1.loginScopes = scopes
       if (flags.deniedLogin || flags.cancelledLogin) throw Object.assign(new Error('Synthetic auth rejected'), { errorCode: flags.cancelledLogin ? 'user_cancelled' : 'access_denied' })
+      cachedAccount = account
       return { account }
     }
     auth.setActiveAccount = value => { active = value }
     auth.getActiveAccount = () => active
-    auth.getAllAccounts = () => active ? [active] : []
-    auth.clearCache = async ({ account: selected } = {}) => { window.__tier1.cleared.push(selected?.homeAccountId ?? null) }
+    auth.getAllAccounts = () => cachedAccount ? [cachedAccount] : []
+    auth.clearCache = async ({ account: selected } = {}) => {
+      window.__tier1.cleared.push(selected?.homeAccountId ?? null)
+      if (!selected || selected.homeAccountId === cachedAccount?.homeAccountId) cachedAccount = null
+    }
     auth.acquireTokenSilent = async ({ scopes }) => {
       window.__tier1.tokenScopes = scopes
       if (flags.deniedApi) throw new Error('Synthetic delegated permission denied')
@@ -65,7 +70,7 @@ async function installSyntheticAccount(page, { deniedLogin = false, cancelledLog
       window.__tier1.logoutCalls++
       if (!selected || selected.homeAccountId !== account.homeAccountId) throw new Error('Incorrect account selected')
       if (flags.cancelledLogout) throw Object.assign(new Error('Synthetic user cancelled logout'), { errorCode: 'user_cancelled' })
-      active = null
+      cachedAccount = null
     }
   }, { deniedLogin, cancelledLogin, cancelledLogout, deniedApi })
 }
@@ -103,8 +108,8 @@ test('Tier1 synthetic sign-in, delegated scope, silent token and logout UI', asy
   await assertNoCredentialMaterial(page, context)
   await page.getByRole('button', { name: 'Sign out' }).click()
   await expect(page.getByRole('button', { name: 'Sign in with Microsoft' })).toBeVisible()
-  await expect(page.getByRole('status').first()).toContainText('Signed out')
-  expect(await page.evaluate(() => window.__tier1.logoutCalls)).toBe(1)
+  await expect(page.getByRole('status').first()).toHaveText('Signed out locally. Microsoft SSO session may remain active.')
+  expect(await page.evaluate(() => ({ logoutCalls: window.__tier1.logoutCalls, active: window.__tier1.activeId(), cached: window.__tier1.cachedId() }))).toEqual({ logoutCalls: 1, active: null, cached: null })
   await assertNoCredentialMaterial(page, context)
   await page.reload()
   await expect(page.getByRole('button', { name: 'Sign in with Microsoft' })).toBeVisible()
@@ -142,6 +147,7 @@ test('Tier1 cancelled login never creates an account', async ({ page, context })
   await expect(page.getByRole('status').first()).toContainText('Microsoft sign-in failed')
   await expect(page.getByText(/^Signed in:/)).toHaveCount(0)
   expect(await page.evaluate(() => window.__tier1.activeId())).toBeNull()
+  expect(await page.evaluate(() => window.__tier1.cachedId())).toBeNull()
   await assertNoCredentialMaterial(page, context)
   expect(unexpected).toEqual([])
 })
@@ -176,10 +182,11 @@ test('Tier1 cancelled logout reports failure and still clears local session', as
   await installSyntheticAccount(page, { cancelledLogout: true })
   await page.getByRole('button', { name: 'Sign in with Microsoft' }).click()
   await expect(page.getByText(/^Signed in:/)).toBeVisible()
+  expect(await page.evaluate(() => window.__tier1.cachedId())).toBe('synthetic-only')
   await page.getByRole('button', { name: 'Sign out' }).click()
   await expect(page.getByRole('status').first()).toContainText('Microsoft sign-out failed')
   await expect(page.getByText(/^Signed in:/)).toHaveCount(0)
-  expect(await page.evaluate(() => ({ logoutCalls: window.__tier1.logoutCalls, active: window.__tier1.activeId(), cleared: window.__tier1.cleared }))).toEqual({ logoutCalls: 1, active: null, cleared: ['synthetic-only'] })
+  expect(await page.evaluate(() => ({ logoutCalls: window.__tier1.logoutCalls, active: window.__tier1.activeId(), cached: window.__tier1.cachedId(), cleared: window.__tier1.cleared }))).toEqual({ logoutCalls: 1, active: null, cached: null, cleared: ['synthetic-only'] })
   await assertNoCredentialMaterial(page, context)
   expect(unexpected).toEqual([])
 })

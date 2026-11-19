@@ -158,14 +158,56 @@ def test_old_sent_marker_can_be_reconciled_without_double_claim():
     job_id = str(uuid4())
     t = FakeTable(job_id)
     sends = []
-    dispatch_queued_job(job_id, table=t, send=sends.append, now=NOW)
-    old = NOW + timedelta(seconds=REDISPATCH_AFTER_SECONDS + 5)
+    start = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    dispatch_queued_job(job_id, table=t, send=sends.append, now=start)
+    assert t.row["dispatchUpdatedAt"] == start.isoformat()
+    old = start + timedelta(seconds=REDISPATCH_AFTER_SECONDS + 5)
     result = reconcile_queued_jobs(table=t, send=sends.append, now=old)
     assert result["inspected"] == 1
     assert result["results"][0]["outcome"] == "sent"
     assert len(sends) == 2
     # Workers still use their own ETag-guarded claim; queue duplicates are safe
     # for this non-paid processing path only if that claim remains enforced.
+
+
+def test_sent_marker_retry_boundary_uses_controlled_clock():
+    job_id = str(uuid4())
+    t = FakeTable(job_id)
+    sends = []
+    start = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    dispatch_queued_job(job_id, table=t, send=sends.append, now=start)
+
+    before = reconcile_queued_jobs(
+        table=t, send=sends.append,
+        now=start + timedelta(seconds=REDISPATCH_AFTER_SECONDS - 1))
+    assert before["results"] == [{"job_id": job_id, "outcome": "already_dispatched"}]
+    assert sends == [job_id]
+    assert t.row["dispatchAttempts"] == 1
+    assert t.cas_calls == 2
+
+    at_boundary = reconcile_queued_jobs(
+        table=t, send=sends.append,
+        now=start + timedelta(seconds=REDISPATCH_AFTER_SECONDS))
+    assert at_boundary["results"] == [{"job_id": job_id, "outcome": "sent"}]
+    assert sends == [job_id, job_id]
+    assert t.row["dispatchAttempts"] == 2
+    assert t.row["dispatchUpdatedAt"] == (
+        start + timedelta(seconds=REDISPATCH_AFTER_SECONDS)).isoformat()
+
+
+def test_stale_sent_marker_never_resends_after_processing_claim():
+    job_id = str(uuid4())
+    t = FakeTable(job_id)
+    sends = []
+    start = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    dispatch_queued_job(job_id, table=t, send=sends.append, now=start)
+    t.row["status"] = "processing"
+    result = reconcile_queued_jobs(
+        table=t, send=sends.append,
+        now=start + timedelta(seconds=REDISPATCH_AFTER_SECONDS + 1))
+    assert result["inspected"] == 0
+    assert sends == [job_id]
+    assert t.row["dispatchAttempts"] == 1
 
 
 def test_recovery_sweep_held_lease_is_not_submitted():
