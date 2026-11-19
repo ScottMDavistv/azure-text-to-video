@@ -73,18 +73,19 @@ reason to create it without separate authorization.
 ## Schedule and cost guardrails — design only
 
 - UTC 5-field cron; approved values `*/15 * * * *` and `0 * * * *`.
-  The default every 15 minutes is **96 executions/day**, about **2,880 in
-  a 30-day month**. The hourly option is 24/day.
+  The default is hourly (**24 executions/day**, about **720 in a 30-day
+  month**). The separately approved 15-minute option is 96/day.
 - One replica, zero retries, 300-second hard replica timeout,
-  0.5 vCPU and 1 GiB memory. A pessimistic 30-day maximum at 96 runs/day
-  and 300s/run is 240 container-hours = 120 vCPU-hours and
-  240 GiB-hours, before platform rounding, storage, registry, Log Analytics,
+  0.5 vCPU and 1 GiB memory. At the default hourly schedule, a pessimistic
+  30-day maximum of 300s/run is 60 container-hours = 30 vCPU-hours and
+  60 GiB-hours; the separately approved 15-minute schedule could reach
+  240 container-hours, before platform rounding, storage, registry, Log Analytics,
   query alerts, action-group delivery, and any other services.
 - These are **usage ceilings from the template**, not a price quote or a hard
   Azure billing cap. Confirm the current region/plan pricing, actual measured
   execution time, budgets with alerts, and cost-center ownership.
-- Setting `activateReconciliation=false` does not make a **deployed**
-  scheduled job free: its `--check` command would still run on the schedule.
+- Setting `activateReconciliation=false` creates **no scheduled job**.
+  The inactive `--check` command branch is not a running preflight.
   Nothing should be deployed merely to exercise the preflight.
 - The one-shot Python reconciler caps each invocation at 20 pages × 25 jobs
   by default, fails closed with a flag, and never calls the paid provider.
@@ -137,6 +138,6 @@ deployment, scheduler activation, paid FAL, or security-sensitive merge.
 
 ## November 16 safe-integration staging changes (review-only)
 
-This new **separate** draft staging branch is rebased on the main branch following PR #39; original PR #28 remains draft and unmerged. It changes the scheduled job blueprint to create **no Azure Container Apps scheduled reconciliation job at all when `activateReconciliation=false`** (rather than creating an hourly/daily billable preflight). If approved in a future security-sensitive merge, activation still requires a new independent owner authorization, dedicated identity, scoped queue/table/ACR privileges, reviewed immutable image, live log schema, Action Group test, and cost budget. Default cron on activation is hourly (24 executions/day), not every 15 minutes (96/day). With 300-second timeout this template's worst-case hourly execution window is 60 container-hours per 30-day month, 30 vCPU-hours and 60 GiB-hours, plus overhead. It is NOT a hard spend cap; price/metering remain unverified. No Azure resource was created, scheduled, or run during this review.
+This new **separate** draft staging branch is rebased on the main branch following PR #39; original PR #28 is closed and unmerged. It changes the scheduled job blueprint to create **no Azure Container Apps scheduled reconciliation job at all when `activateReconciliation=false`** (rather than creating an hourly/daily billable preflight). If approved in a future security-sensitive merge, activation still requires a new independent owner authorization, dedicated identity, scoped queue/table/ACR privileges, reviewed immutable image, live log schema, Action Group test, and cost budget. Default cron on activation is hourly (24 executions/day), not every 15 minutes (96/day). With 300-second timeout this template's worst-case hourly execution window is 60 container-hours per 30-day month, 30 vCPU-hours and 60 GiB-hours, plus overhead. It is NOT a hard spend cap; price/metering remain unverified. No Azure resource was created, scheduled, or run during this review.
 
 **Additional unresolved gates:** No evidence that `id-textvideo-dispatch-reconcile-dev` actually exists; ACR pull and OCI provenance unverified; Log Analytics custom-table schema (`ContainerAppConsoleLogs_CL`) may not match the deployed workspace; Action Group resource ID/delivery unconfirmed. Treat all as blockers, not as reasons for automatic IAM grants. The 2026-11-17 Azure what-if run 44000078189 was for the existing worker digest and failed at an undiagnosed stage, not the scheduled reconciler.

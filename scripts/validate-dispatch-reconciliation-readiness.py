@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static, fail-closed PR #28 release-intent checks. No Azure calls or writes.
+"""Compiled-ARM, fail-closed PR #28 release-intent checks. No Azure calls or writes.
 
 This is *not* proof that an identity, RBAC assignment, immutable ACR digest,
 Log Analytics table, action group or Azure budget exists in the live tenant.
@@ -12,36 +12,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 JOB = ROOT / "infra/dispatch-reconcile-job.bicep"
 ALERT = ROOT / "infra/dispatch-recovery-alerts.bicep"
-REQUIRED_JOB = (
-    "param activateReconciliation bool = false",
-    "triggerType: 'Schedule'",
-    "replicaRetryLimit: 0",
-    "parallelism: 1",
-    "replicaCompletionCount: 1",
-    "replicaTimeout: 300",
-    "name: 'ENABLE_DISPATCH_RECONCILIATION'",
-    "name: 'ENABLE_PAID_FAL_WORKER'",
-    "name: 'ENABLE_LIVE_VIDEO_RENDERING'",
-    "name: 'ENABLE_WORKER_CONSUMPTION'",
-    "name: 'VIDEO_RENDER_PROVIDER'",
-    "value: 'disabled'",
-    "secrets: []",
-    "identity: identity.id",
-    "name: 'AZURE_CLIENT_ID'",
-    "command: [ 'python', '-m', 'dispatch_reconcile_cli' ]",
-)
-REQUIRED_ALERT = (
-    "param activateAlerts bool = false",
-    "if (activateAlerts)",
-    "kind: 'LogAlert'",
-    "severity: 2",
-    "evaluationFrequency: 'PT15M'",
-    "windowSize: 'PT30M'",
-    "ContainerAppConsoleLogs_CL",
-    "Log_s contains",
-    "dispatch_reconciliation_requires_attention",
-    "actionGroups: [actionGroupResourceId]",
-)
 ACR_HOST = "acrtextvideo1794671698.azurecr.io"
 IMAGE_RE = re.compile(r"^" + re.escape(ACR_HOST)
                       + r"/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$")
@@ -68,34 +38,159 @@ def validate_action_group(value):
     return True
 
 
+
+def _require(condition, description):
+    if not condition:
+        raise ReadinessError("Unsafe compiled ARM: " + description)
+
+
+def _compile(source, filename):
+    """Compile the actual candidate, never inspect Bicep text for safeguards."""
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="dispatch-bicep-") as directory:
+        path = Path(directory) / filename
+        path.write_text(source, encoding="utf-8")
+        try:
+            completed = subprocess.run(
+                ["bicep", "build", str(path), "--stdout"],
+                check=False, capture_output=True, text=True, timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ReadinessError("Bicep compiler unavailable or timed out") from exc
+        if completed.returncode:
+            raise ReadinessError("Bicep compilation failed")
+        try:
+            document = json.loads(completed.stdout)
+        except (ValueError, TypeError) as exc:
+            raise ReadinessError("Invalid compiled ARM JSON") from exc
+        _require(isinstance(document, dict), "document is not an object")
+        return document
+
+
+def _parameter(document, name, default=None, allowed=None):
+    parameters = document.get("parameters", {})
+    _require(isinstance(parameters, dict) and name in parameters, "missing parameter " + name)
+    parameter = parameters[name]
+    _require(isinstance(parameter, dict), "invalid parameter " + name)
+    if default is not None:
+        _require(parameter.get("defaultValue") == default, "default for " + name)
+    if allowed is not None:
+        _require(parameter.get("allowedValues") == allowed, "allowed values for " + name)
+
+
+def _only_resource(document, resource_type, condition):
+    resources = document.get("resources")
+    _require(isinstance(resources, list) and len(resources) == 1,
+             "expected exactly one conditional resource; additional resources prohibited")
+    resource = resources[0]
+    _require(isinstance(resource, dict) and resource.get("type") == resource_type,
+             "unexpected resource type, including IAM grants")
+    _require(resource.get("condition") == condition, "unconditional or bypassed activation")
+    return resource
+
+
+def _object(value, description):
+    _require(isinstance(value, dict), description + " must be an object")
+    return value
+
+
+def _array(value, count, description):
+    _require(isinstance(value, list) and len(value) == count, description + " count")
+    return value
+
+
+def _job_policy(arm):
+    _parameter(arm, "activateReconciliation", False)
+    _parameter(arm, "cronExpression", "0 * * * *",
+               ["*/15 * * * *", "0 * * * *"])
+    resource = _only_resource(arm, "Microsoft.App/jobs",
+                              "[parameters('activateReconciliation')]")
+    props = _object(resource.get("properties"), "job properties")
+    cfg = _object(props.get("configuration"), "job configuration")
+    for key, value in {"triggerType": "Schedule", "replicaTimeout": 300,
+                       "replicaRetryLimit": 0}.items():
+        _require(cfg.get(key) == value, "job configuration " + key)
+    _require(cfg.get("secrets") == [], "secrets must be empty")
+    schedule = _object(cfg.get("scheduleTriggerConfig"), "schedule")
+    for key, value in {
+        "cronExpression": "[parameters('cronExpression')]",
+        "parallelism": 1, "replicaCompletionCount": 1,
+    }.items():
+        _require(schedule.get(key) == value, "schedule " + key)
+    containers = _array(_object(props.get("template"), "job template").get("containers"),
+                        1, "containers")
+    container = _object(containers[0], "container")
+    _require(container.get("command") == ["python", "-m", "dispatch_reconcile_cli"],
+             "reconciler entry point")
+    resources = _object(container.get("resources"), "container resources")
+    _require(resources.get("cpu") == 0.5 and resources.get("memory") == "1Gi",
+             "container cost bounds")
+    expected = {
+        "AZURE_CLIENT_ID": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('reconciliationIdentityName')), '2023-01-31').clientId]",
+        "AZURE_STORAGE_ACCOUNT": "[parameters('storageAccountName')]",
+        "AZURE_JOBS_QUEUE": "[parameters('queueName')]",
+        "AZURE_JOBS_TABLE": "[parameters('jobsTableName')]",
+        "VIDEO_RENDER_PROVIDER": "disabled",
+        "ENABLE_PAID_FAL_WORKER": "false",
+        "ENABLE_LIVE_VIDEO_RENDERING": "false",
+        "ENABLE_WORKER_CONSUMPTION": "false",
+        "ENABLE_PROJECT_ROUTES": "false",
+    }
+    environment = _array(container.get("env"), 10, "environment entries")
+    actual = {}
+    for entry in environment:
+        _require(isinstance(entry, dict) and set(entry) == {"name", "value"},
+                 "environment must use literal values, not secretRef")
+        name = entry["name"]
+        _require(isinstance(name, str) and name not in actual, "duplicate/invalid env name")
+        _require(not name.upper().startswith("FAL"), "FAL credentials forbidden")
+        actual[name] = entry["value"]
+    _require(set(actual) == set(expected) | {"ENABLE_DISPATCH_RECONCILIATION"},
+             "unexpected or missing environment name")
+    for name, value in expected.items():
+        if name == "AZURE_CLIENT_ID":
+            _require(isinstance(actual[name], str)
+                     and "Microsoft.ManagedIdentity/userAssignedIdentities" in actual[name]
+                     and "clientId" in actual[name], "managed identity client ID expression")
+        else:
+            _require(actual[name] == value, "environment value " + name)
+    _require(actual["ENABLE_DISPATCH_RECONCILIATION"] ==
+             "[if(parameters('activateReconciliation'), 'true', 'false')]",
+             "reconciliation activation env value")
+    serialized = json.dumps(container)
+    _require("secretRef" not in serialized and "FAL_KEY" not in serialized
+             and "FAL_API_KEY" not in serialized, "credential injection")
+
+
+def _alert_policy(arm):
+    _parameter(arm, "activateAlerts", False)
+    resource = _only_resource(arm, "Microsoft.Insights/scheduledQueryRules",
+                              "[parameters('activateAlerts')]")
+    _require(resource.get("kind") == "LogAlert", "alert kind")
+    props = _object(resource.get("properties"), "alert properties")
+    for key, value in {
+        "enabled": True, "severity": 2,
+        "evaluationFrequency": "PT15M", "windowSize": "PT30M",
+    }.items():
+        _require(props.get(key) == value, "alert property " + key)
+    actions = _object(props.get("actions"), "alert actions")
+    _require(actions.get("actionGroups") ==
+             ["[parameters('actionGroupResourceId')]"],
+             "missing Action Group target")
+    criteria = _object(props.get("criteria"), "alert criteria")
+    query = _object(_array(criteria.get("allOf"), 1, "alert criteria")[0],
+                    "alert query").get("query")
+    _require(isinstance(query, str)
+             and "ContainerAppConsoleLogs_CL" in query
+             and "Log_s contains" in query
+             and "dispatch_reconciliation_requires_attention" in query,
+             "anomaly-marker query")
+
+
 def validate_sources(job, alert):
-    for item in REQUIRED_JOB:
-        if item not in job:
-            raise ReadinessError("Missing job safeguard: " + item)
-    for item in REQUIRED_ALERT:
-        if item not in alert:
-            raise ReadinessError("Missing alert safeguard: " + item)
-    if "param cronExpression string = '0 * * * *'" not in job:
-        raise ReadinessError("Unbounded or changed default cron")
-    if "@allowed([ '*/15 * * * *', '0 * * * *' ])" not in job:
-        raise ReadinessError("Unrestricted cron frequency")
-    for name in ("environment", "identity", "registry"):
-        if not re.search(r"resource\s+" + name + r"\s+'[^']+'\s+existing\s*=", job):
-            raise ReadinessError("Must reference existing " + name)
-    if "resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing" not in alert:
-        raise ReadinessError("Log Analytics workspace must be existing")
-    if "secretRef" in job or "FAL_KEY" in job or "FAL_API_KEY" in job:
-        raise ReadinessError("Provider credentials may not enter reconciliation job")
-    if "ENABLE_DISPATCH_RECONCILIATION', value: 'true'" in job:
-        raise ReadinessError("Unconditionally activated reconciliation")
-    if "activateReconciliation ? [ '--run-once'" not in job:
-        raise ReadinessError("No conditional preflight/runtime command")
-    if " : [ '--check' ]" not in job:
-        raise ReadinessError("Preflight-only default removed")
-    if "= if (activateReconciliation) {" not in job:
-        raise ReadinessError("Disabled mode must create no scheduled Azure job")
-    if "replicaTimeout: 300" not in job or "cpu: json('0.5')" not in job or "memory: '1Gi'" not in job:
-        raise ReadinessError("Unexpected unit runtime / resource cost bound")
+    _job_policy(_compile(job, "dispatch-reconcile-job.bicep"))
+    _alert_policy(_compile(alert, "dispatch-recovery-alerts.bicep"))
     return {"static_checks": "pass", "live_azure": "not_verified",
             "image_digest": "requires_approved_parameter",
             "identity_rbac": "requires_readonly_cloud_evidence",

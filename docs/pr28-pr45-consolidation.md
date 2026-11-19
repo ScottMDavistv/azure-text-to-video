@@ -1,6 +1,6 @@
 # PR #28 to #45: dispatch reconciliation consolidation
 
-**Canonical draft:** PR #45. **Original:** PR #28 remains open/draft.
+**Canonical draft:** PR #45. **Original:** PR #28 is closed and unmerged.
 
 ## Preservation matrix
 
@@ -21,4 +21,4 @@ This is an infrastructure blueprint, not an actual scheduled deployment. Even wi
 
 ## Disposition
 
-All six #28 paths survive in #45. Keep #45 draft as canonical and #28 draft as historical comparison. No merge, close, Azure activation, permission assignment or provider billing authorized.
+All six #28 paths survive in #45. Keep #45 draft as canonical and #28 closed/unmerged as historical comparison. No merge or Azure activation, permission assignment or provider billing authorized.

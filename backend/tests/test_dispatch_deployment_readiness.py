@@ -1,4 +1,4 @@
-"""Non-networked P0 readiness policy regression tests."""
+"""Offline compiled-ARM readiness policy and adversarial regression tests."""
 from pathlib import Path
 from importlib.util import module_from_spec, spec_from_file_location
 
@@ -46,45 +46,73 @@ def test_action_group_must_be_full_resource_id():
             module.validate_action_group(invalid)
 
 
-@pytest.mark.parametrize("needle", [
-    "param activateReconciliation bool = false",
-    "if (activateReconciliation)",
-    "secrets: []",
-    "replicaRetryLimit: 0",
-    "parallelism: 1",
-    "name: 'ENABLE_PAID_FAL_WORKER'",
-    "name: 'ENABLE_LIVE_VIDEO_RENDERING'",
-    "name: 'AZURE_CLIENT_ID'",
-    " : [ '--check' ]",
-    "@allowed([ '*/15 * * * *', '0 * * * *' ])",
+@pytest.mark.parametrize("label,mutate_job,mutate_alert", [
+    ("P1 activation default true", lambda s: s.replace(
+        "param activateReconciliation bool = false",
+        "param activateReconciliation bool = true", 1), None),
+    ("P2 bypass approved cron", lambda s: s.replace(
+        "cronExpression: cronExpression", "cronExpression: '* * * * *'", 1), None),
+    ("P3 paid flags true", lambda s: s.replace(
+        "name: 'ENABLE_PAID_FAL_WORKER', value: 'false'",
+        "name: 'ENABLE_PAID_FAL_WORKER', value: 'true'", 1).replace(
+        "name: 'ENABLE_WORKER_CONSUMPTION', value: 'false'",
+        "name: 'ENABLE_WORKER_CONSUMPTION', value: 'true'", 1), None),
+    ("P4 provider fal", lambda s: s.replace(
+        "name: 'VIDEO_RENDER_PROVIDER', value: 'disabled'",
+        "name: 'VIDEO_RENDER_PROVIDER', value: 'fal'", 1), None),
+    ("P5 cost bounds", lambda s: s.replace("replicaRetryLimit: 0", "replicaRetryLimit: 10", 1)
+     .replace("parallelism: 1", "parallelism: 20", 1)
+     .replace("replicaTimeout: 300", "replicaTimeout: 86400", 1), None),
+    ("P6 plaintext provider secret", lambda s: s.replace(
+        "name: 'ENABLE_PROJECT_ROUTES', value: 'false'",
+        "name: 'ENABLE_PROJECT_ROUTES', value: 'false' }\\n"
+        "            { name: 'FAL_API_KEY', value: 'sample-secret'", 1), None),
+    ("P7 unconditional extra job", lambda s: s + "\\n" + s[
+        s.index("resource scheduledReconciler "):s.index("output scheduledJobName")]
+        .replace("resource scheduledReconciler ", "resource rogueJob ", 1)
+        .replace("= if (activateReconciliation) {", "= {", 1)
+        .replace("job-textvideo-dispatch-reconcile-dev", "rogue-unconditional-job", 1), None),
+    ("P8 authorization resource", lambda s: s + """
+resource unsafeOwnerGrant 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(resourceGroup().id, 'unsafe-owner')
+  properties: {
+    principalId: identity.properties.principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '8e3af657-a8ff-443c-a75c-2fe8c4bcb635')
+    principalType: 'ServicePrincipal'
+  }
+}
+""", None),
+    ("P9 alert activation true", None, lambda s: s.replace(
+        "param activateAlerts bool = false", "param activateAlerts bool = true", 1)),
+    ("P10 disable alert notifications", None, lambda s: s.replace(
+        "enabled: true", "enabled: false", 1).replace(
+        "actionGroups: [actionGroupResourceId]", "actionGroups: []", 1)),
+    ("P11 bypass condition", lambda s: s.replace(
+        "= if (activateReconciliation) {",
+        "= if (activateReconciliation || true) {", 1), None),
 ])
-def test_removed_job_safety_boundary_fails(needle):
+def test_compiled_arm_rejects_adversarial_mutation(label, mutate_job, mutate_alert):
+    changed_job = mutate_job(JOB) if mutate_job is not None else JOB
+    changed_alert = mutate_alert(ALERT) if mutate_alert is not None else ALERT
+    assert changed_job != JOB or changed_alert != ALERT, label
     with pytest.raises(module.ReadinessError):
-        module.validate_sources(JOB.replace(needle, "REMOVED", 1), ALERT)
+        module.validate_sources(changed_job, changed_alert)
 
 
-@pytest.mark.parametrize("needle", [
-    "param activateAlerts bool = false",
-    "if (activateAlerts)",
-    "ContainerAppConsoleLogs_CL",
-    "Log_s contains",
-    "actionGroups: [actionGroupResourceId]",
-])
-def test_removed_monitor_safety_boundary_fails(needle):
+def test_compiler_unavailable_fails_closed(monkeypatch):
+    import subprocess
+    def fail(*args, **kwargs):
+        raise FileNotFoundError("bicep")
+    monkeypatch.setattr(subprocess, "run", fail)
     with pytest.raises(module.ReadinessError):
-        module.validate_sources(JOB, ALERT.replace(needle, "REMOVED", 1))
-
-
-def test_paid_credentials_are_disallowed():
-    with pytest.raises(module.ReadinessError):
-        module.validate_sources(JOB + "\n// FAL_KEY\n", ALERT)
+        module.validate_sources(JOB, ALERT)
 
 
 def test_disabled_mode_creates_no_scheduled_job_and_limits_cron_default():
     assert " = if (activateReconciliation) {" in JOB
     assert "param cronExpression string = '0 * * * *'" in JOB
-    assert "activateReconciliation bool = false" in JOB
     assert "activateAlerts bool = false" in ALERT
+
 
 def test_bicep_cli_supply_chain_is_version_and_digest_pinned():
     workflow = (ROOT / ".github/workflows/dispatch-bicep-validation.yml").read_text()
