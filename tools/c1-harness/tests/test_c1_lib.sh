@@ -2382,12 +2382,17 @@ TOP=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)
 C1_PR60_WORKFLOW_BASE='f4f1066af0a0def2b595a14c211341c27733064c'
 if [[ -n "$TOP" ]] && git -C "$TOP" cat-file -e "$C1_PR60_WORKFLOW_BASE^{commit}" 2>/dev/null \
    && git -C "$TOP" merge-base --is-ancestor "$C1_PR60_WORKFLOW_BASE" HEAD 2>/dev/null; then
-  t 'harness branch changes only tools/c1-harness/** relative to trusted PR60 workflow base' \
-    bash -c '! git -C "$1" diff --name-only "$2" HEAD | grep -v "^tools/c1-harness/"' _ "$TOP" "$C1_PR60_WORKFLOW_BASE"
-  t 'approved frontend suite is byte-identical to pinned PR60 suite at HEAD' \
+  pinned_l2_scope() {
+    local actual expected
+    actual=$(git -C "$TOP" diff --no-renames --name-only "$C1_PR60_WORKFLOW_BASE" HEAD | grep -v '^tools/c1-harness/' | LC_ALL=C sort)
+    expected=$(printf '%s\\n' '.github/workflows/frontend-quality-gates.yml' 'frontend/e2e/c1-webrtc-policy.mjs' 'frontend/e2e/c1-webrtc-udp-check.mjs' 'frontend/playwright.config.mjs' | LC_ALL=C sort)
+    [[ "$actual" == "$expected" ]]
+  }
+  t 'L-2 only changes approved frontend policy/probe/config/workflow plus harness' pinned_l2_scope
+  t 'approved frontend suite is byte-identical to clean L-2 checkpoint at HEAD' \
     git -C "$TOP" diff --quiet "$C1_PW_SHA_APPROVED" HEAD -- frontend
-  t 'trusted PR60 workflow and backend files are unmodified by PR74 harness' \
-    git -C "$TOP" diff --quiet "$C1_PR60_WORKFLOW_BASE" HEAD -- backend scripts tests .github
+  t 'trusted PR60 backend/scripts/tests remain unchanged by L-2 integration' \
+    git -C "$TOP" diff --quiet "$C1_PR60_WORKFLOW_BASE" HEAD -- backend scripts tests
 else skip 'diff scope (trusted workflow base not in local history)'; fi
 
 echo
