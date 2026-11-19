@@ -124,7 +124,7 @@ def _job_policy(arm):
     _require(container.get("command") == ["python", "-m", "dispatch_reconcile_cli"],
              "reconciler entry point")
     resources = _object(container.get("resources"), "container resources")
-    _require(resources.get("cpu") == 0.5 and resources.get("memory") == "1Gi",
+    _require(resources.get("cpu") in (0.5, "[json('0.5')]") and resources.get("memory") == "1Gi",
              "container cost bounds")
     expected = {
         "AZURE_CLIENT_ID": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('reconciliationIdentityName')), '2023-01-31').clientId]",
