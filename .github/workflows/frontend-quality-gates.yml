@@ -69,6 +69,9 @@ jobs:
           C1_UNCONFIGURED=1 npx playwright test --config=playwright.config.mjs --workers=1
           node e2e/c1-mutation-check.mjs
           node e2e/run-browser-mutations.mjs
+          # L-2: fail closed unless unrestricted Chromium actually sends STUN,
+          # followed by zero UDP delivery with browser-enforced policy.
+          node e2e/c1-webrtc-udp-check.mjs
           node e2e/c1-lockfile-check.mjs
           git checkout --detach "$GITHUB_SHA"
       - name: Lint frontend
