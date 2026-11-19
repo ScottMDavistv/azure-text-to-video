@@ -1085,9 +1085,8 @@ c1_unauth_denied() {
 # ports, fragments, or other redirect status codes.
 c1_codespaces_pf_signin_redirect() {
   [[ "${1:-}" == 302 ]] || return 1
-  [[ "${2:-}" =~ ^https://github\\.dev/pf-signin(\\?[^#[:space:]]+)?$ ]]
+  [[ "${2:-}" =~ ^https://github[.]dev/pf-signin([?][^#[:space:]]+)?$ ]]
 }
-
 # c1_privacy_check BASE PATH MARKER TOKENHDR [CACERT]
 # 0 = verified private. Sets C1_PRIVACY_STATE to private | public | unverified
 # (and C1_PRIVACY_DETAIL to a short, token-free reason). Private requires BOTH a
