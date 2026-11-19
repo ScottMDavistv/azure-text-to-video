@@ -752,8 +752,11 @@ if command -v openssl >/dev/null && command -v curl >/dev/null && command -v pyt
   t 'exact Codespaces pf-signin matcher rejects spoofed/ambiguous redirects' pf_signin_redirect_table
 
   pf_signin_with_gh_readback() (
-    local vis=$1 marker_mode=$2 calls="$PV/pf-calls-$1-$2" rc=0
+    local vis=$1 marker_mode=$2 origin_mode=${3:-matching} calls="$PV/pf-calls-$1-$2-${3:-matching}" rc=0
     : >"$calls"
+    c1_codespace_base() {
+      if [[ $origin_mode == matching ]]; then printf '%s' "$BASE"; else printf 'https://other-6080.app.github.dev'; fi
+    }
     c1_https_probe() {
       local out=$2 hdr=${3:-}
       if [[ -z "$hdr" ]]; then
@@ -778,6 +781,7 @@ if command -v openssl >/dev/null && command -v curl >/dev/null && command -v pyt
   t 'Codespaces redirect refuses public GH visibility before token probe' pf_signin_with_gh_readback public valid
   t 'Codespaces redirect refuses org GH visibility before token probe' pf_signin_with_gh_readback org valid
   t 'Codespaces redirect refuses unavailable GH visibility before token probe' pf_signin_with_gh_readback missing valid
+  t 'Codespaces redirect refuses mismatched forwarding origin before token probe' pf_signin_with_gh_readback private valid mismatched
   t 'Codespaces redirect refuses wrong authenticated nonce despite GH private' pf_signin_with_gh_readback private invalid
   # shellcheck disable=SC2034  # read by the library
   transport_failures() {
