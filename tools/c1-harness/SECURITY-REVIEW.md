@@ -2,6 +2,18 @@
 
 **Status: DRAFT. The consolidated round-2 remediation and the C1 desktop-blocker remediation (below) await a NEW independent full-diff review.** No implementing session listed below may review or approve it. This document is the implementer's account: treat it as claims, not evidence. **C1 REMAINS OPEN.**
 
+## 2026-11-19 L-2 WebRTC/STUN UDP egress — implementing-session handoff (NOT CERTIFIED)
+
+**Scope:** Browser-policy/UDP-test changes are stacked on PR #74, not on the independently certified PR #60 head. PR #60 remains at `f4f1066af0a0def2b595a14c211341c27733064c`; the independently certified PR #74 R13 head is `9fd46cbf4c5ee53e02e99506bc0ebb6b605a2a6c`. This section is implementation evidence only, not an independent review.
+
+**New clean frontend test checkpoint:** `0ea5a2aa715af3b5ac1dcbad5b38514c218911aa`, branch `test/c1-l2-udp-checkpoint`, four commits and only four L-2 paths beyond PR #60: `.github/workflows/frontend-quality-gates.yml`, `frontend/playwright.config.mjs`, `frontend/e2e/c1-webrtc-policy.mjs`, and `frontend/e2e/c1-webrtc-udp-check.mjs`. Its main-baseline diff has exactly 17 paths. The PR #74 frontend content is byte-identical to the checkpoint, while the harness itself is changed separately. The approved C1 AUTH->PW path allowlist is updated to the exact 17 files; no production runtime code changes. R13 retains the independently certified `App.tsx@a0b753b533165bb12bc516478c8036645f2f292a` register.
+
+**Browser policy:** Chromium `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` is applied as `launchOptions.args` to both the main Playwright configuration and the supplemental supervised configuration, imported from the exact pinned frontend worktree. The harness preflight checks this binding and records `webrtc_policy_pinned` as a required R1 check. Chromium policy restricts *non-proxied UDP*; the threat model must account separately for SOCKS proxies that support UDP. No JavaScript-only monkeypatch is treated as containment.
+
+**UDP test:** `frontend/e2e/c1-webrtc-udp-check.mjs` runs *unrestricted* Chromium first against a controlled local UDP STUN receiver, accepts only RFC 8489 Binding Request packets, requires a strictly positive packet count, and then launches Chromium with the policy and requires zero packets across two fresh browser contexts. It verifies the effective launch argument through the browser DevTools Protocol. Missing positive control, unsupported environment or any guarded UDP delivery is a failure, not a PASS. No real Microsoft, Azure, FAL, public STUN or paid provider is accessed. The normally triggered Frontend Quality Gates workflow runs the probe at exact PR head. The harness includes it in the browser-mutation phase and aborts before supervised C1 if the phase fails; R2B and R12 cannot pass on a failed UDP phase.
+
+**Independent review requirements:** Reverify all exact heads and main; independently inspect the L-2 delta, reproduce positive/negative UDP controls on the exact Playwright 1.65.1/Chromium 159.0.8154.6 toolchain, check popup/new-context enforcement and proxy handling, mutate/remove the policy and prove failure, run full Node/shell harness suites and exact-head CI, and return a separate PASS/FAIL. Until real positive-control STUN delivery and guarded zero-delivery are observed and independently reviewed, **L-2 remains OPEN and live C1 is forbidden**. CI red or unavailable Chromium are blockers; do not weaken the check to make it green.
+
 ## History
 
 | Head | What | Who |
