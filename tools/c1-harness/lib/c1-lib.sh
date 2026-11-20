@@ -602,7 +602,7 @@ c1_harness_orphans() {
     done
     c1_pid_has_marker "$pid" "$s" || continue
     printf 'pid=%s comm=%s\n' "$pid" "$(c1_safe_comm "$pid")"
-  done | sort -t= -k2 -n
+  done | sort -t '=' -k2 -n
 }
 
 # c1_listener_state SESSION STATE DETAIL -> records the listener verdict for the
