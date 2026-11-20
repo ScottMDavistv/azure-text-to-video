@@ -298,7 +298,7 @@ session() {
     return 1
   fi
   run_phase browser-mutation "$FE" pw_env browser-mutation bash -ec \
-    'node e2e/run-browser-mutations.mjs && node e2e/c1-webrtc-udp-check.mjs'
+    'node e2e/run-browser-mutations.mjs && xvfb-run -a node e2e/c1-webrtc-udp-check.mjs'
   if ! tail -n 1 "$S/phases" | grep -Eq '^browser-mutation[|]ran[|][^|]+[|][^|]+[|]0$'; then
     c1_err 'L-2 browser mutation or WebRTC UDP proof failed; live C1 is forbidden'
     return 1

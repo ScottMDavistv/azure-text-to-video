@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const frontend = process.env.C1_WORKTREE_FRONTEND || ''
 if (!isAbsolute(frontend)) throw new Error('C1_WORKTREE_FRONTEND must be the absolute approved worktree frontend path')
 // Reuse the exact tested frontend policy in supplemental supervised cases.
-const { WEBRTC_UDP_POLICY_ARG } = await import(pathToFileURL(join(frontend, 'e2e/c1-webrtc-policy.mjs')).href)
+const { headedWebrtcLaunchOptions } = await import(pathToFileURL(join(frontend, 'e2e/c1-webrtc-policy.mjs')).href)
 const git = args => execFileSync('git', ['-C', frontend, ...args], { encoding: 'utf8' })
 const sha = git(['rev-parse', 'HEAD']).trim()
 const dirty = git(['status', '--porcelain', '--untracked-files=all']).trim()
@@ -37,7 +37,7 @@ export default defineConfig({
   fullyParallel: false, workers: 1, retries: 0, reporter: 'list',
   use: {
     ...devices['Desktop Chrome'],
-    launchOptions: { args: [WEBRTC_UDP_POLICY_ARG] },
+    launchOptions: headedWebrtcLaunchOptions,
     baseURL: 'http://localhost:5173',
     trace: 'off', screenshot: 'off', video: 'off',
   },

@@ -2379,9 +2379,10 @@ if [[ -n "${TOP:=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)
     for f in e2e/c1-webrtc-policy.mjs e2e/c1-webrtc-udp-check.mjs playwright.config.mjs; do
       git -C "$TOP" show "$C1_PW_SHA_APPROVED:frontend/$f" >"$d/frontend/$f"
     done
+    chmod +x "$d/frontend/e2e/c1-webrtc-policy.mjs"
     cp "$HERE/../supplemental/playwright.supplemental.config.mjs" "$d/harness/supplemental/"
     c1_check_webrtc_policy "$d" "$d/harness"
-    sed -i 's/launchOptions: { args: \[WEBRTC_UDP_POLICY_ARG\] }/launchOptions: { args: [] }/' "$d/frontend/playwright.config.mjs"
+    sed -i 's/launchOptions: live ? headedWebrtcLaunchOptions/launchOptions: live ? {}/' "$d/frontend/playwright.config.mjs"
     ! c1_check_webrtc_policy "$d" "$d/harness"
   }
   t 'L-2 pinned browser policies and STUN positive/zero controls are required; dropped flag fails closed' pinned_webrtc_policy

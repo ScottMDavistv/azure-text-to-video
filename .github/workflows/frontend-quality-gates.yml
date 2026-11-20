@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - 'frontend/**'
+      - 'tools/c1-harness/**'
       - '.github/workflows/frontend-quality-gates.yml'
   workflow_dispatch:
 
@@ -64,14 +65,16 @@ jobs:
           npm install --no-save --ignore-scripts --no-audit --no-fund @playwright/test@1.65.1
           # Fail if the extra install drifted any locked dependency (PR #71 review F-1).
           node e2e/c1-lockfile-check.mjs
-          npx playwright install chromium
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth
+          npx playwright install --with-deps chromium
           npx playwright test --config=playwright.config.mjs --workers=1
           C1_UNCONFIGURED=1 npx playwright test --config=playwright.config.mjs --workers=1
           node e2e/c1-mutation-check.mjs
           node e2e/run-browser-mutations.mjs
           # L-2: fail closed unless unrestricted Chromium actually sends STUN,
           # followed by zero UDP delivery with browser-enforced policy.
-          node e2e/c1-webrtc-udp-check.mjs
+          xvfb-run -a node e2e/c1-webrtc-udp-check.mjs
           node e2e/c1-lockfile-check.mjs
           git checkout --detach "$GITHUB_SHA"
       - name: Lint frontend
@@ -92,3 +95,37 @@ jobs:
         run: |
           echo 'Local frontend quality checks only.'
           echo 'No Azure deployment, FAL/provider calls, or automatic merge.'
+
+  c1-harness:
+    name: C1 harness syntax, ShellCheck and regression suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact head without write credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run offline harness gates
+        run: |
+          set -euo pipefail
+          if [[ ! -d tools/c1-harness ]]; then
+            echo 'C1 harness is absent at this head.'
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck xvfb x11vnc novnc websockify fluxbox xauth iproute2
+          mapfile -d '' -t scripts < <(find tools/c1-harness -type f -name '*.sh' -print0)
+          for script in "${scripts[@]}"; do
+            bash -n "$script"
+          done
+          shellcheck --severity=error --external-sources --source-path=SCRIPTDIR "${scripts[@]}"
+          bash tools/c1-harness/c1-session.sh --help
+          bash tools/c1-harness/c1-session.sh selftest

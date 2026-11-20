@@ -10,7 +10,7 @@
 # PR #46 auth implementation; new PR #60 test and UI changes are explicitly
 # enumerated and require their own independent review before LIVE use.
 C1_AUTH_SHA_APPROVED='c46e2e8c67ee5a2668d113ceef15c5a4774cde69'
-C1_PW_SHA_APPROVED='dff702dd32cb02e684bfb6a87d012dd957e6b034'
+C1_PW_SHA_APPROVED='3e4eccf32abe797f3a579462812fba721792fb19'
 C1_PLAYWRIGHT_VERSION='1.65.1'
 # I-5: the Chromium build Playwright 1.65.1 pins (browsers.json rev 1255, both
 # chromium and chromium-headless-shell). R10 requires this literal value too.
@@ -672,12 +672,14 @@ c1_check_webrtc_policy() {
   local policy=$fe/e2e/c1-webrtc-policy.mjs probe=$fe/e2e/c1-webrtc-udp-check.mjs
   local cfg=$fe/playwright.config.mjs supp=$harness/supplemental/playwright.supplemental.config.mjs
   local flag="--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
-  [[ -f "$policy" && -f "$probe" && -f "$cfg" && -f "$supp" ]] || { c1_err 'L-2: required browser policy/probe/config missing'; return 1; }
+  [[ -x "$policy" && -f "$probe" && -f "$cfg" && -f "$supp" ]] || { c1_err 'L-2: required browser policy/probe/config missing'; return 1; }
   grep -Fxq "export const WEBRTC_UDP_POLICY_ARG = '$flag'" "$policy" || { c1_err 'L-2: pinned browser policy absent'; return 1; }
-  grep -Fq "import { WEBRTC_UDP_POLICY_ARG } from './e2e/c1-webrtc-policy.mjs'" "$cfg" || { c1_err 'L-2: configured tests do not import the pinned WebRTC policy'; return 1; }
-  grep -Fq 'launchOptions: { args: [WEBRTC_UDP_POLICY_ARG] }' "$cfg" || { c1_err 'L-2: configured tests do not enforce the browser policy'; return 1; }
-  grep -Fq 'launchOptions: { args: [WEBRTC_UDP_POLICY_ARG] }' "$supp" || { c1_err 'L-2: supplemental live browser lacks policy'; return 1; }
+  grep -Fq "import { WEBRTC_UDP_POLICY_ARG, headedWebrtcLaunchOptions } from './e2e/c1-webrtc-policy.mjs'" "$cfg" || { c1_err 'L-2: configured tests do not import the pinned WebRTC policy'; return 1; }
+  grep -Fq 'launchOptions: live ? headedWebrtcLaunchOptions : { args: [WEBRTC_UDP_POLICY_ARG] }' "$cfg" || { c1_err 'L-2: configured tests do not enforce the browser policy'; return 1; }
+  grep -Fq 'launchOptions: headedWebrtcLaunchOptions' "$supp" || { c1_err 'L-2: supplemental live browser lacks policy'; return 1; }
   grep -Fq "join(frontend, 'e2e/c1-webrtc-policy.mjs')" "$supp" || { c1_err 'L-2: supplemental policy is not sourced from pinned frontend'; return 1; }
+  grep -Fq "webrtc: { ip_handling_policy: 'disable_non_proxied_udp' }" "$policy" || { c1_err 'L-2: headed profile policy absent'; return 1; }
+  grep -Fq 'for (const headed of [false, true])' "$probe" || { c1_err 'L-2: both Chromium modes must be proved'; return 1; }
   grep -Fq 'assert.ok(udpPackets.length > 0' "$probe" || { c1_err 'L-2: missing unrestricted-browser UDP positive control'; return 1; }
   grep -Fq 'assert.equal(udpPackets.length, 0' "$probe" || { c1_err 'L-2: missing zero-delivery assertion'; return 1; }
 }
