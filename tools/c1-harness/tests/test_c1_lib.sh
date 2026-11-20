@@ -1195,7 +1195,7 @@ MOCK_CURL
     chmod +x "$bin/curl"
     export PATH="$bin:$PATH"
     result=$(c1_https_probe "$BASE/marker" "$out") && [[ $result == '403 ' ]] || return 1
-    result=$(c1_https_probe "$BASE/partial" "$out" "$PV/hdr") && [[ $result == '000 ' ]]
+    result=$(c1_https_probe "$BASE/partial" "$out" "$PV/hdr") && [[ $result == '000 curl-exit-18' ]]
   )
   curl_probe_config_mutation() (
     local original mutated
