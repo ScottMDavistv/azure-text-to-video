@@ -1,15 +1,13 @@
-#!/usr/bin/env node
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { chromium } from '@playwright/test'
 
 export const WEBRTC_UDP_POLICY_ARG = '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'
-export const headedWebrtcLaunchOptions = { executablePath: fileURLToPath(import.meta.url) }
+export const headedWebrtcLaunchOptions = { executablePath: fileURLToPath(new URL('./c1-webrtc-chromium.sh', import.meta.url)) }
 
 // Playwright supplies a fresh profile for each launch. Seed Chromium's
-// profile preference before any renderer starts, then replace the wrapper
-// process so that Playwright retains normal browser lifecycle control.
+// profile preference before the shell launcher execs Chromium.
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const args = process.argv.slice(2)
   const dirs = args.filter(arg => arg.startsWith('--user-data-dir='))
@@ -22,5 +20,5 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     webrtc: { ip_handling_policy: 'disable_non_proxied_udp' },
   }), { mode: 0o600, flag: 'wx' })
   const browser = chromium.executablePath()
-  process.execve(browser, [browser, ...args], process.env)
+  process.stdout.write(browser + '\n')
 }

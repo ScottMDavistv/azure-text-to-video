@@ -2376,10 +2376,10 @@ if [[ -n "${TOP:=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)
   pinned_webrtc_policy() {
     local d="$TMP/pinwebrtc" f
     mkdir -p "$d/frontend/e2e" "$d/harness/supplemental"
-    for f in e2e/c1-webrtc-policy.mjs e2e/c1-webrtc-udp-check.mjs playwright.config.mjs; do
+    for f in e2e/c1-webrtc-chromium.sh e2e/c1-webrtc-policy.mjs e2e/c1-webrtc-udp-check.mjs playwright.config.mjs; do
       git -C "$TOP" show "$C1_PW_SHA_APPROVED:frontend/$f" >"$d/frontend/$f"
     done
-    chmod +x "$d/frontend/e2e/c1-webrtc-policy.mjs"
+    chmod +x "$d/frontend/e2e/c1-webrtc-chromium.sh"
     cp "$HERE/../supplemental/playwright.supplemental.config.mjs" "$d/harness/supplemental/"
     c1_check_webrtc_policy "$d" "$d/harness"
     sed -i 's/launchOptions: live ? headedWebrtcLaunchOptions/launchOptions: live ? {}/' "$d/frontend/playwright.config.mjs"
@@ -2398,7 +2398,7 @@ if [[ -n "$TOP" ]] && git -C "$TOP" cat-file -e "$C1_PR60_WORKFLOW_BASE^{commit}
   pinned_l2_scope() {
     local actual expected
     actual=$(git -C "$TOP" diff --no-renames --name-only "$C1_PR60_WORKFLOW_BASE" HEAD | grep -v '^tools/c1-harness/' | LC_ALL=C sort)
-    expected=$(printf '%s\n' '.github/workflows/frontend-quality-gates.yml' 'frontend/e2e/c1-webrtc-policy.mjs' 'frontend/e2e/c1-webrtc-udp-check.mjs' 'frontend/playwright.config.mjs' | LC_ALL=C sort)
+    expected=$(printf '%s\n' '.github/workflows/frontend-quality-gates.yml' 'frontend/e2e/c1-webrtc-chromium.sh' 'frontend/e2e/c1-webrtc-policy.mjs' 'frontend/e2e/c1-webrtc-udp-check.mjs' 'frontend/playwright.config.mjs' | LC_ALL=C sort)
     [[ "$actual" == "$expected" ]]
   }
   t 'L-2 only changes approved frontend policy/probe/config/workflow plus harness' pinned_l2_scope
