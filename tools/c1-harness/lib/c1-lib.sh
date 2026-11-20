@@ -1360,18 +1360,19 @@ c1_write_header_file() { ( umask 077; printf '%s: %s\n' "$2" "$3" >"$1" ); }
 # HTTPS only, no redirects followed, no proxy, minimal environment (no
 # inherited CURL_CA_BUNDLE/HTTPS_PROXY).
 c1_https_probe() {
-  local url=$1 out=$2 hdr=${3:-} ca=${4:-} result
+  local url=$1 out=$2 hdr=${3:-} ca=${4:-} result rc
   local -a a=(--silent --max-time "$C1_PROBE_MAX_TIME" --proto '=https' --noproxy '*' -o "$out" -w '%{http_code} %{redirect_url}')
   if [[ -n "$hdr" ]]; then a+=(-H "@$hdr"); fi
   if [[ -n "$ca" ]]; then a+=(--cacert "$ca"); fi
   : >"$out"
   # --disable must be curl's first argument. Curl can discover a config
   # through the account record even when no HOME is exported.
-  if ! result=$(env -i PATH="$PATH" curl --disable "${a[@]}" -- "$url" 2>/dev/null); then
-    printf '000 '
-    return 0
+  if result=$(env -i PATH="$PATH" curl --disable "${a[@]}" -- "$url" 2>/dev/null); then
+    printf '%s' "$result"
+  else
+    rc=$?
+    printf '000 curl-exit-%d' "$rc"
   fi
-  printf '%s' "$result"
 }
 
 # c1_unauth_denied CODE [REDIRECT_URL] -> 0 only for a POSITIVE denial (M-2a):
@@ -1421,6 +1422,10 @@ c1_privacy_check() {
   if grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe received the marker (HTTP $code)"; rm -f "$f"; return 1; fi
   # Any 2xx to an unauthenticated client is treated as exposure (fail closed).
   if [[ "$code" == 2?? ]]; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe got HTTP $code"; rm -f "$f"; return 1; fi
+  if [[ "$code" == 000 && "$loc" =~ ^curl-exit-[0-9]{1,3}$ ]]; then
+    C1_PRIVACY_DETAIL="unauthenticated probe transport failure ($loc)"
+    rm -f "$f"; return 1
+  fi
   if c1_codespaces_pf_signin_redirect "$code" "${loc:-}"; then
     # Bind the independently checked port visibility to the exact forwarding
     # origin under probe; never let a private 6080 attest to a different URL.
@@ -1448,7 +1453,11 @@ c1_privacy_check() {
   fi
   read -r code loc <<<"$(c1_https_probe "$base$path" "$f" "$hdr" "$ca")" || true
   if [[ "${code:-}" == 200 ]] && grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=private C1_PRIVACY_DETAIL='denied unauthenticated; authenticated probe reached the marker'; rm -f "$f"; return 0; fi
-  C1_PRIVACY_DETAIL="authenticated probe did not reach the marker (HTTP ${code:-000})"
+  if [[ "$code" == 000 && "$loc" =~ ^curl-exit-[0-9]{1,3}$ ]]; then
+    C1_PRIVACY_DETAIL="authenticated probe transport failure ($loc)"
+  else
+    C1_PRIVACY_DETAIL="authenticated probe did not reach the marker (HTTP ${code:-000})"
+  fi
   rm -f "$f"; return 1
 }
 
@@ -1569,7 +1578,7 @@ c1_privacy_monitor_loop() {
   local C1_PROBE_MAX_TIME=0.4 C1_MONITOR_FAST_TEARDOWN=1
   local C1_GH_READ_TIMEOUT C1_GH_EVIDENCE=cached C1_GH_CACHED_PRIVATE=0
   printf -v C1_GH_READ_TIMEOUT '%d.%03d' $(( C1_MON_GH_TIMEOUT_MS / 1000 )) $(( C1_MON_GH_TIMEOUT_MS % 1000 ))
-  local reason now gh_ok gh_next gh_started=0 gh_job='' gh_out g vis
+  local reason detail teardown_rc now gh_ok gh_next gh_started=0 gh_job='' gh_out g vis
   gh_out="${TMPDIR:-/tmp}/c1-gh-monitor.$BASHPID"
   trap 'c1_monitor_gh_stop; exit 0' TERM
   c1_now_ms now
@@ -1578,7 +1587,7 @@ c1_privacy_monitor_loop() {
   (( req_gh )) && C1_GH_CACHED_PRIVATE=1
   while c1_owned_pid "$ws" "$s" "$wsst"; do
     sleep "$iv"
-    reason=''
+    reason='' detail=''
     c1_now_ms now
     if (( req_gh )); then
       if [[ -n "$gh_job" && -f "$gh_out" ]]; then
@@ -1609,12 +1618,17 @@ c1_privacy_monitor_loop() {
       elif [[ $C1_PRIVACY_STATE == public ]]; then reason=public
       else reason=unverified
       fi
+      detail=$C1_PRIVACY_DETAIL
     fi
     # A stalled/ambiguous edge is not a positive privacy proof: fail closed on
     # its first observation. L-9: an unverifiable teardown propagates rc 2.
     c1_monitor_gh_stop
-    c1_teardown_novnc "$s" "$port" "$ws" "$wsst" "$reason" || return 2
-    return 0
+    teardown_rc=0
+    c1_teardown_novnc "$s" "$port" "$ws" "$wsst" "$reason" || teardown_rc=2
+    if [[ -n "$detail" ]]; then
+      printf '%s %s\n' "$(c1_utc)" "$detail" >"$s/privacy-diagnostic" || true
+    fi
+    return "$teardown_rc"
   done
   c1_monitor_gh_stop
 }
