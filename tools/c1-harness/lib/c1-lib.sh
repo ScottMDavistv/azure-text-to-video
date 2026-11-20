@@ -1356,22 +1356,30 @@ c1_codespace_url() {
 c1_write_header_file() { ( umask 077; printf '%s: %s\n' "$2" "$3" >"$1" ); }
 
 # c1_https_probe URL OUTFILE [HEADERFILE] [CACERT] -> prints "CODE REDIRECT_URL"
+# Transport failures use code 000 and may include cumulative seconds for
+# DNS, TCP connect, TLS, first byte and total, in that order.
 # (CODE 000 on transport failure; REDIRECT_URL empty unless a 3xx carried one).
 # HTTPS only, no redirects followed, no proxy, minimal environment (no
 # inherited CURL_CA_BUNDLE/HTTPS_PROXY).
 c1_https_probe() {
-  local url=$1 out=$2 hdr=${3:-} ca=${4:-} result rc
-  local -a a=(--silent --max-time "$C1_PROBE_MAX_TIME" --proto '=https' --noproxy '*' -o "$out" -w '%{http_code} %{redirect_url}')
+  local url=$1 out=$2 hdr=${3:-} ca=${4:-} result rc timing
+  local elapsed='[0-9]+[.][0-9]+'
+  local -a a=(--silent --max-time "$C1_PROBE_MAX_TIME" --proto '=https' --noproxy '*' -o "$out"
+    -w '%{http_code} %{redirect_url}\n%{time_namelookup},%{time_connect},%{time_appconnect},%{time_starttransfer},%{time_total}')
   if [[ -n "$hdr" ]]; then a+=(-H "@$hdr"); fi
   if [[ -n "$ca" ]]; then a+=(--cacert "$ca"); fi
   : >"$out"
   # --disable must be curl's first argument. Curl can discover a config
   # through the account record even when no HOME is exported.
   if result=$(env -i PATH="$PATH" curl --disable "${a[@]}" -- "$url" 2>/dev/null); then
-    printf '%s' "$result"
+    printf '%s' "${result%%$'\n'*}"
   else
     rc=$?
     printf '000 curl-exit-%d' "$rc"
+    timing=${result#*$'\n'}
+    if [[ "$result" == *$'\n'* && "$timing" =~ ^$elapsed(,$elapsed){4}$ ]]; then
+      printf ' timing=%s' "$timing"
+    fi
   fi
 }
 
@@ -1407,6 +1415,7 @@ c1_codespaces_pf_signin_redirect() {
 # positive unauthenticated denial AND an authenticated 200 carrying the marker.
 c1_privacy_check() {
   local base=$1 path=$2 marker=$3 hdr=$4 ca=${5:-} f code loc
+  local transport='^curl-exit-[0-9]{1,3}( timing=[0-9]+[.][0-9]+(,[0-9]+[.][0-9]+){4})?$'
   C1_PRIVACY_STATE=unverified C1_PRIVACY_DETAIL='bad arguments'
   C1_PRIVACY_GH_PRIVATE=0
   [[ -n "$base" && -n "$marker" && -s "$hdr" ]] || return 1
@@ -1422,7 +1431,7 @@ c1_privacy_check() {
   if grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe received the marker (HTTP $code)"; rm -f "$f"; return 1; fi
   # Any 2xx to an unauthenticated client is treated as exposure (fail closed).
   if [[ "$code" == 2?? ]]; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe got HTTP $code"; rm -f "$f"; return 1; fi
-  if [[ "$code" == 000 && "$loc" =~ ^curl-exit-[0-9]{1,3}$ ]]; then
+  if [[ "$code" == 000 && "$loc" =~ $transport ]]; then
     C1_PRIVACY_DETAIL="unauthenticated probe transport failure ($loc)"
     rm -f "$f"; return 1
   fi
@@ -1453,7 +1462,7 @@ c1_privacy_check() {
   fi
   read -r code loc <<<"$(c1_https_probe "$base$path" "$f" "$hdr" "$ca")" || true
   if [[ "${code:-}" == 200 ]] && grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=private C1_PRIVACY_DETAIL='denied unauthenticated; authenticated probe reached the marker'; rm -f "$f"; return 0; fi
-  if [[ "$code" == 000 && "$loc" =~ ^curl-exit-[0-9]{1,3}$ ]]; then
+  if [[ "$code" == 000 && "$loc" =~ $transport ]]; then
     C1_PRIVACY_DETAIL="authenticated probe transport failure ($loc)"
   else
     C1_PRIVACY_DETAIL="authenticated probe did not reach the marker (HTTP ${code:-000})"

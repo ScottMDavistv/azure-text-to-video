@@ -1221,12 +1221,20 @@ MOCK_GH
 #!/usr/bin/env bash
 [[ "$1" == --disable ]] || exit 9
 if [[ "$*" == *partial* ]]; then printf '200 '; exit 18; fi
-printf '403 '
+if [[ "$*" == *timed* ]]; then
+  printf '200 https://private.invalid/?secret\n0.010000,0.020000,0.030000,0.000000,0.400000'
+  exit 28
+fi
+if [[ "$*" == *malformed* ]]; then printf '000 \nsecret'; exit 28; fi
+printf '403 \n0.010000,0.020000,0.030000,0.040000,0.050000'
 MOCK_CURL
     chmod +x "$bin/curl"
     export PATH="$bin:$PATH"
     result=$(c1_https_probe "$BASE/marker" "$out") && [[ $result == '403 ' ]] || return 1
-    result=$(c1_https_probe "$BASE/partial" "$out" "$PV/hdr") && [[ $result == '000 curl-exit-18' ]]
+    result=$(c1_https_probe "$BASE/partial" "$out" "$PV/hdr") && [[ $result == '000 curl-exit-18' ]] || return 1
+    result=$(c1_https_probe "$BASE/timed" "$out" "$PV/hdr") &&
+      [[ $result == '000 curl-exit-28 timing=0.010000,0.020000,0.030000,0.000000,0.400000' ]] || return 1
+    result=$(c1_https_probe "$BASE/malformed" "$out" "$PV/hdr") && [[ $result == '000 curl-exit-28' ]]
   )
   curl_probe_config_mutation() (
     local original mutated
