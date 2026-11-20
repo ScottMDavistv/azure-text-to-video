@@ -1146,6 +1146,37 @@ MOCK_GH
   t 'Codespaces redirect refuses mismatched forwarding origin before token probe' pf_signin_with_gh_readback private valid mismatched
   t 'Codespaces redirect refuses wrong authenticated nonce despite GH private' pf_signin_with_gh_readback private invalid
 
+  desktop_visibility_handoff() (
+    local decoy_proof=$1 desktop_proof=$2 confirmation=$3 expected=$4 rc=0 checks=0 monitor=none
+    local S="$TMP" LIB=unused BASE='' HDR='' WS='' WSST='' REQ_GH=0 PORT_PRIVATE=''
+    local GITHUB_TOKEN=fixture C1_NOVNC_PORT=6080 C1_PRIVACY_GH_PRIVATE=0 C1_GH_VIS=''
+    unset CODESPACE_NAME
+    # Load just the launcher function; avoid starting a desktop or calling GitHub.
+    eval "$(sed -n '/^start_private_desktop() {$/,/^}$/p' "$HERE/../c1-session.sh")"
+    c1_codespace_base() { echo https://fixture-6080.app.github.dev; }
+    c1_write_header_file() { :; }
+    c1_start_display_vnc() { :; }
+    c1_verify_private_with_decoy() { C1_PRIVACY_GH_PRIVATE=$decoy_proof; }
+    c1_gh_visibility() { return 1; }
+    c1_repo_owner_type() { echo User; }
+    c1_start_websockify() { echo 123; }
+    c1_proc_start() { echo 456; }
+    c1_verify_private_novnc() { C1_PRIVACY_GH_PRIVATE=$desktop_proof; }
+    c1_gh_private() { checks=$((checks + 1)); return "$confirmation"; }
+    c1_spawn() { monitor=${!#}; }
+    fail_desktop() { PORT_PRIVATE=failed; return 1; }
+    start_private_desktop fixture || rc=$?
+    case "$expected" in
+      monitor) [[ $rc == 0 && $checks == 1 && $monitor == 1 && $PORT_PRIVATE == verified-probe-gh ]] ;;
+      closed) [[ $rc == 1 && $checks == 1 && $monitor == none && $PORT_PRIVATE == failed ]] ;;
+      fallback) [[ $rc == 0 && $checks == 0 && $monitor == 0 && $PORT_PRIVATE == verified-probe-user-repo ]] ;;
+    esac
+  )
+  t 'R11: real endpoint redirect enables monitored private visibility after personal-repo fallback' desktop_visibility_handoff 0 1 0 monitor
+  t 'R11: decoy redirect keeps private visibility monitoring after a missed read-back' desktop_visibility_handoff 1 0 0 monitor
+  t 'R11: unavailable final private read-back shuts down before monitor handoff' desktop_visibility_handoff 0 1 1 closed
+  t 'R11: personal-repo fallback remains available with positive denial and no redirect' desktop_visibility_handoff 0 0 1 fallback
+
   forwarding_origin_pinned() (
     export CODESPACE_NAME=fixture
     unset GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN

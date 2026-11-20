@@ -235,7 +235,8 @@ start_private_desktop() {
   fi
   # L-10: on the gh path, gh must keep reading back "private" (org visibility
   # still demands GitHub sign-in, so only gh can see a later change to it).
-  if [[ "$vis" == private ]]; then REQ_GH=1; else REQ_GH=0; fi
+  REQ_GH=0
+  if [[ "$vis" == private || "$C1_PRIVACY_GH_PRIVATE" == 1 ]]; then REQ_GH=1; fi
   local wrc=0
   WS=$(c1_start_websockify "$S" "$C1_NOVNC_PORT") || wrc=$?
   if (( wrc )); then
@@ -248,6 +249,9 @@ start_private_desktop() {
     c1_err "noVNC privacy re-check failed ($C1_PRIVACY_STATE: $C1_PRIVACY_DETAIL)"
     fail_desktop "$C1_PRIVACY_STATE"; return 1
   fi
+  # The real endpoint can switch to the GitHub sign-in redirect after the
+  # decoy. Carry its successful private read-back into the monitor policy.
+  if [[ "$C1_PRIVACY_GH_PRIVATE" == 1 ]]; then REQ_GH=1; fi
   if (( REQ_GH )) && ! c1_gh_private "$C1_NOVNC_PORT"; then
     c1_err "gh no longer reads back port $C1_NOVNC_PORT as private (${C1_GH_VIS:-unavailable})"
     fail_desktop gh-visibility; return 1
