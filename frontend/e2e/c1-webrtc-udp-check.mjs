@@ -6,7 +6,7 @@ import { createSocket } from 'node:dgram'
 import { createServer } from 'node:http'
 import { networkInterfaces } from 'node:os'
 import { once } from 'node:events'
-import { WEBRTC_UDP_POLICY_ARG } from './c1-webrtc-policy.mjs'
+import { WEBRTC_UDP_POLICY_ARG, headedWebrtcLaunchOptions } from './c1-webrtc-policy.mjs'
 import config from '../playwright.config.mjs'
 
 if (process.env.C1_LIVE === '1') throw new Error('L-2 probe refuses live Entra mode')
@@ -61,10 +61,12 @@ async function gather(page, stunPort) {
   }, { host: iface, port: stunPort, timeoutMs: timeout })
 }
 
-async function exerciseBrowser(guarded, stunPort, webPort) {
-  const browser = await chromium.launch({ args: guarded ? ['--enable-automation', WEBRTC_UDP_POLICY_ARG] : ['--enable-automation'] })
+async function exerciseBrowser(guarded, headed, stunPort, webPort) {
+  const launchOptions = headed && guarded ? headedWebrtcLaunchOptions : {}
+  const args = guarded && !headed ? ['--enable-automation', WEBRTC_UDP_POLICY_ARG] : ['--enable-automation']
+  const browser = await chromium.launch({ ...launchOptions, headless: !headed, args })
   try {
-    await checkLaunchArguments(browser, guarded)
+    await checkLaunchArguments(browser, guarded && !headed)
     // Browser policy must apply to newly created, independent contexts as well.
     for (let i = 0; i < 2; i++) {
       const context = await browser.newContext()
@@ -87,13 +89,18 @@ try {
   await once(http, 'listening')
   const stunPort = sock.address().port
   const webPort = http.address().port
-  const version = await exerciseBrowser(false, stunPort, webPort)
-  console.log('C1 L-2 unrestricted Chromium ' + version + ': STUN binding requests=' + udpPackets.length)
-  assert.ok(udpPackets.length > 0, 'L-2 NOT VERIFIED: unrestricted Chromium did not deliver STUN to positive-control sink')
-  udpPackets.length = 0
-  await exerciseBrowser(true, stunPort, webPort)
-  console.log('C1 L-2 protected Chromium: STUN binding requests=' + udpPackets.length)
-  assert.equal(udpPackets.length, 0, 'L-2 FAIL: guarded Chromium delivered STUN UDP')
+  for (const headed of [false, true]) {
+    const mode = headed ? 'headed Chromium' : 'Headless Shell'
+    udpPackets.length = 0
+    const version = await exerciseBrowser(false, headed, stunPort, webPort)
+    assert.equal(version, '159.0.8154.6', 'L-2 requires the pinned Chromium build')
+    console.log('C1 L-2 unrestricted ' + mode + ' ' + version + ': STUN binding requests=' + udpPackets.length)
+    assert.ok(udpPackets.length > 0, 'L-2 NOT VERIFIED: unrestricted ' + mode + ' did not deliver STUN')
+    udpPackets.length = 0
+    assert.equal(await exerciseBrowser(true, headed, stunPort, webPort), version)
+    console.log('C1 L-2 protected ' + mode + ': STUN binding requests=' + udpPackets.length)
+    assert.equal(udpPackets.length, 0, 'L-2 FAIL: guarded ' + mode + ' delivered STUN UDP')
+  }
   success = true
   console.log('C1 L-2 PASS: unrestricted STUN delivered; protected contexts delivered zero packets')
 } finally {
