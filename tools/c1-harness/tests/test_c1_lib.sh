@@ -2397,7 +2397,7 @@ if [[ -n "$TOP" ]] && git -C "$TOP" cat-file -e "$C1_PR60_WORKFLOW_BASE^{commit}
   pinned_l2_scope() {
     local actual expected
     actual=$(git -C "$TOP" diff --no-renames --name-only "$C1_PR60_WORKFLOW_BASE" HEAD | grep -v '^tools/c1-harness/' | LC_ALL=C sort)
-    expected=$(printf '%s\\n' '.github/workflows/frontend-quality-gates.yml' 'frontend/e2e/c1-webrtc-policy.mjs' 'frontend/e2e/c1-webrtc-udp-check.mjs' 'frontend/playwright.config.mjs' | LC_ALL=C sort)
+    expected=$(printf '%s\n' '.github/workflows/frontend-quality-gates.yml' 'frontend/e2e/c1-webrtc-policy.mjs' 'frontend/e2e/c1-webrtc-udp-check.mjs' 'frontend/playwright.config.mjs' | LC_ALL=C sort)
     [[ "$actual" == "$expected" ]]
   }
   t 'L-2 only changes approved frontend policy/probe/config/workflow plus harness' pinned_l2_scope
