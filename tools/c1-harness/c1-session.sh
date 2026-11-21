@@ -3,7 +3,7 @@
 #
 #   bash tools/c1-harness/c1-session.sh              # full supervised session (Codespaces only)
 #   bash tools/c1-harness/c1-session.sh --offline-only
-#   bash tools/c1-harness/c1-session.sh preflight | cleanup | purge | selftest
+#   bash tools/c1-harness/c1-session.sh preflight | r11-only | cleanup | purge | selftest
 #
 # Runs the approved PR #60 Playwright suite UNMODIFIED from a detached, clean
 # worktree at the pinned approved SHA, inside a private Xvfb/noVNC desktop
@@ -72,13 +72,17 @@ preflight() {
   check ports_free
 }
 
-install_deps() {
-  mkdir -p "$CACHE"
+install_desktop_deps() {
   c1_install_apt_packages || return 1
   command -v ss >/dev/null || { c1_err 'ss (iproute2) is required for listener verification'; return 1; }
   # M-3: a present but non-working ss, or unreadable IPv4/IPv6 kernel tables, must stop the run here.
   c1_listen_tables || { c1_err 'IPv4/IPv6 listener evidence (kernel tables + ss) is unavailable or inconsistent'; return 1; }
   check listener_evidence_available
+}
+
+install_deps() {
+  mkdir -p "$CACHE"
+  install_desktop_deps || return 1
   c1_install_node_deps "$FE" "$CACHE" || return 1
   c1_verify_clean_tree "$WT" "$PW" || return 1; check clean_after_dependency_install
 }
@@ -220,9 +224,6 @@ start_private_desktop() {
   c1_write_header_file "$S/api-token.hdr" Authorization "token $GITHUB_TOKEN" || return 1
   c1_start_display_vnc "$S" "$pass" || return 1
   c1_log "verifying Codespaces port $C1_NOVNC_PORT privacy with a decoy (no desktop behind it yet)"
-  if command -v gh >/dev/null 2>&1 && [[ -n "${CODESPACE_NAME:-}" ]]; then
-    timeout --kill-after=0.1s "$C1_GH_READ_TIMEOUT" gh codespace ports visibility "$C1_NOVNC_PORT:private" -c "$CODESPACE_NAME" >/dev/null 2>&1 || true
-  fi
   c1_verify_private_with_decoy "$S" "$C1_NOVNC_PORT" "$BASE" "$HDR" || { PORT_PRIVATE=failed; return 1; }
   # "Private to organization" also requires GitHub sign-in, so the probe alone
   # cannot exclude it. Accept only a gh read-back of "private", or a
@@ -262,6 +263,74 @@ start_private_desktop() {
   # The monitor checks noVNC privacy before each supervised phase as well.
   c1_spawn "$S" privacy-monitor bash -c 'source "$1"; c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "" 0.2 "$7" "$8"' \
     _ "$LIB" "$S" "$BASE" "$HDR" "$WS" "$WSST" "$C1_NOVNC_PORT" "$REQ_GH" >/dev/null || { fail_desktop monitor-start; return 1; }
+}
+
+# Dedicated R11 evidence is written after verified cleanup, including on errors.
+finish_r11() {
+  local rc=$1 listener=unverified cleanup=not-needed checkout=unverified verdict=FAIL listener_state listener_detail
+  trap - EXIT
+  trap '' INT TERM HUP
+
+  if [[ -n "$S" ]]; then
+    if [[ -r "$S/listener-state" ]] &&
+      { IFS= read -r listener_state; IFS= read -r listener_detail; } <"$S/listener-state" &&
+      [[ "$listener_state" == verified &&
+        "$listener_detail" =~ ^127[.]0[.]0[.]1:$C1_NOVNC_PORT\ pid=[0-9]+\ comm=[A-Za-z0-9._-]+\ ino=[0-9]+$ ]]; then
+      listener=verified-loopback
+    fi
+    if [[ -e "$S/privacy-failed" ]]; then PORT_PRIVATE=failed; fi
+    cleanup=FAIL
+    if c1_cleanup_session "$ROOT" "$S" && c1_verify_cleanup "$S"; then cleanup=PASS; fi
+  fi
+  if [[ "$(git -C "$REPO" rev-parse HEAD)" == "$R11_HEAD" ]] &&
+    c1_verify_harness_clean "$REPO" "$HARNESS_REL"; then
+    checkout=verified
+  fi
+  if (( rc == 0 )) && [[ "$PORT_PRIVATE" == verified-* && "$listener" == verified-loopback &&
+    "$cleanup" == PASS && "$checkout" == verified ]]; then
+    verdict=PASS
+  fi
+
+  {
+    printf '# C1 R11 privacy evidence\n\n'
+    printf -- '- Harness commit: %s\n' "$R11_HEAD"
+    printf -- '- Completed at: %s\n' "$(c1_utc)"
+    printf -- '- Verified checkout: %s\n' "$checkout"
+    printf -- '- Port privacy: %s\n' "$PORT_PRIVATE"
+    # The existing HTTPS classifier supplies a sanitized reason without redirect URLs or credentials.
+    printf -- '- Last privacy probe: %s\n' "${C1_PRIVACY_DETAIL:-not run}"
+    printf -- '- Desktop listener: %s\n' "$listener"
+    printf -- '- Cleanup: %s\n' "$cleanup"
+    printf -- '- Monitor coverage: startup only; sustained monitoring not tested\n'
+    printf -- '- R11: %s\n' "$verdict"
+  } >"$R11_EVIDENCE" || { c1_err 'could not write R11 evidence'; exit 1; }
+
+  printf 'R11: %s\nEvidence: %s\n' "$verdict" "$R11_EVIDENCE"
+  [[ "$verdict" == PASS ]] && exit 0
+  (( rc != 0 )) || rc=1
+  exit "$rc"
+}
+
+r11_session() {
+  local pass
+  [[ "${CODESPACES:-}" == true ]] || { c1_err 'r11-only requires a GitHub Codespace'; return 1; }
+  scrub_env
+  c1_recover_before_start "$ROOT" || return 1
+  R11_HEAD=$(git -C "$REPO" rev-parse HEAD)
+  preflight || return 1
+  install_desktop_deps || return 1
+  mkdir -p "$EVIDENCE_DIR"
+  R11_EVIDENCE=$(mktemp "$EVIDENCE_DIR/c1-r11-$(date -u +%Y%m%dT%H%M%SZ).XXXXXXXX.md")
+  PORT_PRIVATE=not-started BASE='' HDR='' WS='' WSST='' REQ_GH=0
+  C1_PRIVACY_DETAIL=''
+  trap 'finish_r11 "$?"' EXIT
+  trap 'exit 130' INT TERM HUP
+  S=$(c1_session_new "$ROOT")
+  export C1_HARNESS_SESSION=$S TMPDIR="$S/tmp"
+  c1_start_watchdog "$ROOT" "$S" "$$" "$LIB"
+  pass=$(c1_gen_password)
+  if ! start_private_desktop "$pass"; then exit 1; fi
+  exit 0
 }
 
 session() {
@@ -401,6 +470,7 @@ main() {
   [[ "${2:-}" == --offline-only ]] && offline=1
   case $sub in
     run) session "$offline" ;;
+    r11-only) [[ $# -eq 1 ]] || { usage; return 2; }; r11_session ;;
     preflight) scrub_env; c1_recover_before_start "$ROOT" || return 1; preflight || return 1; install_deps || return 1; c1_log "preflight PASS: ${CHECKS[*]}" ;;
     cleanup) c1_cleanup_all "$ROOT"; c1_port_free "$C1_NOVNC_PORT" && c1_log 'no harness sessions remain' ;;
     purge) c1_cleanup_all "$ROOT"

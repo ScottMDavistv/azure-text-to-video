@@ -45,6 +45,27 @@ Have these ready:
 
 Paste the **review package** into a **separate** Claude session for the independent security review. The command exits non-zero if the evidence verdict is FAIL or cleanup could not be verified.
 
+## R11-only diagnostic
+
+Run `bash tools/c1-harness/c1-session.sh r11-only` in a
+GitHub Codespace to verify private forwarding, decoy access,
+noVNC startup privacy, listener isolation, and cleanup.
+
+Port 6080 must be Private. The harness does not change port
+visibility. If forwarding is missing or not verified private,
+the run fails closed. Only an explicitly authorized operator
+may change the visibility setting.
+
+HTTP 404 is unverified, not a positive denial. The existing
+bounded retry policy remains in force.
+
+R11-only starts the privacy monitor and then initiates cleanup.
+It does not prove sustained monitor operation, exposure-triggered
+teardown, or the complete supervised Microsoft Entra sequence.
+
+The R11 evidence is scoped to the exact local harness commit
+and does not independently certify PR #74 or C1.
+
 ## Other commands
 
 | Command | Purpose |
