@@ -789,6 +789,23 @@ c1_session_status() {
   if [[ -n "$pid" && -n "$start" && "$(c1_proc_start "$pid")" == "$start" ]]; then echo active; else echo stale; fi
 }
 
+# Operator cleanup/purge must not compete with an active launcher.
+# The watchdog cleans only after its owner exits; recovery already refuses
+# active sessions. Missing/unreadable status is not permission to clean.
+c1_refuse_active_cleanup() {
+  local root=$1 status
+  [[ -d "$root" ]] || return 0
+  status=$(c1_session_status "$root") || {
+    c1_err 'cannot verify C1 launcher state; refusing operator cleanup'
+    return 1
+  }
+  case "$status" in
+    none|stale) return 0 ;;
+    active) c1_err 'C1 launcher is active; operator cleanup/purge is forbidden until it exits'; return 1 ;;
+    *) c1_err "unrecognized C1 launcher state: $status"; return 1 ;;
+  esac
+}
+
 c1_session_dir() { local _p _t s; read -r _p _t s <"$1/active" 2>/dev/null && printf '%s' "$s"; }
 
 # N-1: check ALL retained session evidence before a new run or preflight,
