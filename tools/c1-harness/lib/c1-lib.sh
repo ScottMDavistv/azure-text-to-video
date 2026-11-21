@@ -815,32 +815,47 @@ c1_marked_pids() {
 # Read exactly one complete line. A symlink, NUL byte, extra data, or a
 # session outside the state root makes ownership indeterminate.
 c1_read_active() {
-  local root=$1 record='' suffix pattern
+  local root=$1 record='' pattern
   [[ -f "$root/active" && ! -L "$root/active" && -O "$root/active" &&
      "$(stat -c %a -- "$root/active")" == 600 ]] || return 1
   if IFS= read -r -d '' record <"$root/active"; then return 1; fi
   pattern='^([1-9][0-9]*) ([1-9][0-9]*) ([^[:cntrl:]]+)'$'\n''$'
   [[ "$record" =~ $pattern ]] || return 1
   C1_ACTIVE_PID=${BASH_REMATCH[1]} C1_ACTIVE_START=${BASH_REMATCH[2]} C1_ACTIVE_SESSION=${BASH_REMATCH[3]}
-  [[ "$C1_ACTIVE_PID" != 1 && "$C1_ACTIVE_SESSION" == "$root"/session.* ]] || return 1
-  suffix=${C1_ACTIVE_SESSION#"$root/session."}
-  [[ "$suffix" =~ ^[A-Za-z0-9]+$ && ! -L "$C1_ACTIVE_SESSION" &&
-     ( ! -e "$C1_ACTIVE_SESSION" || -d "$C1_ACTIVE_SESSION" ) ]]
+  [[ "$C1_ACTIVE_PID" != 1 ]] && c1_session_path_valid "$root" "$C1_ACTIVE_SESSION"
+}
+
+c1_session_path_valid() {
+  local root=$1 session=$2 suffix
+  [[ "$session" == "$root"/session.* ]] || return 1
+  suffix=${session#"$root/session."}
+  [[ "$suffix" =~ ^[A-Za-z0-9]+$ && ! -L "$session" &&
+     ( ! -e "$session" || -d "$session" ) ]]
+}
+
+c1_active_matches() {
+  c1_read_active "$1" &&
+    [[ "$C1_ACTIVE_SESSION" == "$2" && "$C1_ACTIVE_PID" == "$3" && "$C1_ACTIVE_START" == "$4" ]]
 }
 
 # c1_session_status ROOT -> none | active | stale, or failure on uncertainty.
 c1_session_status() {
-  local root=$1 identity observed proc_state
+  local root=$1
   [[ -e "$root/active" || -L "$root/active" ]] || { echo none; return; }
   c1_read_active "$root" || return 1
-  identity=$(awk '{sub(/^.*\) /, ""); print $1, $20}' "/proc/$C1_ACTIVE_PID/stat" 2>/dev/null) || {
-    [[ ! -d "/proc/$C1_ACTIVE_PID" ]] || return 1
+  c1_owner_status "$C1_ACTIVE_PID" "$C1_ACTIVE_START"
+}
+
+c1_owner_status() {
+  local owner=$1 owner_start=$2 identity observed proc_state
+  identity=$(awk '{sub(/^.*\) /, ""); print $1, $20}' "/proc/$owner/stat" 2>/dev/null) || {
+    [[ ! -d "/proc/$owner" ]] || return 1
     echo stale
     return
   }
   read -r proc_state observed <<<"$identity" || return 1
   [[ "$observed" =~ ^[1-9][0-9]*$ ]] || return 1
-  if [[ "$observed" != "$C1_ACTIVE_START" ]]; then echo stale; return; fi
+  if [[ "$observed" != "$owner_start" ]]; then echo stale; return; fi
   [[ "$proc_state" =~ ^[A-Z]$ ]] || return 1
   if [[ "$proc_state" =~ ^[ZX]$ ]]; then echo stale; else echo active; fi
 }
@@ -950,8 +965,18 @@ c1_live_supervisors() {
   done <"$1/supervisors"
 }
 
+# The launcher has its own PID and session path even if active was damaged.
+c1_cleanup_launcher() {
+  local owner_start
+  owner_start=$(c1_proc_start "$$") || return 1
+  [[ "$owner_start" =~ ^[1-9][0-9]*$ ]] || return 1
+  c1_cleanup_session "$1" "$2" "$$" "$owner_start"
+}
+
+# The optional owner tuple is supplied only by the launcher or its watchdog.
 c1_cleanup_session() {
   local cleanup_gate cleanup_exit=0
+  if [[ -n "${3:-}" ]]; then c1_session_path_valid "$1" "$2" || return 1; fi
   if [[ -L "$2" ]]; then return 1; fi
   if [[ -d "$2" ]]; then
     [[ ! -L "$2/.spawn-lock" ]] || return 1
@@ -965,10 +990,13 @@ c1_cleanup_session() {
 
 _c1_cleanup_session() {
   local root=$1 s=$2 pid start descendants='' capture_ok=0
+  local owner=${3:-} owner_start=${4:-} ambiguous=0
   [[ -n "$s" ]] || return 0
   # Never let cleanup's own helper processes carry the marker it hunts for.
   export -n C1_HARNESS_SESSION 2>/dev/null || true; unset C1_HARNESS_SESSION
-  if [[ -e "$root/active" || -L "$root/active" ]]; then
+  if [[ -n "$owner" ]]; then
+    c1_active_matches "$root" "$s" "$owner" "$owner_start" || ambiguous=1
+  elif [[ -e "$root/active" || -L "$root/active" ]]; then
     c1_read_active "$root" || return 1
   fi
   [[ ! -L "$s" ]] || return 1
@@ -1088,6 +1116,15 @@ _c1_cleanup_session() {
     fi
     [[ -f "$verification_record" && ! -L "$verification_record" ]] || return 1
     c1_safe_rm "$s" "$root" || return 1
+  fi
+  if [[ -n "$owner" ]]; then
+    if (( ambiguous )) || ! c1_active_matches "$root" "$s" "$owner" "$owner_start"; then
+      if [[ "${C1_FINAL_PRIVACY-unset}" == clean ]]; then C1_FINAL_PRIVACY=failed; fi
+      c1_err 'cleanup evidence: active record could not be verified; record left untouched'
+      return 1
+    fi
+    rm -f -- "$root/active"
+    return
   fi
   if [[ -e "$root/active" || -L "$root/active" ]]; then
     c1_read_active "$root" || return 1
@@ -1851,22 +1888,22 @@ c1_gh_visibility() {
 
 # --------------------------------------------------------------- watchdog --
 # The watchdog stays outside the supervised tree and owns no inherited lock.
-# It requests launcher teardown once, then waits until the lifecycle lock is
-# available and revalidates the record before recovering.
+# It uses the session and owner identity verified at startup. Only a matching
+# active record authorizes asking a live launcher to shut down.
 c1_watchdog_loop() {
   local root=$1 session=$2 owner=$3 owner_start=$4 sent=0 register launcher_state
   register=$(c1_privacy_register "$session")
   while :; do
-    c1_read_active "$root" || return 0
-    [[ "$C1_ACTIVE_PID $C1_ACTIVE_START $C1_ACTIVE_SESSION" == "$owner $owner_start $session" ]] || return 0
-    launcher_state=$(c1_session_status "$root") || return 1
+    if [[ ! -e "$root/active" && ! -L "$root/active" && ! -e "$session" && ! -L "$session" ]] &&
+       [[ -z "$(c1_marked_pids "$session")" ]]; then return 0; fi
+    launcher_state=$(c1_owner_status "$owner" "$owner_start") || return 1
     if [[ "$launcher_state" == stale ]] && c1_lock_state "$root"; then
-      c1_read_active "$root" || return 0
-      [[ "$C1_ACTIVE_PID $C1_ACTIVE_START $C1_ACTIVE_SESSION" == "$owner $owner_start $session" ]] || return 0
-      c1_cleanup_all "$root"
+      c1_cleanup_session "$root" "$session" "$owner" "$owner_start" || return 1
+      c1_verify_cleanup "$session"
       return
     fi
     if [[ "$launcher_state" == active && "$sent" == 0 ]] &&
+       c1_active_matches "$root" "$session" "$owner" "$owner_start" &&
        { grep -qs ' teardown-failed$' "$register" || grep -qs ' teardown-failed$' "$session/privacy-failed"; }; then
       c1_signal_identity TERM "$owner" "$owner_start" || return 1
       sent=1
@@ -1877,20 +1914,24 @@ c1_watchdog_loop() {
 
 # c1_start_watchdog ROOT SESSION LAUNCHER_PID LIBPATH
 c1_start_watchdog() {
-  local root=$1 session=$2 owner=$3 lib=$4 owner_start step
+  local root=$1 session=$2 owner=$3 lib=$4 owner_start step watchdog_pid watchdog_start
   owner_start=$(c1_proc_start "$owner") || return 1
   [[ "$owner_start" =~ ^[1-9][0-9]*$ ]] || return 1
   # shellcheck disable=SC2016
   ( c1_close_inherited_fds
     exec env -i PATH="$PATH" HOME="$HOME" setsid bash -euo pipefail -c \
-      'source "$1"; c1_read_active "$2"
-       [[ "$C1_ACTIVE_PID $C1_ACTIVE_START $C1_ACTIVE_SESSION" == "$4 $5 $3" ]]
-       : >"$3/tmp/watchdog-ready"
+      'source "$1"; c1_active_matches "$2" "$3" "$4" "$5"
+       start=$(c1_proc_start "$$")
+       printf "%s %s\n" "$$" "$start" >"$3/tmp/watchdog-ready"
        c1_watchdog_loop "$2" "$3" "$4" "$5"' _ "$lib" "$root" "$session" "$owner" "$owner_start"
   ) </dev/null >/dev/null 2>&1 &
   disown "$!" 2>/dev/null || true
   for ((step=0; step<100; step++)); do
-    [[ ! -f "$session/tmp/watchdog-ready" ]] || return 0
+    if [[ -f "$session/tmp/watchdog-ready" ]] &&
+       read -r watchdog_pid watchdog_start <"$session/tmp/watchdog-ready" &&
+       [[ "$watchdog_pid" =~ ^[1-9][0-9]*$ && "$watchdog_start" =~ ^[1-9][0-9]*$ ]]; then
+      return 0
+    fi
     sleep 0.02
   done
   c1_err 'watchdog did not confirm ownership'

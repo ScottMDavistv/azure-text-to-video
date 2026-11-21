@@ -28,7 +28,17 @@ session() {
   c1_recover_before_start "$ROOT" || return 1
   session_path=$(c1_session_new "$ROOT" "$$") || return 1
   c1_start_watchdog "$ROOT" "$session_path" "$$" "$base/lib/c1-lib.sh" || return 1
-  trap 'c1_cleanup_session "$ROOT" "$session_path"; c1_verify_cleanup "$session_path"' EXIT
+  if [[ -f "$fixture/finish-r11" ]]; then
+    eval "$(sed -n '/^finish_r11() {$/,/^}$/p' "$base/c1-session.sh")"
+    S=$session_path R11_EVIDENCE="$fixture/r11.md" PORT_PRIVATE=verified-probe-gh
+    REPO=fixture R11_HEAD=fixture HARNESS_REL=fixture
+    git() { printf 'fixture\n'; }
+    c1_verify_harness_clean() { return 0; }
+    printf 'verified\n127.0.0.1:6080 pid=11 comm=websockify ino=31\n' >"$S/listener-state"
+    trap 'finish_r11 "$?"' EXIT
+  else
+    trap 'c1_cleanup_launcher "$ROOT" "$session_path"; c1_verify_cleanup "$session_path"' EXIT
+  fi
   trap 'exit 130' TERM
   if [[ -f "$fixture/spawn-victim" ]]; then
     c1_spawn "$session_path" victim sleep 60 >"$fixture/victim" || return 1
@@ -91,7 +101,11 @@ malformed_active() {
   mkdir -p "$STATE/session.fixture"
   printf '999999 1 %s/session.fixture\nextra\n' "$STATE" >"$STATE/active"
   chmod 600 "$STATE/active"
-  if entry cleanup >"$FIXTURE/cleanup.log" 2>&1; then return 1; fi
+  local command
+  for command in cleanup purge; do
+    if entry "$command" >"$FIXTURE/$command.log" 2>&1; then return 1; fi
+    grep -q 'cannot verify C1 launcher state' "$FIXTURE/$command.log" || return 1
+  done
   [[ -e "$STATE/active" && -d "$STATE/session.fixture" ]]
 }
 
@@ -189,8 +203,7 @@ r11_exit_status_and_late_privacy() (
   c1_verify_harness_clean() { return 0; }
   git() { printf 'fixture\n'; }
   for variant in clean late interrupted; do
-    S="$ROOT/session.$variant"
-    mkdir "$S" || return 1
+    S=$(c1_session_new "$ROOT" "$$") || return 1
     R11_EVIDENCE="$FIXTURE/$variant.md"
     PORT_PRIVATE=verified-probe-gh
     printf 'verified\n127.0.0.1:6080 pid=11 comm=websockify ino=31\n' >"$S/listener-state"
@@ -210,6 +223,175 @@ r11_exit_status_and_late_privacy() (
   done
 )
 
+process_is_live() {
+  [[ "$(c1_proc_start "$1")" == "$2" && ! "$(c1_proc_stat_field "$1" 1)" =~ ^[ZX]$ ]]
+}
+
+wait_for_exit() {
+  local step
+  for ((step=0; step<100; step++)); do
+    if ! process_is_live "$1" "$2"; then return 0; fi
+    sleep 0.05
+  done
+  return 1
+}
+
+watchdog_exits_after_cleanup() (
+  entry run >"$FIXTURE/launcher.log" 2>&1 &
+  local first=$! session_path watchdog start
+  trap 'touch "$FIXTURE/release"; wait "$first" 2>/dev/null || true' EXIT
+  wait_for_file "$FIXTURE/ready" || return 1
+  session_path=$(cat "$FIXTURE/ready") || return 1
+  read -r watchdog start <"$session_path/tmp/watchdog-ready" || return 1
+  process_is_live "$watchdog" "$start" || return 1
+  if c1_pid_has_marker "$watchdog" "$session_path"; then return 1; fi
+  touch "$FIXTURE/release"
+  wait "$first" || return 1
+  [[ ! -e "$session_path" && ! -e "$STATE/active" ]] &&
+    wait_for_exit "$watchdog" "$start"
+)
+
+launcher_ambiguous_record() { ambiguous_owner_teardown launcher; }
+watchdog_ambiguous_record() { ambiguous_owner_teardown watchdog; }
+
+ambiguous_owner_teardown() (
+  local mode=$1 first owner owner_start session_path victim victim_start
+  local other other_start watchdog watchdog_start status=0
+  : >"$FIXTURE/spawn-victim"
+  if [[ "$mode" == launcher ]]; then : >"$FIXTURE/finish-r11"; fi
+  entry run >"$FIXTURE/launcher.log" 2>&1 & first=$!
+  trap 'touch "$FIXTURE/release"; wait "$first" 2>/dev/null || true
+        if [[ -n "${watchdog:-}" ]] && process_is_live "$watchdog" "$watchdog_start"; then
+          kill -CONT "$watchdog" 2>/dev/null || true
+        fi
+        if [[ -n "${victim_start:-}" ]]; then
+          c1_signal_owned TERM "$victim" "$session_path" "$victim_start" || true
+        fi
+        if [[ -n "${other:-}" ]]; then kill "$other" 2>/dev/null || true; wait "$other" 2>/dev/null || true; fi' EXIT
+  wait_for_file "$FIXTURE/ready" || return 1
+  read -r owner owner_start session_path <"$STATE/active" || return 1
+  read -r watchdog watchdog_start <"$session_path/tmp/watchdog-ready" || return 1
+  victim=$(cat "$FIXTURE/victim") || return 1
+  victim_start=$(c1_proc_start "$victim") || return 1
+  mkdir "$STATE/session.foreign" || return 1
+  env C1_HARNESS_SESSION="$STATE/session.foreign" sleep 60 & other=$!
+  other_start=$(c1_proc_start "$other") || return 1
+  if [[ "$mode" == launcher ]]; then
+    printf 'malformed record\n' >"$STATE/active"
+  else
+    printf '%s %s %s\n' "$other" "$other_start" "$STATE/session.foreign" >"$STATE/active"
+  fi
+  cp "$STATE/active" "$FIXTURE/preserved" || return 1
+  if [[ "$mode" == watchdog ]]; then c1_record_privacy_failure "$session_path" teardown-failed || return 1; fi
+  sleep 0.4
+  process_is_live "$owner" "$owner_start" && process_is_live "$victim" "$victim_start" || return 1
+  if [[ "$mode" == launcher ]]; then
+    touch "$FIXTURE/release"
+    wait "$first" || status=$?
+    [[ "$status" == 1 ]] &&
+      grep -qx -- '- Cleanup: FAIL' "$FIXTURE/r11.md" &&
+      grep -qx -- '- R11: FAIL' "$FIXTURE/r11.md" || return 1
+  else
+    kill -STOP "$watchdog" 2>/dev/null || return 1
+    kill -KILL "$owner" || return 1
+    wait "$first" 2>/dev/null || true
+    c1_lock_state "$STATE" || return 1
+    kill -CONT "$watchdog" || return 1
+    sleep 0.4
+    process_is_live "$watchdog" "$watchdog_start" &&
+      process_is_live "$victim" "$victim_start" && [[ -d "$session_path" ]] || return 1
+    exec {C1_STATE_LOCK_FD}>&-
+  fi
+  wait_for_exit "$watchdog" "$watchdog_start" || return 1
+  ! process_is_live "$victim" "$victim_start" &&
+    [[ ! -e "$session_path" && -d "$STATE/session.foreign" ]] &&
+    process_is_live "$other" "$other_start" &&
+    cmp -s "$STATE/active" "$FIXTURE/preserved"
+)
+
+signal_identity_checks_start_time() (
+  source "$BASE/lib/c1-lib.sh"
+  local victim process_start
+  python3 -I - "$FIXTURE" <<'PYTHON' &
+import pathlib, signal, sys, time
+
+root = pathlib.Path(sys.argv[1])
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+(root / "signal-ready").touch()
+for step in ("match", "mismatch"):
+    while not (root / step).exists():
+        time.sleep(0.01)
+    if (signal.SIGUSR1 in signal.sigpending()) != (step == "match"):
+        sys.exit(1)
+    if step == "match":
+        signal.sigwait({signal.SIGUSR1})
+    (root / (step + "-checked")).touch()
+PYTHON
+  victim=$!
+  trap 'kill "$victim" 2>/dev/null || true; wait "$victim" 2>/dev/null || true' EXIT
+  wait_for_file "$FIXTURE/signal-ready" || return 1
+  process_start=$(c1_proc_start "$victim") || return 1
+  c1_signal_identity USR1 "$victim" "$process_start" || return 1
+  touch "$FIXTURE/match"
+  wait_for_file "$FIXTURE/match-checked" || return 1
+  c1_signal_identity USR1 "$victim" "$((process_start+1))" || return 1
+  touch "$FIXTURE/mismatch"
+  wait_for_file "$FIXTURE/mismatch-checked" && wait "$victim"
+)
+
+run_finalization() (
+  source "$BASE/lib/c1-lib.sh"
+  eval "$(sed -n '/^clean_node() ($/,/^)/p; /^finalize_run() {$/,/^}$/p' "$BASE/c1-session.sh")"
+  local HERE=$BASE ROOT=$STATE EVIDENCE_DIR variant expected_r11 expected_overall status digest
+  local -a ev rp
+  c1_port_free() { [[ "$variant" != cleanup-failure ]]; }
+  c1_record_tree_descendants() {
+    # Inject the privacy marker after the real finalizer has snapshotted meta.
+    if [[ "$variant" == late-privacy ]]; then : >"$1/privacy-failed"; fi
+  }
+  c1_lock_state "$ROOT" || return 1
+  for variant in clean late-privacy cleanup-failure ambiguous-record; do
+    S=$(c1_session_new "$ROOT" "$$") || return 1
+    EVIDENCE_DIR="$FIXTURE/$variant"
+    cat >"$S/meta" <<'META'
+CHECKOUT_VERIFIED=PASS
+HARNESS_CLEAN=true
+CHECKS=harness_clean,auth_ancestor_and_approved_diff,production_review_status_recorded,exact_head_clean_worktree,vite_host_guard,webrtc_policy_pinned,localhost_loopback_only,ports_free,clean_after_dependency_install,listener_evidence_available
+PLAYWRIGHT_VERSION=1.65.1
+EXPECTED_PLAYWRIGHT_VERSION=1.65.1
+BROWSER_VERSION=159.0.8154.6
+EXPECTED_BROWSER_VERSION=159.0.8154.6
+BROWSER_HEADED_VERSION=159.0.8154.6
+EXPECTED_HEADED_BROWSER_VERSION=159.0.8154.6
+PROD_REVIEW_PENDING=none
+MODE=supervised
+CODESPACES=true
+PORT_PRIVATE=verified-probe-gh
+LISTENER_EVIDENCE=verified
+LISTENER_DETAIL=127.0.0.1:6080 pid=11 comm=websockify ino=31
+META
+    status=0 expected_r11=PASS expected_overall=INCOMPLETE
+    if [[ "$variant" == late-privacy || "$variant" == ambiguous-record ]]; then expected_r11=FAIL; fi
+    if [[ "$variant" == ambiguous-record ]]; then printf 'malformed record\n' >"$ROOT/active"; fi
+    if [[ "$variant" != clean ]]; then expected_overall=FAIL; fi
+    finalize_run 0 >"$FIXTURE/$variant.log" 2>&1 || status=$?
+    if [[ "$variant" == clean ]]; then [[ "$status" == 0 ]] || return 1
+    else [[ "$status" == 1 ]] || return 1; fi
+    ev=("$EVIDENCE_DIR"/c1-evidence-*.md)
+    rp=("$EVIDENCE_DIR"/c1-review-package-*.md)
+    [[ ${#ev[@]} == 1 && ${#rp[@]} == 1 ]] || return 1
+    grep -Eq "^\\| R11 \\| .* \\| \\*\\*$expected_r11\\*\\* \\|" "${ev[0]}" &&
+      grep -Fq "**Harness summary: $expected_overall.**" "${ev[0]}" || return 1
+    if [[ "$variant" == cleanup-failure || "$variant" == ambiguous-record ]]; then
+      grep -Fq -- '- FAIL — inspect terminal diagnostics and retry cleanup' "${ev[0]}" || return 1
+    else
+      grep -Fq -- '- PASS — desktop and test processes stopped' "${ev[0]}" || return 1
+    fi
+    digest=$(sha256sum "${ev[0]}") || return 1
+    grep -Fxq "Evidence SHA-256 (of the section below, for transcription checks only): \`${digest%% *}\`" "${rp[0]}" || return 1
+  done
+)
+
 run_case() {
   BASE=$1 FIXTURE=$(mktemp -d "$TMP/case.XXXXXXXX")
   STATE="$FIXTURE/state"
@@ -224,12 +406,16 @@ if [[ "${1:-}" == --mutations ]]; then
     'malformed_active:record' 'retained_privacy_failure:privacy' 'reused_owner:pid' \
     'watchdog_waits_for_launcher:watchdog' 'r11_exit_status_and_late_privacy:r11' \
     'launcher_crash_recovery:inherited-lock' 'active_publication_preserves_owner:publication' \
-    'verification_is_retried:retry'; do
+    'verification_is_retried:retry' 'launcher_ambiguous_record:launcher-record' \
+    'watchdog_ambiguous_record:watchdog-record' 'watchdog_ambiguous_record:watchdog-lock' \
+    'watchdog_exits_after_cleanup:watchdog-exit' \
+    'run_finalization:privacy-flag' 'run_finalization:cleanup-verdict' 'run_finalization:post-hash-edit' \
+    'signal_identity_checks_start_time:signal-identity'; do
     case_name=${spec%:*} mutation=${spec#*:}
     mutant=$(mktemp -d "$TMP/mutant.XXXXXXXX")
     mkdir "$mutant/lib"
     cp "$HERE/c1-session.sh" "$mutant/"
-    cp "$HERE/lib/"{c1-lib.sh,c1-supervisor.py} "$mutant/lib/"
+    cp "$HERE/lib/"{c1-lib.sh,c1-supervisor.py,c1-evidence.mjs} "$mutant/lib/"
     case $mutation in
       lock) sed -i '/^      c1_lock_state "\$ROOT"/d; /run|r11-only|preflight|cleanup|purge)/a\      :' "$mutant/c1-session.sh" ;;
       record) sed -i '/\[\[ "\$record" =~ \$pattern \]\]/i\  record=${record%%$'"'"'\\n'"'"'*}$'"'"'\\n'"'"'' "$mutant/lib/c1-lib.sh" ;;
@@ -238,7 +424,7 @@ if [[ "${1:-}" == --mutations ]]; then
       privacy) sed -i 's/c1_record_privacy_failure "\$s" "\$reason" || evidence_error=1/:/' "$mutant/lib/c1-lib.sh" ;;
       pid)
         # A numeric-PID-only watchdog signals the unrelated reused PID.
-        sed -i '/launcher_state=$(c1_session_status "$root") || return 1/a\    if [[ "$launcher_state" == stale ]]; then kill -TERM "$owner"; return 0; fi' "$mutant/lib/c1-lib.sh"
+        sed -i '/launcher_state=$(c1_owner_status "$owner" "$owner_start") || return 1/a\    if [[ "$launcher_state" == stale ]]; then kill -TERM "$owner"; return 0; fi' "$mutant/lib/c1-lib.sh"
         ;;
       r11)
         sed -i '/^    \[\[ "\$C1_FINAL_PRIVACY" == clean \]\] || PORT_PRIVATE=failed/d' "$mutant/c1-session.sh"
@@ -246,8 +432,16 @@ if [[ "${1:-}" == --mutations ]]; then
       inherited-lock)
         sed -i 's/( c1_close_inherited_fds; exec "${pre\[@\]}"/( exec "${pre[@]}"/' "$mutant/lib/c1-lib.sh"
         ;;
+      launcher-record) sed -i 's/|| ambiguous=1/|| return 1/' "$mutant/lib/c1-lib.sh" ;;
+      watchdog-record) sed -i '/launcher_state=$(c1_owner_status/i\    c1_active_matches "$root" "$session" "$owner" "$owner_start" || return 0' "$mutant/lib/c1-lib.sh" ;;
+      watchdog-lock) sed -i 's/ ]] \&\& c1_lock_state "$root"; then/ ]]; then/' "$mutant/lib/c1-lib.sh" ;;
+      watchdog-exit) sed -i '/c1_marked_pids "\$session").*return 0; fi/s/return 0/sleep 7/' "$mutant/lib/c1-lib.sh" ;;
+      privacy-flag) sed -i 's/ --privacy-failed="\$privacy_failed"//' "$mutant/c1-session.sh" ;;
+      cleanup-verdict) sed -i '/if (args.cleanup === .FAIL.) result.overall/d' "$mutant/lib/c1-evidence.mjs" ;;
+      post-hash-edit) sed -i 's/writeFileSync(ev, evidence,/writeFileSync(ev, evidence + "\\n",/' "$mutant/lib/c1-evidence.mjs" ;;
+      signal-identity) sed -i '/if fields\[19\] == start.encode():/d; /signal.pidfd_send_signal(fd/s/^        /    /' "$mutant/lib/c1-lib.sh" ;;
       watchdog)
-        sed -i '/sent=1/a\      c1_cleanup_session "$root" "$session"' "$mutant/lib/c1-lib.sh"
+        sed -i '/c1_signal_identity TERM "\$owner"/i\      c1_cleanup_session "$root" "$session"' "$mutant/lib/c1-lib.sh"
         ;;
     esac
     if run_case "$mutant" "$case_name"; then
@@ -257,7 +451,8 @@ if [[ "${1:-}" == --mutations ]]; then
     printf 'DETECTED: %s by %s\n' "$mutation" "$case_name"
   done
 else
-  for case_name in competing_launchers overlapping_cleaners malformed_active retained_privacy_failure reused_owner watchdog_waits_for_launcher r11_exit_status_and_late_privacy launcher_crash_recovery active_publication_preserves_owner verification_is_retried; do
+  for case_name in competing_launchers overlapping_cleaners malformed_active retained_privacy_failure reused_owner watchdog_waits_for_launcher r11_exit_status_and_late_privacy launcher_crash_recovery active_publication_preserves_owner verification_is_retried \
+    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time; do
     if ! run_case "$HERE" "$case_name"; then
       printf 'FAIL: %s\n' "$case_name" >&2
       for log in "$FIXTURE"/*.log; do [[ ! -f "$log" ]] || cat "$log" >&2; done

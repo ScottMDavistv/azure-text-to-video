@@ -828,17 +828,6 @@ print(p, flush=True); time.sleep(60)' >"$s/fake" & parent=$!
   (( ok == 1 ))
 }
 t 'watchdog treats an unreaped (zombie) launcher as gone' watchdog_zombie
-watchdog_normal() {    # normal cleanup stops the watchdog without a competing cleanup
-  local s fake; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
-  sleep 300 & fake=$!
-  printf '%s %s %s\n' "$fake" "$(c1_proc_start "$fake")" "$s" >"$ROOT/active"
-  c1_start_watchdog "$ROOT" "$s" "$fake" "$HERE/../lib/c1-lib.sh"; sleep 0.5
-  [[ -z "$(c1_marked_pids "$s")" ]]
-  c1_cleanup_session "$ROOT" "$s"
-  kill "$fake"; wait "$fake" 2>/dev/null || true
-  [[ -z "$(c1_marked_pids "$s")" && ! -e "$s" ]]
-}
-t 'normal cleanup stops the watchdog' watchdog_normal
 cleanenv() {           # L-4 allowlist
   local out; local -a e
   mapfile -d '' -t e < <(PLAYWRIGHT_BROWSERS_PATH=/evil HTTPS_PROXY=http://evil.invalid NODE_OPTIONS=--require=/evil \
@@ -1616,17 +1605,6 @@ monitor_teardown_failure_propagates() {
   (( rc == 2 ))
 }
 t 'L-9: monitor propagates unverified teardown as rc 2, never success' monitor_teardown_failure_propagates
-
-watchdog_escalates_failed_teardown() {
-  local root="$TMP/watchdog-l9" session="$TMP/watchdog-l9/session.fixture"
-  mkdir -p "$session"
-  printf 'now teardown-failed\n' >"$session/privacy-failed"
-  printf '4242 9999 %s\n' "$session" >"$root/active"
-  c1_signal_identity() { touch "$root/signalled"; }
-  c1_watchdog_loop "$root" "$session" 4242 5678
-  [[ ! -e "$root/signalled" && -d "$session" ]]
-}
-t 'L-9: watchdog aborts only the exact recorded owner after teardown-failed marker' watchdog_escalates_failed_teardown
 
 # L-6: exercise the real privacy classifier against two slow responses,
 # at the locally scoped monitor timeout, not an unrealistically instant stub.

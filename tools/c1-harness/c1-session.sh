@@ -97,7 +97,7 @@ on_exit() {
   if [[ -n "$S" ]]; then
     local s=$S; S=''
     c1_log 'cleaning up: stopping desktop/test processes, closing listeners, deleting session files'
-    if ! c1_cleanup_session "$ROOT" "$s" || ! c1_verify_cleanup "$s"; then
+    if ! c1_cleanup_launcher "$ROOT" "$s" || ! c1_verify_cleanup "$s"; then
       c1_err 'CLEANUP FAILED: harness processes, listeners or session files may remain; run: c1-session.sh cleanup'
       (( rc != 0 )) || rc=3
     fi
@@ -289,7 +289,7 @@ finish_r11() {
       listener=verified-loopback
     fi
     cleanup_result=FAIL
-    if c1_cleanup_session "$ROOT" "$S" && c1_verify_cleanup "$S"; then cleanup_result=PASS; fi
+    if c1_cleanup_launcher "$ROOT" "$S" && c1_verify_cleanup "$S"; then cleanup_result=PASS; fi
     # L-1: late privacy failures during monitored teardown override startup proof.
     [[ "$C1_FINAL_PRIVACY" == clean ]] || PORT_PRIVATE=failed
   fi
@@ -460,13 +460,18 @@ Test 2: a sign-in popup opens; CLOSE it without signing in, then Resume.'; then
   # Exact-head re-check AFTER the run: nothing may have changed the checkout or harness.
   c1_verify_clean_tree "$WT" "$PW" || sed -i 's/^CHECKOUT_VERIFIED=PASS$/CHECKOUT_VERIFIED=FAIL/' "$S/meta"
   c1_verify_harness_clean "$REPO" "$HARNESS_REL" || sed -i 's/^HARNESS_CLEAN=true$/HARNESS_CLEAN=false/' "$S/meta"
+  finalize_run "$offline_only"
+}
+
+finalize_run() {
+  local offline_only=$1
   local snapshot outv ev rp verdict
   snapshot=$(clean_node "$HERE/lib/c1-evidence.mjs" --session="$S")
   # Finalize the sanitized evidence after the monitor and its supervisor stop.
   local sess=$S C1_FINAL_PRIVACY=pending cleanup_result=FAIL privacy_failed=false
   trap '' INT TERM HUP
   unset C1_HARNESS_SESSION TMPDIR
-  if c1_cleanup_session "$ROOT" "$sess" && c1_verify_cleanup "$sess"; then cleanup_result=PASS; fi
+  if c1_cleanup_launcher "$ROOT" "$sess" && c1_verify_cleanup "$sess"; then cleanup_result=PASS; fi
   S=''
   trap 'exit 130' INT TERM HUP
   if (( ! offline_only )) && [[ "$C1_FINAL_PRIVACY" != clean ]]; then privacy_failed=true; fi
