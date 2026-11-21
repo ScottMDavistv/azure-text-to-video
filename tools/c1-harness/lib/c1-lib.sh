@@ -942,7 +942,10 @@ c1_cleanup_session() {
   # R11 L-1: all supervisors (including the privacy monitor) have exited.
   # Record the final failure marker before the session directory is removed.
   if [[ "${C1_R11_PRIVACY_FINALIZED-unset}" == pending ]]; then
-    if [[ -e "$s/privacy-failed" || -L "$s/privacy-failed" ]]; then
+    # Another cleaner may have removed the session before this snapshot.
+    # Missing/symlinked session evidence is UNKNOWN, never proof of privacy.
+    if [[ ! -d "$s" || -L "$s" ||
+          -e "$s/privacy-failed" || -L "$s/privacy-failed" ]]; then
       C1_R11_PRIVACY_FINALIZED=failed
     else
       C1_R11_PRIVACY_FINALIZED=clean
