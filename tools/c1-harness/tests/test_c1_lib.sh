@@ -2557,5 +2557,31 @@ r11_no_early_stop() {
 }
 t 'R11 cannot short-circuit ambiguous 404' r11_no_early_stop
 
+
+echo '# R11 M-2: operator cleanup must not overlap live launchers'
+r11_active_operator_cleanup() (
+  local command=$1 status=$2 called=0
+  eval "$(sed -n '/^main() {$/,/^}$/p' "$HERE/../c1-session.sh")"
+  eval "$(sed -n '/^c1_refuse_active_cleanup() {$/,/^}$/p' "$HERE/../lib/c1-lib.sh")"
+  c1_session_status() { printf '%s\n' "$status"; }
+  c1_err() { :; }
+  local ROOT="$TMP/r11-operator-root" C1_NOVNC_PORT=6080
+  mkdir -p "$ROOT"
+  c1_cleanup_all() { called=$((called + 1)); }
+  c1_port_free() { :; }
+  c1_log() { :; }
+  local rc=0
+  main "$command" || rc=$?
+  if [[ "$status" == active ]]; then
+    [[ "$rc" != 0 && "$called" == 0 ]]
+  else
+    [[ "$rc" == 0 && "$called" == 1 ]]
+  fi
+)
+t 'R11 active launcher refuses operator cleanup before touching session' r11_active_operator_cleanup cleanup active
+t 'R11 active launcher refuses operator purge before touching session' r11_active_operator_cleanup purge active
+t 'R11 stale launcher permits cleanup recovery' r11_active_operator_cleanup cleanup stale
+t 'R11 absent launcher permits cleanup recovery' r11_active_operator_cleanup cleanup none
+
 echo "c1 harness shell tests: $PASSED passed, $FAILED failed, $SKIPPED skipped"
 (( FAILED == 0 ))
