@@ -939,6 +939,15 @@ c1_cleanup_session() {
     return 1
   fi
   if (( capture_ok )); then c1_err 'cleanup evidence: descendant identities could not be verified; session retained'; return 1; fi
+  # R11 L-1: all supervisors (including the privacy monitor) have exited.
+  # Record the final failure marker before the session directory is removed.
+  if [[ "${C1_R11_PRIVACY_FINALIZED-unset}" == pending ]]; then
+    if [[ -e "$s/privacy-failed" || -L "$s/privacy-failed" ]]; then
+      C1_R11_PRIVACY_FINALIZED=failed
+    else
+      C1_R11_PRIVACY_FINALIZED=clean
+    fi
+  fi
   # L-3: keep the observed listener inodes so c1_verify_cleanup can prove none
   # of them is still listening after the session directory is gone.
   if [[ -s "$s/listen-inodes" ]]; then
