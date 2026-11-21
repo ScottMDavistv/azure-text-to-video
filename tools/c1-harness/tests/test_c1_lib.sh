@@ -2459,15 +2459,48 @@ r11_cleanup_snapshot() (
   c1_live_supervisors() { :; }
   c1_load_tree() { :; }
   c1_tree_descendant_identities() { :; }
-  c1_record_tree_descendants() { [[ "$scenario" != late ]] || : >"$s/privacy-failed"; }
+  c1_record_tree_descendants() {
+    case "$scenario" in
+      late) : >"$s/privacy-failed" ;;
+      concurrent-remove)
+        : >"$s/privacy-failed"
+        rm -rf -- "$s" ;;
+    esac
+    return 0
+  }
+  # Simulate an attributed supervisor exiting after its marker is written.
+  # c1_live_supervisors runs in process substitution, so persist call count.
+  printf '0\n' >"$d/supervisor-calls"
+  c1_live_supervisors() {
+    local count
+    read -r count <"$d/supervisor-calls"
+    printf '%s\n' "$((count + 1))" >"$d/supervisor-calls"
+    if [[ "$scenario" == supervisor-late && $count -lt 2 ]] ||
+      [[ "$scenario" == supervisor-stuck ]]; then
+      printf '991 123\n'
+    fi
+  }
+  sleep() {
+    if [[ "$scenario" == supervisor-late && "$1" == 0.05 ]]; then
+      : >"$s/privacy-failed"
+    fi
+  }
   c1_marked_pids() { :; }
   c1_safe_rm() { rm -rf -- "$1"; }
-  c1_cleanup_session "$d" "$s" || return 1
-  [[ "$C1_R11_PRIVACY_FINALIZED" == "$expected" && ! -e "$s" ]]
+  local rc=0
+  c1_cleanup_session "$d" "$s" || rc=$?
+  if [[ "$expected" == blocked ]]; then
+    [[ "$rc" != 0 && "$C1_R11_PRIVACY_FINALIZED" == pending && -d "$s" ]]
+  else
+    [[ "$rc" == 0 && "$C1_R11_PRIVACY_FINALIZED" == "$expected" && ! -e "$s" ]]
+  fi
 )
 t 'R11 records clean monitor state after reaping' r11_cleanup_snapshot clear clean
 t 'R11 preserves existing monitor privacy failure' r11_cleanup_snapshot marked failed
 t 'R11 detects privacy failure written during cleanup' r11_cleanup_snapshot late failed
+t 'R11 rejects session concurrently removed with failure marker' r11_cleanup_snapshot concurrent-remove failed
+t 'R11 snapshot waits until supervisor stops, then sees its failure marker' r11_cleanup_snapshot supervisor-late failed
+t 'R11 leaves snapshot pending when supervisor never stops' r11_cleanup_snapshot supervisor-stuck blocked
 
 r11_verdict_fixture() (
   local scenario=$1 expected=$2 d="$TMP/r11-verdict-$1" s rc=0
