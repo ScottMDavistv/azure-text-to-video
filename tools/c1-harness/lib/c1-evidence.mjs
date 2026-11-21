@@ -347,7 +347,7 @@ export function renderEvidence({ meta, phases, result, generated, cleanup }) {
   const skipped = result.allTests.filter(t => t.verdict === 'SKIPPED').length
   L.push('', skipped + ' test(s) were skipped by design for their mode (offline vs live) and are omitted.', '')
   L.push('## Security verdicts', '')
-  L.push('- Credential confidentiality: **' + result.credential + '** (token-like artifacts found before deletion: ' + result.artifactHits + ')')
+  L.push('- Credential confidentiality: **' + result.credential + '** (token-like artifacts found by the session scan: ' + result.artifactHits + ')')
   L.push('- Network egress: **' + result.egress + '**')
   L.push('- Unapproved hosts observed by the egress guard: ' + (result.hosts.length ? result.hosts.map(h => '`' + h + '`').join(', ') : 'none'))
   const obs = result.allTests.find(t => t.observation)?.observation
@@ -357,9 +357,13 @@ export function renderEvidence({ meta, phases, result, generated, cleanup }) {
       '; Microsoft server sign-out confirmed = ' + obs.serverSignoutConfirmed + '.',
       '- MSAL 4.x clears the local cache before opening the sign-out popup and treats server sign-out as best effort, so a cancelled popup can leave the Microsoft SSO session alive in that browser profile while the app is locally signed out. The harness browser context is discarded at test end. Reviewer: decide whether PR #46 should surface this to users.')
   }
-  L.push('', '## Cleanup', '', '- ' + (cleanup ?? '@@C1_CLEANUP_VERDICT@@'), '')
-  L.push('## Not covered by this evidence', '')
-  L.push('- No tokens, claims, cookies, URLs, UPNs, HAR files, traces, screenshots or console dumps were retained. Raw Playwright reports were read in memory and deleted with the session.')
+  const cleanupDetail = cleanup === 'PASS' ? 'PASS — desktop and test processes stopped, listeners closed, session files deleted'
+    : cleanup === 'FAIL' ? 'FAIL — inspect terminal diagnostics and retry cleanup' : 'UNVERIFIED'
+  L.push('', '## Cleanup', '', '- ' + cleanupDetail, '')
+  L.push(cleanup === 'PASS'
+    ? '- Verified cleanup deleted the session files, including raw Playwright reports.'
+    : '- Sensitive session files, including raw Playwright reports and browser data, may remain.')
+  L.push('', '## Not covered by this evidence', '')
   L.push('- INCOMPLETE rows require another supervised session; they are not failures of the application.')
   L.push('- R2B reflects the approved browser-mutation runner at the pinned Playwright SHA; if that SHA has no runner, R2B is INCOMPLETE.')
   L.push('- R8 relies on two operator attestations (no prior consent; consent prompt shown and cancelled) in addition to the sanitized MSAL code and AADSTS65004.')
@@ -450,10 +454,8 @@ function main(argv) {
   if (args['privacy-failed'] === 'true') meta.PORT_PRIVATE = 'failed'
   const result = evaluate(snapshot)
   if (args.cleanup === 'FAIL') result.overall = 'FAIL'
-  const cleanup = args.cleanup === 'PASS' ? 'PASS — desktop and test processes stopped, listeners closed, session files deleted'
-    : args.cleanup === 'FAIL' ? 'FAIL — inspect terminal diagnostics and retry cleanup' : undefined
   const generated = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
-  const evidence = assertSanitized(renderEvidence({ meta, phases: snapshot.phases, result, generated, cleanup }))
+  const evidence = assertSanitized(renderEvidence({ meta, phases: snapshot.phases, result, generated, cleanup: args.cleanup }))
   const pkg = assertSanitized(renderReviewPackage({ evidence, meta }))
   mkdirSync(out, { recursive: true, mode: 0o700 })
   const stamp = generated.replace(/[-:]/g, '')

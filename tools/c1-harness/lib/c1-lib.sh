@@ -204,6 +204,18 @@ c1_verify_harness_clean() {
   done < <(git -C "$repo" ls-files --full-name -- "$rel")
 }
 
+# Verify both sides of the clean-tree check against the launcher's initial SHA.
+c1_verify_harness_head() {
+  local repo=$1 rel=$2 expected=$3
+  if [[ "$(git -C "$repo" rev-parse --verify HEAD)" == "$expected" ]] &&
+     c1_verify_harness_clean "$repo" "$rel" &&
+     [[ "$(git -C "$repo" rev-parse --verify HEAD)" == "$expected" ]]; then
+    return 0
+  fi
+  c1_err 'harness checkout no longer matches the initial commit'
+  return 1
+}
+
 # --------------------------------------------------------------- preflight --
 
 # c1_check_localhost [RESOLVER_OUTPUT]  localhost must resolve only to loopback
@@ -1724,27 +1736,89 @@ c1_record_privacy_failure() {
 # "teardown-failed") if the port is still open: callers must fail closed.
 c1_teardown_novnc() {
   local s=$1 port=$2 ws=$3 wsst=$4 reason=${5:-unverified}
-  # A monitor supplies a tighter local bound; other callers retain the 2 s
-  # TERM / KILL grace periods. Never accept arbitrary external step counts.
-  local wait_steps=20 i evidence_error=0
-  [[ "${C1_MONITOR_FAST_TEARDOWN:-}" == 1 ]] && wait_steps=5
+  local evidence_error=0
   [[ "$reason" =~ ^[a-z0-9_-]{1,40}$ ]] || reason=unverified
   c1_record_privacy_failure "$s" "$reason" || evidence_error=1
   printf '%s %s\n' "$(c1_utc)" "$reason" >>"$s/privacy-failed" || evidence_error=1
-  c1_signal_owned TERM "$ws" "$s" "$wsst" || evidence_error=1
+  if ! c1_close_novnc "$s" "$port" "$ws" "$wsst"; then
+    c1_record_privacy_failure "$s" teardown-failed || c1_err 'cannot preserve privacy teardown evidence'
+    printf '%s teardown-failed\n' "$(c1_utc)" >>"$s/privacy-failed" || true
+    c1_err "port $port is still listening or could not be verified after the privacy teardown"
+    return 1
+  fi
+  (( evidence_error == 0 ))
+}
+
+c1_close_novnc() {
+  local s=$1 port=$2 ws=$3 wsst=$4 wait_steps=20 i error=0
+  [[ "${C1_MONITOR_FAST_TEARDOWN:-}" == 1 ]] && wait_steps=5
+  c1_signal_owned TERM "$ws" "$s" "$wsst" || error=1
   for (( i=0; i<wait_steps; i++ )); do
     if c1_port_free "$port" && ! c1_owned_pid "$ws" "$s" "$wsst"; then break; fi
     sleep 0.1
   done
-  c1_signal_owned KILL "$ws" "$s" "$wsst" || evidence_error=1
+  c1_signal_owned KILL "$ws" "$s" "$wsst" || error=1
   for (( i=0; i<wait_steps; i++ )); do c1_port_free "$port" && break; sleep 0.1; done
-  if ! c1_port_free "$port"; then
-    c1_record_privacy_failure "$s" teardown-failed || c1_err 'cannot preserve privacy teardown evidence'
-    printf '%s teardown-failed\n' "$(c1_utc)" >>"$s/privacy-failed" || true
-    c1_err "port $port is still listening after the privacy teardown"
-    return 1
-  fi
-  (( evidence_error == 0 ))
+  (( error == 0 )) && c1_port_free "$port"
+}
+
+# The heartbeat uses the kernel clock and advances only after a private sweep.
+c1_monitor_tick() {
+  local uptime rest
+  read -r uptime rest </proc/uptime || return 1
+  [[ "$uptime" =~ ^[0-9]+[.][0-9]{2}$ ]] || return 1
+  printf '%s\n' "${uptime/./}"
+}
+
+c1_monitor_healthy() {
+  local s=$1 pid=$2 start=$3 tick now
+  [[ -f "$s/monitor-beat" && ! -L "$s/monitor-beat" ]] || return 1
+  IFS= read -r tick <"$s/monitor-beat" || return 1
+  [[ "$tick" =~ ^[0-9]{1,12}$ ]] || return 1
+  now=$(c1_monitor_tick) || return 1
+  (( 10#$now >= 10#$tick && 10#$now - 10#$tick <= 300 )) || return 1
+  [[ "$(c1_owner_status "$pid" "$start")" == active ]] && c1_owned_pid "$pid" "$s" "$start"
+}
+
+c1_arm_privacy_monitor() {
+  local s=$1 pid=$2 start=$3 ws=$4 ws_start=$5 step
+  printf '%s %s %s %s\n' "$pid" "$start" "$ws" "$ws_start" >"$s/monitor-required.tmp" &&
+    mv -T -- "$s/monitor-required.tmp" "$s/monitor-required" || return 1
+  for (( step=0; step<20; step++ )); do
+    c1_privacy_failed "$s" && return 1
+    if [[ -f "$s/monitor-watched" && ! -L "$s/monitor-watched" ]]; then
+      c1_monitor_healthy "$s" "$pid" "$start"
+      return
+    fi
+    sleep 0.05
+  done
+  return 1
+}
+
+# Keep the acknowledgment outside the session until the watchdog sees cleanup finish.
+c1_monitor_ack_path() { printf '%s/.%s.monitor-stopped' "${1%/*}" "${1##*/}"; }
+
+c1_monitor_stopped() {
+  local pid=$2 start=$3 path ack
+  path=$(c1_monitor_ack_path "$1")
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  IFS= read -r ack <"$path" && [[ "$ack" == "$pid $start" ]]
+}
+
+c1_stop_privacy_monitor() {
+  local s=$1 pid=$2 start=$3 step
+  [[ -n "$pid" && -n "$start" ]] || return 1
+  c1_monitor_healthy "$s" "$pid" "$start" || return 1
+  (set -o noclobber; : >"$s/monitor-stop") || return 1
+  for (( step=0; step<60; step++ )); do
+    if c1_monitor_stopped "$s" "$pid" "$start"; then
+      ! c1_privacy_failed "$s"
+      return
+    fi
+    c1_privacy_failed "$s" && return 1
+    sleep 0.05
+  done
+  return 1
 }
 
 # c1_gh_private PORT -> 0 if gh reads back "private"; 1 if gh reports anything
@@ -1794,6 +1868,8 @@ c1_privacy_monitor_loop() {
   local C1_GH_READ_TIMEOUT C1_GH_EVIDENCE=cached C1_GH_CACHED_PRIVATE=0
   printf -v C1_GH_READ_TIMEOUT '%d.%03d' $(( C1_MON_GH_TIMEOUT_MS / 1000 )) $(( C1_MON_GH_TIMEOUT_MS % 1000 ))
   local reason detail teardown_rc now gh_ok gh_next gh_started=0 gh_job='' gh_out g vis
+  local track=${C1_MONITOR_TRACK:-0} monitor_pid=$BASHPID monitor_start tick ack
+  if (( track )); then monitor_start=$(c1_proc_start "$monitor_pid") || return 2; fi
   gh_out="${TMPDIR:-/tmp}/c1-gh-monitor.$BASHPID"
   trap 'c1_monitor_gh_stop; exit 0' TERM
   c1_now_ms now
@@ -1829,7 +1905,19 @@ c1_privacy_monitor_loop() {
       fi
     fi
     if [[ -z "$reason" ]]; then
-      if c1_privacy_check "$base" '/vnc.html' "$C1_NOVNC_SIGNATURE" "$hdr" "$ca"; then continue
+      if c1_privacy_check "$base" '/vnc.html' "$C1_NOVNC_SIGNATURE" "$hdr" "$ca"; then
+        if (( ! track )); then continue; fi
+        if tick=$(c1_monitor_tick) && printf '%s\n' "$tick" >"$s/monitor-beat.tmp" &&
+           mv -T -- "$s/monitor-beat.tmp" "$s/monitor-beat"; then
+          if [[ ! -f "$s/monitor-stop" || -L "$s/monitor-stop" ]]; then continue; fi
+          if c1_close_novnc "$s" "$port" "$ws" "$wsst"; then
+            c1_monitor_gh_stop
+            ack=$(c1_monitor_ack_path "$s")
+            printf '%s %s\n' "$monitor_pid" "$monitor_start" >"$s/monitor-stopped.tmp" &&
+              ln -T -- "$s/monitor-stopped.tmp" "$ack" && return 0
+          fi
+        fi
+        reason=monitor-unverified
       elif [[ $C1_PRIVACY_STATE == public ]]; then reason=public
       else reason=unverified
       fi
@@ -1846,6 +1934,7 @@ c1_privacy_monitor_loop() {
     return "$teardown_rc"
   done
   c1_monitor_gh_stop
+  (( ! track ))
 }
 
 # Stops an in-flight monitor gh read (dynamic scope: gh_job, gh_out).
@@ -1892,15 +1981,38 @@ c1_gh_visibility() {
 # active record authorizes asking a live launcher to shut down.
 c1_watchdog_loop() {
   local root=$1 session=$2 owner=$3 owner_start=$4 sent=0 register launcher_state
+  local monitor='' monitor_start websockify websockify_start extra
+  local C1_MONITOR_FAST_TEARDOWN=1
   register=$(c1_privacy_register "$session")
   while :; do
     if [[ ! -e "$root/active" && ! -L "$root/active" && ! -e "$session" && ! -L "$session" ]] &&
-       [[ -z "$(c1_marked_pids "$session")" ]]; then return 0; fi
+       [[ -z "$(c1_marked_pids "$session")" ]]; then
+      rm -f -- "$(c1_monitor_ack_path "$session")"
+      return 0
+    fi
     launcher_state=$(c1_owner_status "$owner" "$owner_start") || return 1
     if [[ "$launcher_state" == stale ]] && c1_lock_state "$root"; then
       c1_cleanup_session "$root" "$session" "$owner" "$owner_start" || return 1
       c1_verify_cleanup "$session"
       return
+    fi
+    if [[ "$launcher_state" == active && "$sent" == 0 && -z "$monitor" &&
+          -f "$session/monitor-required" && ! -L "$session/monitor-required" ]]; then
+      read -r monitor monitor_start websockify websockify_start extra <"$session/monitor-required" || return 1
+      [[ "$monitor" =~ ^[1-9][0-9]*$ && "$monitor_start" =~ ^[1-9][0-9]*$ &&
+         "$websockify" =~ ^[1-9][0-9]*$ && "$websockify_start" =~ ^[1-9][0-9]*$ && -z "$extra" ]] || return 1
+      (set -o noclobber; : >"$session/monitor-watched") || return 1
+    fi
+    if [[ "$launcher_state" == active && "$sent" == 0 && -n "$monitor" && -d "$session" ]] &&
+       ! c1_monitor_stopped "$session" "$monitor" "$monitor_start" &&
+       ! c1_monitor_healthy "$session" "$monitor" "$monitor_start"; then
+      # Close the listener before signalling the launcher, whose foreground
+      # Playwright process may delay its TERM trap.
+      c1_teardown_novnc "$session" "$C1_NOVNC_PORT" "$websockify" "$websockify_start" monitor-unhealthy || true
+      if c1_active_matches "$root" "$session" "$owner" "$owner_start"; then
+        c1_signal_identity TERM "$owner" "$owner_start" || return 1
+      fi
+      sent=1
     fi
     if [[ "$launcher_state" == active && "$sent" == 0 ]] &&
        c1_active_matches "$root" "$session" "$owner" "$owner_start" &&

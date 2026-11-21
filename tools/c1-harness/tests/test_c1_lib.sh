@@ -1163,7 +1163,9 @@ MOCK_GH
     c1_proc_start() { echo 456; }
     c1_verify_private_novnc() { C1_PRIVACY_GH_PRIVATE=$desktop_proof; }
     c1_gh_private() { checks=$((checks + 1)); return "$confirmation"; }
-    c1_spawn() { monitor=${!#}; }
+    c1_spawn() { printf '%s\n' "${!#}"; }
+    c1_monitor_healthy() { return 0; }
+    c1_arm_privacy_monitor() { monitor=$2; }
     fail_desktop() { PORT_PRIVATE=failed; return 1; }
     start_private_desktop fixture || rc=$?
     case "$expected" in
@@ -2517,6 +2519,7 @@ r11_verdict_fixture() (
     [[ "$scenario" != cleanup-fail ]]
   }
   c1_verify_cleanup() { [[ "$scenario" != verify-fail ]]; }
+  c1_stop_privacy_monitor() { return 0; }
   git() { [[ "$scenario" != drift ]] && printf 'abcdef\n' || printf 'wrong\n'; }
   c1_verify_harness_clean() { [[ "$scenario" != dirty ]]; }
   c1_utc() { printf '2026-11-21T00:00:00Z'; }

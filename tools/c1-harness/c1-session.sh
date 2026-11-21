@@ -29,6 +29,7 @@ WT="$CACHE/approved-${PW:0:12}"
 FE="$WT/frontend"
 ROOT=$(realpath -ms -- "$(c1_state_root)")
 S=''
+MONITOR_PID='' MONITOR_START=''
 CHECKS=()
 PROD_PENDING=unknown
 
@@ -96,6 +97,9 @@ on_exit() {
   trap '' INT TERM HUP
   if [[ -n "$S" ]]; then
     local s=$S; S=''
+    if [[ "${PORT_PRIVATE:-}" == verified-* ]]; then
+      c1_stop_privacy_monitor "$s" "$MONITOR_PID" "$MONITOR_START" || c1_err 'could not verify orderly privacy monitor shutdown'
+    fi
     c1_log 'cleaning up: stopping desktop/test processes, closing listeners, deleting session files'
     if ! c1_cleanup_launcher "$ROOT" "$s" || ! c1_verify_cleanup "$s"; then
       c1_err 'CLEANUP FAILED: harness processes, listeners or session files may remain; run: c1-session.sh cleanup'
@@ -200,6 +204,14 @@ print_access() {
 privacy_gate() {
   [[ "$PORT_PRIVATE" == verified-* ]] || return 1
   local rc=0
+  if ! c1_verify_harness_head "$REPO" "$HARNESS_REL" "$harness_head"; then
+    fail_desktop harness-head-drift
+    return 1
+  fi
+  if ! c1_monitor_healthy "$S" "$MONITOR_PID" "$MONITOR_START"; then
+    fail_desktop monitor-unhealthy
+    return 1
+  fi
   c1_privacy_gate "$S" "$C1_NOVNC_PORT" "$BASE" "$HDR" "$WS" "$WSST" "$REQ_GH" || rc=$?
   (( rc == 0 )) && return 0
   c1_err "port $C1_NOVNC_PORT privacy could no longer be verified (${C1_GATE_REASON:-unverified}); the desktop was stopped"
@@ -223,7 +235,7 @@ fail_desktop() {
 
 # start_private_desktop PASSWORD -> sets PORT_PRIVATE, WS, WSST
 start_private_desktop() {
-  local pass=$1 vis owner
+  local pass=$1 vis owner step
   BASE=$(c1_codespace_base "$C1_NOVNC_PORT") || { c1_err 'CODESPACE_NAME / forwarding domain unavailable'; return 1; }
   [[ -n "${GITHUB_TOKEN:-}" ]] || { c1_err 'GITHUB_TOKEN is not available in this Codespace terminal'; return 1; }
   HDR="$S/probe-token.hdr"
@@ -266,11 +278,21 @@ start_private_desktop() {
     fail_desktop gh-visibility; return 1
   fi
   if (( REQ_GH )); then PORT_PRIVATE=verified-probe-gh; else PORT_PRIVATE=verified-probe-user-repo; fi
+  # Do not give the operator access until the monitor completes a private sweep.
   # shellcheck disable=SC2016
-  # L-6: 0.2 s poll plus bounded 0.4 s probes and fast teardown target <=2.5 s.
-  # The monitor checks noVNC privacy before each supervised phase as well.
-  c1_spawn "$S" privacy-monitor bash -c 'source "$1"; c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "" 0.2 "$7" "$8"' \
-    _ "$LIB" "$S" "$BASE" "$HDR" "$WS" "$WSST" "$C1_NOVNC_PORT" "$REQ_GH" >/dev/null || { fail_desktop monitor-start; return 1; }
+  MONITOR_PID=$(c1_spawn "$S" privacy-monitor bash -c 'source "$1"; C1_MONITOR_TRACK=1 c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "" 0.2 "$7" "$8"' \
+    _ "$LIB" "$S" "$BASE" "$HDR" "$WS" "$WSST" "$C1_NOVNC_PORT" "$REQ_GH") || { fail_desktop monitor-start; return 1; }
+  MONITOR_START=$(c1_proc_start "$MONITOR_PID") || { fail_desktop monitor-start; return 1; }
+  for (( step=0; step<40; step++ )); do
+    if c1_monitor_healthy "$S" "$MONITOR_PID" "$MONITOR_START"; then
+      if c1_arm_privacy_monitor "$S" "$MONITOR_PID" "$MONITOR_START" "$WS" "$WSST"; then return 0; fi
+      break
+    fi
+    if c1_privacy_failed "$S"; then break; fi
+    sleep 0.05
+  done
+  fail_desktop monitor-start
+  return 1
 }
 
 # Dedicated R11 evidence is written after verified cleanup, including on errors.
@@ -288,6 +310,8 @@ finish_r11() {
         "$listener_detail" =~ ^127[.]0[.]0[.]1:$C1_NOVNC_PORT\ pid=[0-9]+\ comm=[A-Za-z0-9._-]+\ ino=[0-9]+$ ]]; then
       listener=verified-loopback
     fi
+    if [[ "$PORT_PRIVATE" == verified-* ]] &&
+       ! c1_stop_privacy_monitor "$S" "${MONITOR_PID:-}" "${MONITOR_START:-}"; then PORT_PRIVATE=failed; fi
     cleanup_result=FAIL
     if c1_cleanup_launcher "$ROOT" "$S" && c1_verify_cleanup "$S"; then cleanup_result=PASS; fi
     # L-1: late privacy failures during monitored teardown override startup proof.
@@ -312,7 +336,7 @@ finish_r11() {
     printf -- '- Last privacy probe: %s\n' "${C1_PRIVACY_DETAIL:-not run}"
     printf -- '- Desktop listener: %s\n' "$listener"
     printf -- '- Cleanup: %s\n' "$cleanup_result"
-    printf -- '- Monitor coverage: startup only; sustained monitoring not tested\n'
+    printf -- '- Monitor coverage: startup and shutdown only; sustained monitoring not tested\n'
     printf -- '- R11: %s\n' "$verdict"
   } >"$R11_EVIDENCE" || { c1_err 'could not write R11 evidence'; exit 1; }
 
@@ -345,7 +369,7 @@ r11_session() {
 }
 
 session() {
-  local offline_only=$1 interactive=0 pass answer
+  local offline_only=$1 interactive=0 pass answer harness_head
   PORT_PRIVATE=not-started BASE='' HDR='' WS='' WSST='' REQ_GH=0
   local att_prior=not-asked att_prompt=not-asked bhver=not-launched
   [[ -t 0 && -t 2 ]] && interactive=1
@@ -362,8 +386,10 @@ session() {
   # Resolve or refuse them before preflight or any new C1 session.
   c1_recover_before_start "$ROOT" || return 1
   local start; start=$(c1_utc)
+  harness_head=$(git -C "$REPO" rev-parse --verify HEAD) || return 1
   preflight || { c1_err 'preflight failed; nothing was started'; return 1; }
   install_deps || { c1_err 'dependency installation or post-install verification failed'; return 1; }
+  c1_verify_harness_head "$REPO" "$HARNESS_REL" "$harness_head" || return 1
   S=$(c1_session_new "$ROOT" "$$") || return 1
   export C1_HARNESS_SESSION=$S TMPDIR="$S/tmp"
   trap on_exit EXIT
@@ -393,6 +419,7 @@ session() {
   if (( offline_only )); then
     skip_phase consent-denial; skip_phase live; skip_phase cancelled-logout
   else
+    c1_verify_harness_head "$REPO" "$HARNESS_REL" "$harness_head" || return 1
     pass=$(c1_gen_password)
     if ! start_private_desktop "$pass"; then
       pass=''
@@ -445,7 +472,7 @@ Test 2: a sign-in popup opens; CLOSE it without signing in, then Resume.'; then
     [[ "$lstate" != verified || "$ldetail" =~ ^127\.0\.0\.1:$C1_NOVNC_PORT\ pid=[0-9]+\ comm=[A-Za-z0-9._-]*\ ino=[0-9]+$ ]] || lstate=unavailable
   fi
   {
-    printf 'AUTH_SHA=%s\nPW_SHA=%s\nHARNESS_SHA=%s\nHARNESS_CLEAN=true\n' "$AUTH" "$PW" "$(git -C "$REPO" rev-parse HEAD)"
+    printf 'AUTH_SHA=%s\nPW_SHA=%s\nHARNESS_SHA=%s\nHARNESS_CLEAN=true\n' "$AUTH" "$PW" "$harness_head"
     printf 'CHECKOUT_VERIFIED=PASS\nCHECKS=%s\n' "$(IFS=,; echo "${CHECKS[*]}")"
     printf 'PLAYWRIGHT_VERSION=%s\nEXPECTED_PLAYWRIGHT_VERSION=%s\n' "$pwver" "$C1_PLAYWRIGHT_VERSION"
     printf 'BROWSER_VERSION=%s\nEXPECTED_BROWSER_VERSION=%s\n' "$bver" "$expb"
@@ -459,7 +486,7 @@ Test 2: a sign-in popup opens; CLOSE it without signing in, then Resume.'; then
   } >"$S/meta"
   # Exact-head re-check AFTER the run: nothing may have changed the checkout or harness.
   c1_verify_clean_tree "$WT" "$PW" || sed -i 's/^CHECKOUT_VERIFIED=PASS$/CHECKOUT_VERIFIED=FAIL/' "$S/meta"
-  c1_verify_harness_clean "$REPO" "$HARNESS_REL" || sed -i 's/^HARNESS_CLEAN=true$/HARNESS_CLEAN=false/' "$S/meta"
+  c1_verify_harness_head "$REPO" "$HARNESS_REL" "$harness_head" || sed -i 's/^HARNESS_CLEAN=true$/HARNESS_CLEAN=false/' "$S/meta"
   finalize_run "$offline_only"
 }
 
@@ -470,6 +497,10 @@ finalize_run() {
   # Finalize the sanitized evidence after the monitor and its supervisor stop.
   local sess=$S C1_FINAL_PRIVACY=pending cleanup_result=FAIL privacy_failed=false
   trap '' INT TERM HUP
+  if (( ! offline_only )) && [[ "${PORT_PRIVATE:-}" == verified-* ]] &&
+     ! c1_stop_privacy_monitor "$sess" "${MONITOR_PID:-}" "${MONITOR_START:-}"; then
+    privacy_failed=true
+  fi
   unset C1_HARNESS_SESSION TMPDIR
   if c1_cleanup_launcher "$ROOT" "$sess" && c1_verify_cleanup "$sess"; then cleanup_result=PASS; fi
   S=''

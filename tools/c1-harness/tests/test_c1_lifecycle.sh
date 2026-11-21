@@ -34,6 +34,7 @@ session() {
     REPO=fixture R11_HEAD=fixture HARNESS_REL=fixture
     git() { printf 'fixture\n'; }
     c1_verify_harness_clean() { return 0; }
+    c1_stop_privacy_monitor() { return 0; }
     printf 'verified\n127.0.0.1:6080 pid=11 comm=websockify ino=31\n' >"$S/listener-state"
     trap 'finish_r11 "$?"' EXIT
   else
@@ -201,6 +202,7 @@ r11_exit_status_and_late_privacy() (
   ROOT="$root_fixture" REPO=fixture HARNESS_REL=fixture R11_HEAD=fixture
   c1_port_free() { return 0; }
   c1_verify_harness_clean() { return 0; }
+  c1_stop_privacy_monitor() { return 0; }
   git() { printf 'fixture\n'; }
   for variant in clean late interrupted; do
     S=$(c1_session_new "$ROOT" "$$") || return 1
@@ -344,13 +346,15 @@ run_finalization() (
   eval "$(sed -n '/^clean_node() ($/,/^)/p; /^finalize_run() {$/,/^}$/p' "$BASE/c1-session.sh")"
   local HERE=$BASE ROOT=$STATE EVIDENCE_DIR variant expected_r11 expected_overall status digest
   local -a ev rp
+  local PORT_PRIVATE=verified-probe-gh
   c1_port_free() { [[ "$variant" != cleanup-failure ]]; }
+  c1_stop_privacy_monitor() { [[ "$variant" != missing-monitor-stop ]]; }
   c1_record_tree_descendants() {
     # Inject the privacy marker after the real finalizer has snapshotted meta.
     if [[ "$variant" == late-privacy ]]; then : >"$1/privacy-failed"; fi
   }
   c1_lock_state "$ROOT" || return 1
-  for variant in clean late-privacy cleanup-failure ambiguous-record; do
+  for variant in clean late-privacy cleanup-failure missing-monitor-stop ambiguous-record; do
     S=$(c1_session_new "$ROOT" "$$") || return 1
     EVIDENCE_DIR="$FIXTURE/$variant"
     cat >"$S/meta" <<'META'
@@ -371,7 +375,7 @@ LISTENER_EVIDENCE=verified
 LISTENER_DETAIL=127.0.0.1:6080 pid=11 comm=websockify ino=31
 META
     status=0 expected_r11=PASS expected_overall=INCOMPLETE
-    if [[ "$variant" == late-privacy || "$variant" == ambiguous-record ]]; then expected_r11=FAIL; fi
+    if [[ "$variant" == late-privacy || "$variant" == ambiguous-record || "$variant" == missing-monitor-stop ]]; then expected_r11=FAIL; fi
     if [[ "$variant" == ambiguous-record ]]; then printf 'malformed record\n' >"$ROOT/active"; fi
     if [[ "$variant" != clean ]]; then expected_overall=FAIL; fi
     finalize_run 0 >"$FIXTURE/$variant.log" 2>&1 || status=$?
@@ -384,12 +388,86 @@ META
       grep -Fq "**Harness summary: $expected_overall.**" "${ev[0]}" || return 1
     if [[ "$variant" == cleanup-failure || "$variant" == ambiguous-record ]]; then
       grep -Fq -- '- FAIL — inspect terminal diagnostics and retry cleanup' "${ev[0]}" || return 1
+      grep -Fq -- 'Sensitive session files' "${ev[0]}" "${rp[0]}" || return 1
+      if grep -Fq -- 'Verified cleanup deleted' "${ev[0]}" "${rp[0]}"; then return 1; fi
     else
       grep -Fq -- '- PASS — desktop and test processes stopped' "${ev[0]}" || return 1
+      grep -Fq -- 'Verified cleanup deleted' "${ev[0]}" "${rp[0]}" || return 1
     fi
     digest=$(sha256sum "${ev[0]}") || return 1
     grep -Fxq "Evidence SHA-256 (of the section below, for transcription checks only): \`${digest%% *}\`" "${rp[0]}" || return 1
   done
+)
+
+monitor_shutdown_and_loss() (
+  local variant launcher status session_path ws monitor register
+  cat >"$FIXTURE/monitor-launcher.sh" <<'MONITOR_FIXTURE'
+set -Eeuo pipefail
+source "$1/lib/c1-lib.sh"
+root=$2 fixture=$3 variant=$4
+c1_port_free() { return 0; }  # No actual network listener in this fixture.
+c1_lock_state "$root"
+session_path=$(c1_session_new "$root" "$$")
+export C1_HARNESS_SESSION=$session_path TMPDIR="$session_path/tmp"
+trap 'c1_cleanup_launcher "$root" "$session_path"; c1_verify_cleanup "$session_path"' EXIT
+trap 'exit 130' TERM
+c1_start_watchdog "$root" "$session_path" "$$" "$1/lib/c1-lib.sh"
+ws=$(c1_spawn "$session_path" desktop sleep 60)
+ws_start=$(c1_proc_start "$ws")
+monitor=$(c1_spawn "$session_path" privacy-monitor bash -c '
+  source "$1"
+  c1_privacy_check() { return 0; }
+  c1_port_free() { return 0; }
+  C1_MONITOR_TRACK=1 c1_privacy_monitor_loop "$2" unused unused "$3" "$4" "" 0.05
+' _ "$1/lib/c1-lib.sh" "$session_path" "$ws" "$ws_start")
+monitor_start=$(c1_proc_start "$monitor")
+while ! c1_monitor_healthy "$session_path" "$monitor" "$monitor_start"; do sleep 0.02; done
+c1_arm_privacy_monitor "$session_path" "$monitor" "$monitor_start" "$ws" "$ws_start"
+printf '%s %s %s\n' "$session_path" "$ws" "$monitor" >"$fixture/$variant.ready"
+if [[ "$variant" == orderly ]]; then
+  c1_stop_privacy_monitor "$session_path" "$monitor" "$monitor_start"
+  ! c1_owned_pid "$ws" "$session_path" "$ws_start"
+  ! c1_privacy_failed "$session_path"
+else
+  while :; do sleep 0.05; done
+fi
+MONITOR_FIXTURE
+
+  for variant in orderly exited stalled; do
+    timeout -k 4s 12s bash "$FIXTURE/monitor-launcher.sh" "$BASE" "$STATE" "$FIXTURE" "$variant" \
+      >"$FIXTURE/$variant.log" 2>&1 &
+    launcher=$!
+    wait_for_file "$FIXTURE/$variant.ready" || return 1
+    read -r session_path ws monitor <"$FIXTURE/$variant.ready" || return 1
+    case "$variant" in
+      exited) kill -TERM "$monitor" || return 1 ;;
+      stalled) kill -STOP "$monitor" || return 1 ;;
+    esac
+    status=0
+    wait "$launcher" || status=$?
+    if [[ "$variant" == orderly ]]; then
+      [[ "$status" == 0 ]] || return 1
+    else
+      [[ "$status" == 130 ]] || return 1
+      register=$(c1_privacy_register "$session_path")
+      grep -q ' monitor-unhealthy$' "$register" || return 1
+    fi
+    [[ ! -e "$session_path" ]] && ! kill -0 "$ws" 2>/dev/null || return 1
+  done
+)
+
+harness_head_drift() (
+  local repo="$FIXTURE/repo" pinned
+  git init -q "$repo" &&
+    mkdir "$repo/harness" &&
+    printf 'same harness\n' >"$repo/harness/file" &&
+    git -C "$repo" add harness &&
+    git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm initial || return 1
+  pinned=$(git -C "$repo" rev-parse HEAD) || return 1
+  c1_verify_harness_head "$repo" harness "$pinned" || return 1
+  git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit --allow-empty -qm drift || return 1
+  c1_verify_harness_clean "$repo" harness || return 1
+  ! c1_verify_harness_head "$repo" harness "$pinned"
 )
 
 run_case() {
@@ -435,7 +513,7 @@ if [[ "${1:-}" == --mutations ]]; then
       launcher-record) sed -i 's/|| ambiguous=1/|| return 1/' "$mutant/lib/c1-lib.sh" ;;
       watchdog-record) sed -i '/launcher_state=$(c1_owner_status/i\    c1_active_matches "$root" "$session" "$owner" "$owner_start" || return 0' "$mutant/lib/c1-lib.sh" ;;
       watchdog-lock) sed -i 's/ ]] \&\& c1_lock_state "$root"; then/ ]]; then/' "$mutant/lib/c1-lib.sh" ;;
-      watchdog-exit) sed -i '/c1_marked_pids "\$session").*return 0; fi/s/return 0/sleep 7/' "$mutant/lib/c1-lib.sh" ;;
+      watchdog-exit) sed -i '/rm -f -- "$(c1_monitor_ack_path "\$session")"/a\      sleep 7' "$mutant/lib/c1-lib.sh" ;;
       privacy-flag) sed -i 's/ --privacy-failed="\$privacy_failed"//' "$mutant/c1-session.sh" ;;
       cleanup-verdict) sed -i '/if (args.cleanup === .FAIL.) result.overall/d' "$mutant/lib/c1-evidence.mjs" ;;
       post-hash-edit) sed -i 's/writeFileSync(ev, evidence,/writeFileSync(ev, evidence + "\\n",/' "$mutant/lib/c1-evidence.mjs" ;;
@@ -452,7 +530,7 @@ if [[ "${1:-}" == --mutations ]]; then
   done
 else
   for case_name in competing_launchers overlapping_cleaners malformed_active retained_privacy_failure reused_owner watchdog_waits_for_launcher r11_exit_status_and_late_privacy launcher_crash_recovery active_publication_preserves_owner verification_is_retried \
-    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time; do
+    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss harness_head_drift; do
     if ! run_case "$HERE" "$case_name"; then
       printf 'FAIL: %s\n' "$case_name" >&2
       for log in "$FIXTURE"/*.log; do [[ ! -f "$log" ]] || cat "$log" >&2; done
