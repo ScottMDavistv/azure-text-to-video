@@ -268,11 +268,13 @@ start_private_desktop() {
 # Dedicated R11 evidence is written after verified cleanup, including on errors.
 finish_r11() {
   local rc=$1 listener=unverified cleanup=not-needed checkout=unverified verdict=FAIL listener_state listener_detail
+  local C1_R11_PRIVACY_FINALIZED=pending
   trap - EXIT
   trap '' INT TERM HUP
 
   if [[ -n "$S" ]]; then
-    if [[ -r "$S/listener-state" ]] &&
+    if [[ -f "$S/listener-state" && ! -L "$S/listener-state" && -r "$S/listener-state" ]] &&
+      [[ $(wc -l <"$S/listener-state") == 2 ]] &&
       { IFS= read -r listener_state; IFS= read -r listener_detail; } <"$S/listener-state" &&
       [[ "$listener_state" == verified &&
         "$listener_detail" =~ ^127[.]0[.]0[.]1:$C1_NOVNC_PORT\ pid=[0-9]+\ comm=[A-Za-z0-9._-]+\ ino=[0-9]+$ ]]; then
@@ -281,6 +283,8 @@ finish_r11() {
     if [[ -e "$S/privacy-failed" ]]; then PORT_PRIVATE=failed; fi
     cleanup=FAIL
     if c1_cleanup_session "$ROOT" "$S" && c1_verify_cleanup "$S"; then cleanup=PASS; fi
+    # L-1: late privacy failures during monitored teardown override startup proof.
+    [[ "$C1_R11_PRIVACY_FINALIZED" == clean ]] || PORT_PRIVATE=failed
   fi
   if [[ "$(git -C "$REPO" rev-parse HEAD)" == "$R11_HEAD" ]] &&
     c1_verify_harness_clean "$REPO" "$HARNESS_REL"; then
