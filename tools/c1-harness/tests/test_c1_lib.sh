@@ -2448,5 +2448,81 @@ if [[ -n "$TOP" ]] && git -C "$TOP" cat-file -e "$C1_PR60_WORKFLOW_BASE^{commit}
 else skip 'diff scope (trusted workflow base not in local history)'; fi
 
 echo
+
+echo '# R11 L-1/L-2: final monitor evidence and fail-closed verdict regression'
+r11_cleanup_snapshot() (
+  local scenario=$1 expected=$2 d="$TMP/r11-snapshot-$1" s
+  mkdir -p "$d"; s="$d/session.fixture"; mkdir -p "$s"
+  local C1_R11_PRIVACY_FINALIZED=pending
+  [[ "$scenario" != marked ]] || : >"$s/privacy-failed"
+  c1_ancestors() { :; }
+  c1_live_supervisors() { :; }
+  c1_load_tree() { :; }
+  c1_tree_descendant_identities() { :; }
+  c1_record_tree_descendants() { [[ "$scenario" != late ]] || : >"$s/privacy-failed"; }
+  c1_marked_pids() { :; }
+  c1_safe_rm() { rm -rf -- "$1"; }
+  c1_cleanup_session "$d" "$s" || return 1
+  [[ "$C1_R11_PRIVACY_FINALIZED" == "$expected" && ! -e "$s" ]]
+)
+t 'R11 records clean monitor state after reaping' r11_cleanup_snapshot clear clean
+t 'R11 preserves existing monitor privacy failure' r11_cleanup_snapshot marked failed
+t 'R11 detects privacy failure written during cleanup' r11_cleanup_snapshot late failed
+
+r11_verdict_fixture() (
+  local scenario=$1 expected=$2 d="$TMP/r11-verdict-$1" s rc=0
+  mkdir -p "$d"; s="$d/session"; mkdir -p "$s"
+  eval "$(sed -n '/^finish_r11() {$/,/^}$/p' "$HERE/../c1-session.sh")"
+  local S="$s" ROOT="$d" R11_EVIDENCE="$d/verdict.md"
+  local R11_HEAD=abcdef C1_NOVNC_PORT=6080 HARNESS_REL=tools/c1-harness REPO=fixture
+  local PORT_PRIVATE=verified-probe-gh C1_PRIVACY_DETAIL=ok
+  printf 'verified\n127.0.0.1:6080 pid=11 comm=websockify ino=31\n' >"$s/listener-state"
+  case "$scenario" in
+    missing) rm -f "$s/listener-state" ;;
+    empty) : >"$s/listener-state" ;;
+    malformed) printf 'verified\n0.0.0.0:6080 pid=11 comm=websockify ino=31\n' >"$s/listener-state" ;;
+    extra) printf 'verified\n127.0.0.1:6080 pid=11 comm=websockify ino=31\nextra\n' >"$s/listener-state" ;;
+    bad-port) printf 'verified\n127.0.0.1:60800 pid=11 comm=websockify ino=31\n' >"$s/listener-state" ;;
+    state-only) printf 'verified\n' >"$s/listener-state" ;;
+    trailing) printf 'verified\n127.0.0.1:6080 pid=11 comm=websockify ino=31 \n' >"$s/listener-state" ;;
+    crlf) printf 'verified\r\n127.0.0.1:6080 pid=11 comm=websockify ino=31\r\n' >"$s/listener-state" ;;
+    symlink) mv "$s/listener-state" "$d/state"; ln -s "$d/state" "$s/listener-state" ;;
+    privacy) PORT_PRIVATE=failed ;;
+    interrupted) rc=130 ;;
+    exitfail) rc=3 ;;
+  esac
+  c1_cleanup_session() {
+    C1_R11_PRIVACY_FINALIZED=clean
+    [[ "$scenario" != late-marker ]] || C1_R11_PRIVACY_FINALIZED=failed
+    rm -rf -- "$s"
+    [[ "$scenario" != cleanup-fail ]]
+  }
+  c1_verify_cleanup() { [[ "$scenario" != verify-fail ]]; }
+  git() { [[ "$scenario" != drift ]] && printf 'abcdef\n' || printf 'wrong\n'; }
+  c1_verify_harness_clean() { [[ "$scenario" != dirty ]]; }
+  c1_utc() { printf '2026-11-21T00:00:00Z'; }
+  local status=0
+  ( finish_r11 "$rc" ) >/dev/null 2>&1 || status=$?
+  if [[ "$expected" == PASS ]]; then
+    [[ "$status" == 0 ]] || return 1
+    grep -qx -- '- R11: PASS' "$d/verdict.md"
+  else
+    [[ "$status" != 0 ]] || return 1
+    grep -qx -- '- R11: FAIL' "$d/verdict.md"
+  fi
+)
+t 'R11 verified startup and cleanup PASS' r11_verdict_fixture good PASS
+for variant in missing empty malformed extra bad-port state-only trailing crlf symlink privacy interrupted exitfail late-marker cleanup-fail verify-fail drift dirty; do
+  t "R11 rejects $variant" r11_verdict_fixture "$variant" FAIL
+done
+r11_visibility_read_only() {
+  ! grep -E 'gh[[:space:]]+codespace[[:space:]]+ports[[:space:]]+visibility' "$HERE/../c1-session.sh" "$HERE/../lib/c1-lib.sh"
+}
+t 'R11 cannot mutate Codespaces visibility' r11_visibility_read_only
+r11_no_early_stop() {
+  ! grep -E 'stop_on_404|stop_on_decoy_404' "$HERE/../c1-session.sh" "$HERE/../lib/c1-lib.sh"
+}
+t 'R11 cannot short-circuit ambiguous 404' r11_no_early_stop
+
 echo "c1 harness shell tests: $PASSED passed, $FAILED failed, $SKIPPED skipped"
 (( FAILED == 0 ))
