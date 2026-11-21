@@ -747,15 +747,46 @@ c1_safe_rm() {
 
 c1_state_root() { printf '%s' "${C1_STATE_ROOT:-${XDG_RUNTIME_DIR:-/tmp}/c1-harness-$(id -u)}"; }
 
-# c1_session_new ROOT -> prints session dir (mode 700) and writes lock
+# Keep the lock file inode for the lifetime of the state root. The caller
+# holds the descriptor until it exits, including its EXIT trap.
+c1_lock_state() {
+  local root=$1
+  # shellcheck disable=SC2174  # The final state directory requires explicit mode 0700.
+  mkdir -p -m 700 -- "$root" || return 1
+  [[ -d "$root" && ! -L "$root" && -O "$root" && "$(stat -c %a -- "$root")" == 700 ]] || return 1
+  local lock="$root/.lock" lock_temp
+  if [[ ! -e "$lock" && ! -L "$lock" ]]; then
+    lock_temp=$(mktemp "$root/.lock.XXXXXXXX") || return 1
+    ln -T -- "$lock_temp" "$lock" 2>/dev/null || true
+    rm -f -- "$lock_temp" || return 1
+  fi
+  [[ -f "$lock" && ! -L "$lock" && -O "$lock" && "$(stat -c %a -- "$lock")" == 600 ]] || return 1
+  exec {C1_STATE_LOCK_FD}>>"$lock" || return 1
+  if flock -n "$C1_STATE_LOCK_FD"; then return 0; fi
+  exec {C1_STATE_LOCK_FD}>&-
+  return 1
+}
+
+# Publish a complete record without replacing an existing owner.
 c1_session_new() {
-  local root=$1 s
+  local root=$1 owner=$2 session owner_start temp
+  [[ "$owner" =~ ^[1-9][0-9]*$ && "$owner" != 1 ]] || return 1
   umask 077
-  mkdir -p "$root" && chmod 700 "$root"
-  s=$(mktemp -d "$root/session.XXXXXXXX") || return 1
-  mkdir -p "$s"/{tmp,reports,log}
-  printf '%s %s %s\n' "$$" "$(c1_proc_start "$$")" "$s" >"$root/active"
-  printf '%s' "$s"
+  # shellcheck disable=SC2174  # The final state directory requires explicit mode 0700.
+  mkdir -p -m 700 -- "$root" || return 1
+  owner_start=$(c1_proc_start "$owner") || return 1
+  [[ "$owner_start" =~ ^[1-9][0-9]*$ ]] || return 1
+  session=$(mktemp -d "$root/session.XXXXXXXX") || return 1
+  mkdir -m 700 -- "$session"/{tmp,reports,log} || return 1
+  temp=$(mktemp "$root/.active.XXXXXXXX") || return 1
+  if ! printf '%s %s %s\n' "$owner" "$owner_start" "$session" >"$temp" ||
+     ! ln -T -- "$temp" "$root/active"; then
+    rm -f -- "$temp"
+    c1_safe_rm "$session" "$root"
+    return 1
+  fi
+  rm -f -- "$temp"
+  printf '%s' "$session"
 }
 
 # c1_proc_start PID -> kernel start time (guards against PID reuse)
@@ -781,44 +812,67 @@ c1_marked_pids() {
   return 0
 }
 
-# c1_session_status ROOT -> none | active | stale
+# Read exactly one complete line. A symlink, NUL byte, extra data, or a
+# session outside the state root makes ownership indeterminate.
+c1_read_active() {
+  local root=$1 record='' suffix pattern
+  [[ -f "$root/active" && ! -L "$root/active" && -O "$root/active" &&
+     "$(stat -c %a -- "$root/active")" == 600 ]] || return 1
+  if IFS= read -r -d '' record <"$root/active"; then return 1; fi
+  pattern='^([1-9][0-9]*) ([1-9][0-9]*) ([^[:cntrl:]]+)'$'\n''$'
+  [[ "$record" =~ $pattern ]] || return 1
+  C1_ACTIVE_PID=${BASH_REMATCH[1]} C1_ACTIVE_START=${BASH_REMATCH[2]} C1_ACTIVE_SESSION=${BASH_REMATCH[3]}
+  [[ "$C1_ACTIVE_PID" != 1 && "$C1_ACTIVE_SESSION" == "$root"/session.* ]] || return 1
+  suffix=${C1_ACTIVE_SESSION#"$root/session."}
+  [[ "$suffix" =~ ^[A-Za-z0-9]+$ && ! -L "$C1_ACTIVE_SESSION" &&
+     ( ! -e "$C1_ACTIVE_SESSION" || -d "$C1_ACTIVE_SESSION" ) ]]
+}
+
+# c1_session_status ROOT -> none | active | stale, or failure on uncertainty.
 c1_session_status() {
-  local root=$1 pid start s
-  [[ -f "$root/active" ]] || { echo none; return; }
-  read -r pid start s <"$root/active" || { echo stale; return; }
-  if [[ -n "$pid" && -n "$start" && "$(c1_proc_start "$pid")" == "$start" ]]; then echo active; else echo stale; fi
+  local root=$1 identity observed proc_state
+  [[ -e "$root/active" || -L "$root/active" ]] || { echo none; return; }
+  c1_read_active "$root" || return 1
+  identity=$(awk '{sub(/^.*\) /, ""); print $1, $20}' "/proc/$C1_ACTIVE_PID/stat" 2>/dev/null) || {
+    [[ ! -d "/proc/$C1_ACTIVE_PID" ]] || return 1
+    echo stale
+    return
+  }
+  read -r proc_state observed <<<"$identity" || return 1
+  [[ "$observed" =~ ^[1-9][0-9]*$ ]] || return 1
+  if [[ "$observed" != "$C1_ACTIVE_START" ]]; then echo stale; return; fi
+  [[ "$proc_state" =~ ^[A-Z]$ ]] || return 1
+  if [[ "$proc_state" =~ ^[ZX]$ ]]; then echo stale; else echo active; fi
 }
 
 # Operator cleanup/purge must not compete with an active launcher.
 # The watchdog cleans only after its owner exits; recovery already refuses
 # active sessions. Missing/unreadable status is not permission to clean.
 c1_refuse_active_cleanup() {
-  local root=$1 status
+  local root=$1 launcher_state
   [[ -d "$root" ]] || return 0
-  status=$(c1_session_status "$root") || {
+  launcher_state=$(c1_session_status "$root") || {
     c1_err 'cannot verify C1 launcher state; refusing operator cleanup'
     return 1
   }
-  case "$status" in
+  case "$launcher_state" in
     none|stale) return 0 ;;
     active) c1_err 'C1 launcher is active; operator cleanup/purge is forbidden until it exits'; return 1 ;;
-    *) c1_err "unrecognized C1 launcher state: $status"; return 1 ;;
+    *) c1_err "unrecognized C1 launcher state: $launcher_state"; return 1 ;;
   esac
 }
-
-c1_session_dir() { local _p _t s; read -r _p _t s <"$1/active" 2>/dev/null && printf '%s' "$s"; }
 
 # N-1: check ALL retained session evidence before a new run or preflight,
 # even when cleanup removed the active file before verifying the survivors.
 # Never attempt recovery while a verified launcher is still active.
 c1_recover_before_start() {
-  local root=$1 status
-  status=$(c1_session_status "$root") || return 1
-  if [[ "$status" == active ]]; then
+  local root=$1 launcher_state
+  launcher_state=$(c1_session_status "$root") || { c1_err 'cannot verify the active record; recovery refused'; return 1; }
+  if [[ "$launcher_state" == active ]]; then
     c1_err 'another C1 session is active; finish it before starting'
     return 1
   fi
-  if [[ "$status" == stale ]]; then c1_warn 'recovering from an interrupted C1 session'; fi
+  if [[ "$launcher_state" == stale ]]; then c1_warn 'recovering from an interrupted C1 session'; fi
   # Unconditionally scan session directories and orphan PID/inode registers.
   # c1_cleanup_all fails closed if any evidence cannot be retired safely.
   c1_cleanup_all "$root" || {
@@ -844,24 +898,34 @@ c1_owned_pid() {
   c1_pid_has_marker "$pid" "$s"
 }
 
-# c1_signal_owned SIG PID SESSION [START]
-# Signals PID only if owned (above). Its PROCESS GROUP is signalled only when
-# PID is also the leader of its own process group AND session (i.e. the setsid
-# leader c1_spawn created): only that session's descendants can be members, so
-# no unrelated process can be reached through the group signal.
-c1_signal_owned() {
-  local sig=$1 pid=$2 s=$3 start=${4:-}
-  c1_owned_pid "$pid" "$s" "$start" || return 0
-  if [[ "$(c1_proc_stat_field "$pid" 3)" == "$pid" && "$(c1_proc_stat_field "$pid" 4)" == "$pid" ]]; then
-    kill "-$sig" -- "-$pid" 2>/dev/null || true
-  fi
-  kill "-$sig" "$pid" 2>/dev/null || true
+c1_signal_identity() {
+  python3 -I -c '
+import os, signal, sys
+pid, start, sig = sys.argv[1:]
+try:
+    fd = os.pidfd_open(int(pid))
+    with open(f"/proc/{pid}/stat", "rb") as stat:
+        fields = stat.read().rsplit(b") ", 1)[1].split()
+    if fields[19] == start.encode():
+        signal.pidfd_send_signal(fd, getattr(signal, "SIG" + sig))
+except (FileNotFoundError, ProcessLookupError):
+    pass
+' "$2" "$3" "$1"
 }
 
-# c1_cleanup_session ROOT SESSION  (idempotent)
-# Every signal is ownership-verified: recorded entries ("pid starttime") must
-# match marker AND start time (PID-reuse safe); marker-scan hits are signalled
-# individually or, if they are their own setsid leader, as a group.
+# The start time is sampled before checking the marker. The final signal
+# uses a pidfd so the PID cannot be recycled between validation and delivery.
+c1_signal_owned() {
+  local sig=$1 pid=$2 session=$3 start=${4:-}
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" != 1 ]] || return 0
+  if [[ -z "$start" ]]; then start=$(c1_proc_start "$pid") || return 0; fi
+  [[ "$start" =~ ^[1-9][0-9]*$ ]] || return 1
+  c1_owned_pid "$pid" "$session" "$start" || return 0
+  c1_signal_identity "$sig" "$pid" "$start"
+}
+
+# c1_cleanup_session ROOT SESSION (idempotent). The lifecycle lock serializes
+# callers and the per-session gate excludes incomplete supervisor registration.
 C1_SUPERVISOR_WAIT_STEPS=100            # x 0.05 s after the KILL escalation
 
 # c1_ancestors -> this (sub)shell and every ancestor up to PID 1. Cleanup never
@@ -887,10 +951,27 @@ c1_live_supervisors() {
 }
 
 c1_cleanup_session() {
+  local cleanup_gate cleanup_exit=0
+  if [[ -L "$2" ]]; then return 1; fi
+  if [[ -d "$2" ]]; then
+    [[ ! -L "$2/.spawn-lock" ]] || return 1
+    exec {cleanup_gate}>>"$2/.spawn-lock" || return 1
+    if ! flock -w 5 "$cleanup_gate"; then exec {cleanup_gate}>&-; return 1; fi
+  fi
+  _c1_cleanup_session "$@" || cleanup_exit=$?
+  if [[ -n "${cleanup_gate:-}" ]]; then exec {cleanup_gate}>&-; fi
+  return "$cleanup_exit"
+}
+
+_c1_cleanup_session() {
   local root=$1 s=$2 pid start descendants='' capture_ok=0
   [[ -n "$s" ]] || return 0
   # Never let cleanup's own helper processes carry the marker it hunts for.
   export -n C1_HARNESS_SESSION 2>/dev/null || true; unset C1_HARNESS_SESSION
+  if [[ -e "$root/active" || -L "$root/active" ]]; then
+    c1_read_active "$root" || return 1
+  fi
+  [[ ! -L "$s" ]] || return 1
   local -a rec=()
   local -A anc=() sup=()
   for pid in $(c1_ancestors); do anc[$pid]=1; done
@@ -907,12 +988,12 @@ c1_cleanup_session() {
     # can block verification, but never authorize killing a reparented PID.
     while read -r pid start; do
       [[ -n "$start" && -z "${anc[$pid]:-}" && -z "${sup[$pid]:-}" && "$(c1_proc_start "$pid")" == "$start" ]] || continue
-      kill -"$sig" -- "$pid" 2>/dev/null || true
+      c1_signal_identity "$sig" "$pid" "$start" || capture_ok=1
     done <<<"$descendants"
     for line in "${rec[@]}"; do
       read -r pid start <<<"$line"
-      [[ -n "${start:-}" && -z "${anc[$pid]:-}" ]] || continue          # legacy/garbage line: never trusted
-      c1_signal_owned "$sig" "$pid" "$s" "$start"
+      [[ "$pid" =~ ^[1-9][0-9]*$ && "${start:-}" =~ ^[1-9][0-9]*$ && -z "${anc[$pid]:-}" ]] || continue          # legacy/garbage line: never trusted
+      c1_signal_owned "$sig" "$pid" "$s" "$start" || capture_ok=1
     done
     # A supervisor is never SIGKILLed while it may still own descendants: that
     # would orphan them to PID 1. TERM is forwarded by the supervisor itself;
@@ -920,15 +1001,17 @@ c1_cleanup_session() {
     for pid in $(c1_marked_pids "$s"); do
       [[ -z "${anc[$pid]:-}" ]] || continue
       if [[ -n "${sup[$pid]:-}" ]]; then
-        [[ $sig == TERM ]] && c1_signal_owned TERM "$pid" "$s" "${sup[$pid]}"
+        if [[ $sig == TERM ]]; then
+          c1_signal_owned TERM "$pid" "$s" "${sup[$pid]}" || capture_ok=1
+        fi
         continue
       fi
-      c1_signal_owned "$sig" "$pid" "$s"
+      c1_signal_owned "$sig" "$pid" "$s" || capture_ok=1
     done
     if [[ $sig == KILL ]]; then
       for pid in "${!sup[@]}"; do
         [[ -z "${anc[$pid]:-}" ]] || continue
-        c1_signal_owned USR1 "$pid" "$s" "${sup[$pid]}"
+        c1_signal_owned USR1 "$pid" "$s" "${sup[$pid]}" || capture_ok=1
       done
       break
     fi
@@ -956,16 +1039,18 @@ c1_cleanup_session() {
     return 1
   fi
   if (( capture_ok )); then c1_err 'cleanup evidence: descendant identities could not be verified; session retained'; return 1; fi
-  # R11 L-1: all supervisors (including the privacy monitor) have exited.
-  # Record the final failure marker before the session directory is removed.
-  if [[ "${C1_R11_PRIVACY_FINALIZED-unset}" == pending ]]; then
-    # Another cleaner may have removed the session before this snapshot.
-    # Missing/symlinked session evidence is UNKNOWN, never proof of privacy.
-    if [[ ! -d "$s" || -L "$s" ||
-          -e "$s/privacy-failed" || -L "$s/privacy-failed" ]]; then
-      C1_R11_PRIVACY_FINALIZED=failed
+  # The monitor has stopped. Preserve legacy/in-session markers before
+  # deleting its files. Only a fixed reason is copied to the durable record.
+  if [[ -e "$s/privacy-failed" || -L "$s/privacy-failed" ]]; then
+    if ! c1_privacy_failed "$s" external; then
+      c1_record_privacy_failure "$s" monitor-flagged || return 1
+    fi
+  fi
+  if [[ "${C1_FINAL_PRIVACY-unset}" == pending ]]; then
+    if [[ ! -d "$s" ]] || c1_privacy_failed "$s"; then
+      C1_FINAL_PRIVACY=failed
     else
-      C1_R11_PRIVACY_FINALIZED=clean
+      C1_FINAL_PRIVACY=clean
     fi
   fi
   # L-3: keep the observed listener inodes so c1_verify_cleanup can prove none
@@ -994,34 +1079,51 @@ c1_cleanup_session() {
       return 1
     fi
   fi
-  if [[ -d "$s" ]]; then c1_safe_rm "$s" "$root" || return 1; fi
-  if [[ -f "$root/active" ]]; then
-    local as; as=$(c1_session_dir "$root" || true)
-    if [[ "$as" == "$s" || ! -d "${as:-/nonexistent}" ]]; then rm -f -- "$root/active"; fi
+  if [[ -d "$s" ]]; then
+    # A crash after deletion must still leave a path for verification even
+    # when there were no PID, listener, or supervisor records to archive.
+    local verification_record="$root/.${s##*/}.pending"
+    if [[ ! -e "$verification_record" && ! -L "$verification_record" ]]; then
+      (set -o noclobber; : >"$verification_record") || return 1
+    fi
+    [[ -f "$verification_record" && ! -L "$verification_record" ]] || return 1
+    c1_safe_rm "$s" "$root" || return 1
+  fi
+  if [[ -e "$root/active" || -L "$root/active" ]]; then
+    c1_read_active "$root" || return 1
+    if [[ "$C1_ACTIVE_SESSION" == "$s" ]]; then rm -f -- "$root/active" || return 1; fi
   fi
   return 0
 }
 
 # c1_cleanup_all ROOT  remove every session directory under ROOT
 c1_cleanup_all() {
-  local root=$1 s record name failed=0
+  local root=$1 s record name active_session='' failed=0
   local -A checked=()
   [[ -d "$root" ]] || return 0
+  c1_refuse_active_cleanup "$root" || return 1
+  if [[ -e "$root/active" || -L "$root/active" ]]; then
+    c1_read_active "$root" || return 1
+    active_session=$C1_ACTIVE_SESSION
+  fi
   for s in "$root"/session.*; do
-    [[ -d "$s" ]] || continue
-    if ! c1_cleanup_session "$root" "$s"; then failed=1; continue; fi
+    [[ -e "$s" || -L "$s" ]] || continue
+    if [[ ! -d "$s" || -L "$s" ]] || ! c1_cleanup_session "$root" "$s"; then failed=1; continue; fi
     c1_verify_cleanup "$s" || failed=1
     checked[$s]=1
   done
   # A crash may leave only the post-cleanup inode/PID registers. Verify them,
   # never discard them to make a subsequent cleanup appear successful.
-  for record in "$root"/.session.*.inodes "$root"/.session.*.pids "$root"/.session.*.supervisors "$root"/.session.*.reaped; do
+  for record in "$root"/.session.*.pending "$root"/.session.*.inodes "$root"/.session.*.pids "$root"/.session.*.supervisors "$root"/.session.*.reaped; do
     [[ -e "$record" || -L "$record" ]] || continue
     name=${record##*/}; name=${name#.}; s="$root/${name%.*}"
     [[ -n "${checked[$s]:-}" ]] && continue
     c1_verify_cleanup "$s" || failed=1
     checked[$s]=1
   done
+  if [[ -n "$active_session" && -z "${checked[$active_session]:-}" ]]; then
+    c1_verify_cleanup "$active_session" || failed=1
+  fi
   (( failed == 0 )) || { c1_err 'cleanup evidence: verification failed; records retained'; return 1; }
   rm -f -- "$root/active"
 }
@@ -1029,7 +1131,7 @@ c1_cleanup_all() {
 # 6080/5173 provably closed and no listener inode recorded during the session
 # still listening (L-3). Unavailable listener evidence is a cleanup FAILURE.
 c1_verify_cleanup() {
-  local s=$1 ok=0 rc reg ino addr
+  local s=$1 ok=0 rc reg ino addr line
   local -A live=()
   [[ -z "$(c1_marked_pids "$s")" ]] || { c1_err 'harness processes still running'; ok=1; }
   [[ ! -e "$s" ]] || { c1_err 'session directory still present'; ok=1; }
@@ -1069,7 +1171,7 @@ c1_verify_cleanup() {
   reg="$(dirname -- "$s")/.${s##*/}.inodes"
   if [[ -e "$reg" || -L "$reg" ]]; then
     # N-6: ambiguous preserved evidence cannot establish listener closure.
-    local inode_unresolved=0 line
+    local inode_unresolved=0
     if [[ ! -f "$reg" || -L "$reg" || ! -r "$reg" || ! -s "$reg" ]]; then
       c1_err 'preserved listener inode evidence is not a readable nonempty regular file'
       inode_unresolved=1
@@ -1093,7 +1195,14 @@ c1_verify_cleanup() {
     fi
     if (( inode_unresolved )); then ok=1; else rm -f -- "$reg" || ok=1; fi
   fi
-  return $ok
+  if (( ok == 0 )); then
+    local verification_record="${s%/*}/.${s##*/}.pending"
+    if [[ -e "$verification_record" || -L "$verification_record" ]]; then
+      [[ -f "$verification_record" && ! -L "$verification_record" ]] &&
+        rm -f -- "$verification_record" || ok=1
+    fi
+  fi
+  return "$ok"
 }
 
 # c1_verify_supervisors SESSION -> 0 only if every preserved supervisor identity
@@ -1221,7 +1330,7 @@ _c1_spawn_supervised() {
   fi
   # The setsid leader is recorded as before ("pid starttime"); its supervisor
   # recorded itself. A child that already exited is never signalled by PID.
-  printf '%s %s\n' "$pid" "$st" >>"$s/pids"
+  printf '%s %s\n' "$pid" "$st" >>"$s/pids" || return 1
   printf '%s' "$pid"
 }
 
@@ -1247,20 +1356,20 @@ c1_start_display_vnc() {
   local -a cmd
   [[ "${C1_HARNESS_SESSION:-}" == "$s" ]] || { c1_err 'session marker not exported'; return 1; }
   disp=$(c1_free_display) || { c1_err 'no free X display'; return 1; }
-  touch "$s/Xauthority" && chmod 600 "$s/Xauthority"
+  touch "$s/Xauthority" && chmod 600 "$s/Xauthority" || return 1
   xauth -q -f "$s/Xauthority" add "$disp" . "$(mcookie)" || return 1
   mapfile -t cmd < <(c1_cmd_xvfb "$disp" "$s")
-  c1_spawn_desktop "$s" xvfb "${cmd[@]}" >/dev/null
+  c1_spawn_desktop "$s" xvfb "${cmd[@]}" >/dev/null || return 1
   for _ in $(seq 1 50); do [[ -S "/tmp/.X11-unix/X${disp#:}" ]] && break; sleep 0.1; done
   [[ -S "/tmp/.X11-unix/X${disp#:}" ]] || { c1_err 'Xvfb failed to start'; return 1; }
   export DISPLAY=$disp XAUTHORITY="$s/Xauthority"
-  c1_spawn_desktop "$s" fluxbox fluxbox >/dev/null
-  ( umask 077; printf '%s\n' "$pass" >"$s/vncpass" )
+  c1_spawn_desktop "$s" fluxbox fluxbox >/dev/null || return 1
+  ( umask 077; printf '%s\n' "$pass" >"$s/vncpass" ) || return 1
   mapfile -t cmd < <(c1_cmd_x11vnc "$disp" "$s")
-  c1_spawn_desktop "$s" x11vnc "${cmd[@]}" >/dev/null
+  c1_spawn_desktop "$s" x11vnc "${cmd[@]}" >/dev/null || return 1
   for _ in $(seq 1 50); do [[ -S "$s/vnc.sock" ]] && break; sleep 0.1; done
   [[ -S "$s/vnc.sock" ]] || { c1_err 'x11vnc failed to start'; return 1; }
-  chmod 600 "$s/vnc.sock" 2>/dev/null || true
+  chmod 600 "$s/vnc.sock" || return 1
   for _ in $(seq 1 30); do [[ ! -e "$s/vncpass" ]] && break; sleep 0.1; done
   [[ ! -e "$s/vncpass" ]] || { c1_err 'x11vnc did not consume the one-time password file'; return 1; }
   c1_assert_no_listeners_before_novnc "$s"
@@ -1296,8 +1405,9 @@ c1_start_websockify() {
   local -a cmd
   c1_port_free "$port" || { c1_err "port $port is already in use; run: c1-session.sh cleanup"; return 1; }
   mapfile -t cmd < <(c1_cmd_websockify "$port" "$s")
-  pid=$(c1_spawn_desktop "$s" websockify "${cmd[@]}")
-  st=$(c1_proc_start "$pid")
+  pid=$(c1_spawn_desktop "$s" websockify "${cmd[@]}") || return 2
+  st=$(c1_proc_start "$pid") || return 2
+  [[ "$st" =~ ^[1-9][0-9]*$ ]] || return 2
   for _ in $(seq 1 50); do c1_port_free "$port" || break; sleep 0.1; done
   if c1_port_free "$port"; then c1_err 'noVNC/websockify failed to listen'
   elif c1_assert_desktop_listeners "$s" "$port"; then printf '%s' "$pid"; return 0
@@ -1543,6 +1653,33 @@ c1_verify_private_novnc() {
   return 1
 }
 
+c1_privacy_register() { printf '%s/.%s.privacy-failed' "${1%/*}" "${1##*/}"; }
+
+c1_privacy_failed() {
+  local session=$1 register
+  register=$(c1_privacy_register "$session")
+  [[ -e "$register" || -L "$register" ]] ||
+    [[ "${2:-}" != external && ( -e "$session/privacy-failed" || -L "$session/privacy-failed" ) ]]
+}
+
+c1_record_privacy_failure() {
+  local register reason=$2 temp
+  register=$(c1_privacy_register "$1")
+  [[ "$reason" =~ ^[a-z0-9_-]{1,40}$ ]] || return 1
+  if [[ ! -e "$register" && ! -L "$register" ]]; then
+    temp=$(mktemp "$register.XXXXXXXX") || return 1
+    if printf '%s %s\n' "$(c1_utc)" "$reason" >"$temp" &&
+       ln -T -- "$temp" "$register" 2>/dev/null; then
+      rm -f -- "$temp"
+      return
+    fi
+    rm -f -- "$temp" || return 1
+  fi
+  [[ -f "$register" && ! -L "$register" && -O "$register" &&
+     "$(stat -c %a -- "$register")" == 600 ]] || return 1
+  printf '%s %s\n' "$(c1_utc)" "$reason" >>"$register"
+}
+
 # c1_teardown_novnc SESSION PORT WSPID WSSTART [REASON]
 # Shared by the monitor and the launcher's privacy gate (L-9). Writes the
 # privacy-failed marker FIRST, then TERM -> wait -> KILL (ownership-verified),
@@ -1552,22 +1689,25 @@ c1_teardown_novnc() {
   local s=$1 port=$2 ws=$3 wsst=$4 reason=${5:-unverified}
   # A monitor supplies a tighter local bound; other callers retain the 2 s
   # TERM / KILL grace periods. Never accept arbitrary external step counts.
-  local wait_steps=20 i
+  local wait_steps=20 i evidence_error=0
   [[ "${C1_MONITOR_FAST_TEARDOWN:-}" == 1 ]] && wait_steps=5
   [[ "$reason" =~ ^[a-z0-9_-]{1,40}$ ]] || reason=unverified
-  printf '%s %s\n' "$(c1_utc)" "$reason" >>"$s/privacy-failed"
-  c1_signal_owned TERM "$ws" "$s" "$wsst"
+  c1_record_privacy_failure "$s" "$reason" || evidence_error=1
+  printf '%s %s\n' "$(c1_utc)" "$reason" >>"$s/privacy-failed" || evidence_error=1
+  c1_signal_owned TERM "$ws" "$s" "$wsst" || evidence_error=1
   for (( i=0; i<wait_steps; i++ )); do
     if c1_port_free "$port" && ! c1_owned_pid "$ws" "$s" "$wsst"; then break; fi
     sleep 0.1
   done
-  c1_signal_owned KILL "$ws" "$s" "$wsst"
+  c1_signal_owned KILL "$ws" "$s" "$wsst" || evidence_error=1
   for (( i=0; i<wait_steps; i++ )); do c1_port_free "$port" && break; sleep 0.1; done
   if ! c1_port_free "$port"; then
-    printf '%s teardown-failed\n' "$(c1_utc)" >>"$s/privacy-failed"
+    c1_record_privacy_failure "$s" teardown-failed || c1_err 'cannot preserve privacy teardown evidence'
+    printf '%s teardown-failed\n' "$(c1_utc)" >>"$s/privacy-failed" || true
     c1_err "port $port is still listening after the privacy teardown"
     return 1
   fi
+  (( evidence_error == 0 ))
 }
 
 # c1_gh_private PORT -> 0 if gh reads back "private"; 1 if gh reports anything
@@ -1587,7 +1727,7 @@ c1_gh_private() {
 # closed; 2 = teardown could NOT be verified (caller must abort the session).
 c1_privacy_gate() {
   local s=$1 port=$2 base=$3 hdr=$4 ws=$5 wsst=$6 req_gh=${7:-0} ca=${8:-} reason='' g=0
-  if [[ -e "$s/privacy-failed" ]]; then reason=monitor-flagged
+  if c1_privacy_failed "$s"; then reason=monitor-flagged
   elif ! c1_verify_private_novnc "$base" "$hdr" "$ca"; then reason=$C1_PRIVACY_STATE
   elif (( req_gh )) && [[ $C1_PRIVACY_GH_PRIVATE != 1 ]]; then
     c1_gh_private "$port" || g=$?
@@ -1660,9 +1800,9 @@ c1_privacy_monitor_loop() {
     fi
     # A stalled/ambiguous edge is not a positive privacy proof: fail closed on
     # its first observation. L-9: an unverifiable teardown propagates rc 2.
-    c1_monitor_gh_stop
     teardown_rc=0
     c1_teardown_novnc "$s" "$port" "$ws" "$wsst" "$reason" || teardown_rc=2
+    c1_monitor_gh_stop
     if [[ -n "$detail" ]]; then
       printf '%s %s\n' "$(c1_utc)" "$detail" >"$s/privacy-diagnostic" || true
     fi
@@ -1710,36 +1850,51 @@ c1_gh_visibility() {
 }
 
 # --------------------------------------------------------------- watchdog --
-# L-3: a marker-scoped watchdog in its own session tears the harness session
-# down if the launcher disappears (SIGKILL, OOM, closed pty during cleanup).
+# The watchdog stays outside the supervised tree and owns no inherited lock.
+# It requests launcher teardown once, then waits until the lifecycle lock is
+# available and revalidates the record before recovering.
 c1_watchdog_loop() {
-  local root=$1 s=$2 lpid=$3 lstart=$4
-  trap 'exit 0' TERM
-  # A SIGKILLed launcher can linger as an unreaped zombie with the same start
-  # time; zombie (Z) or dead (X) counts as gone.
-  while [[ "$(c1_proc_start "$lpid")" == "$lstart" && ! "$(c1_proc_stat_field "$lpid" 1)" =~ ^[ZX]$ ]]; do
-    # L-9: if port closure is unverified, stop only the exact recorded launcher
-    # after validating PID/start time and the active-session record.
-    if [[ -f "$s/privacy-failed" ]] && grep -q ' teardown-failed$' "$s/privacy-failed"; then
-      local active_pid active_start active_session
-      if read -r active_pid active_start active_session <"$root/active" &&
-         [[ "$active_pid" == "$lpid" && "$active_start" == "$lstart" && "$active_session" == "$s" ]] &&
-         [[ "$(c1_proc_start "$lpid")" == "$lstart" ]]; then
-        kill -TERM "$lpid" 2>/dev/null || true
-      fi
-      break
+  local root=$1 session=$2 owner=$3 owner_start=$4 sent=0 register launcher_state
+  register=$(c1_privacy_register "$session")
+  while :; do
+    c1_read_active "$root" || return 0
+    [[ "$C1_ACTIVE_PID $C1_ACTIVE_START $C1_ACTIVE_SESSION" == "$owner $owner_start $session" ]] || return 0
+    launcher_state=$(c1_session_status "$root") || return 1
+    if [[ "$launcher_state" == stale ]] && c1_lock_state "$root"; then
+      c1_read_active "$root" || return 0
+      [[ "$C1_ACTIVE_PID $C1_ACTIVE_START $C1_ACTIVE_SESSION" == "$owner $owner_start $session" ]] || return 0
+      c1_cleanup_all "$root"
+      return
     fi
-    sleep 1
+    if [[ "$launcher_state" == active && "$sent" == 0 ]] &&
+       { grep -qs ' teardown-failed$' "$register" || grep -qs ' teardown-failed$' "$session/privacy-failed"; }; then
+      c1_signal_identity TERM "$owner" "$owner_start" || return 1
+      sent=1
+    fi
+    sleep 0.25
   done
-  c1_cleanup_session "$root" "$s"
 }
 
 # c1_start_watchdog ROOT SESSION LAUNCHER_PID LIBPATH
 c1_start_watchdog() {
-  local root=$1 s=$2 lpid=$3 lib=$4 lst
-  lst=$(c1_proc_start "$lpid"); [[ -n "$lst" ]] || return 1
+  local root=$1 session=$2 owner=$3 lib=$4 owner_start step
+  owner_start=$(c1_proc_start "$owner") || return 1
+  [[ "$owner_start" =~ ^[1-9][0-9]*$ ]] || return 1
   # shellcheck disable=SC2016
-  c1_spawn "$s" watchdog bash -c 'source "$1"; c1_watchdog_loop "$2" "$3" "$4" "$5"' _ "$lib" "$root" "$s" "$lpid" "$lst" >/dev/null
+  ( c1_close_inherited_fds
+    exec env -i PATH="$PATH" HOME="$HOME" setsid bash -euo pipefail -c \
+      'source "$1"; c1_read_active "$2"
+       [[ "$C1_ACTIVE_PID $C1_ACTIVE_START $C1_ACTIVE_SESSION" == "$4 $5 $3" ]]
+       : >"$3/tmp/watchdog-ready"
+       c1_watchdog_loop "$2" "$3" "$4" "$5"' _ "$lib" "$root" "$session" "$owner" "$owner_start"
+  ) </dev/null >/dev/null 2>&1 &
+  disown "$!" 2>/dev/null || true
+  for ((step=0; step<100; step++)); do
+    [[ ! -f "$session/tmp/watchdog-ready" ]] || return 0
+    sleep 0.02
+  done
+  c1_err 'watchdog did not confirm ownership'
+  return 1
 }
 
 # ------------------------------------------------------- environment (L-4) --

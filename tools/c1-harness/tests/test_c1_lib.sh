@@ -17,7 +17,13 @@ trap cleanup_tests EXIT
 # invoked in an `if`/`&&`/`||` context: bash then ignores errexit for every
 # command inside, including a subshell that re-runs `set -e`, so only a case's
 # LAST command would be checked. Callers therefore use `set +e; run_case; rc=$?`.
-run_case() { ( set -Eeuo pipefail; "$@" ) >"$TMP/out" 2>&1; }
+run_case() {
+  local ROOT="$TMP/case-$PASSED-$FAILED" case_exit
+  ( set -Eeuo pipefail; C1_TEST_OWNER=$BASHPID; "$@" ) >"$TMP/out" 2>&1
+  case_exit=$?
+  c1_cleanup_all "$ROOT" >/dev/null 2>&1 || true
+  return "$case_exit"
+}
 # C1_TEST_FILTER=REGEX runs only matching cases (development aid for single cases
 # and mutation runs; an unfiltered run is the only complete regression result).
 # The first section always runs (its cases build the fixture for later ones).
@@ -267,7 +273,7 @@ export C1_STATE_ROOT="$TMP/state"
 ROOT=$(c1_state_root)
 lifecycle() {
   set -Eeuo pipefail   # regression: cleanup must survive errexit/pipefail
-  local s; s=$(c1_session_new "$ROOT")
+  local s; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   [[ $(stat -c %a "$s") == 700 && $(stat -c %a "$ROOT") == 700 ]]
   [[ $(c1_session_status "$ROOT") == active ]]
   c1_spawn "$s" a sleep 300 >/dev/null
@@ -283,7 +289,7 @@ lifecycle() {
 t 'session dir 0700, all marked processes killed, files deleted, idempotent' lifecycle
 stale() {
   set -Eeuo pipefail
-  local s; s=$(c1_session_new "$ROOT")
+  local s; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   printf '999999 1 %s\n' "$s" >"$ROOT/active"        # crashed launcher
   env C1_HARNESS_SESSION="$s" nohup sleep 300 >/dev/null 2>&1 &
   sleep 0.3
@@ -293,7 +299,7 @@ stale() {
 }
 t 'recovers an interrupted session: stale lock detected, orphans killed, files removed' stale
 pidreuse() {
-  local s; s=$(c1_session_new "$ROOT")
+  local s; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   printf '%s 1 %s\n' "$$" "$s" >"$ROOT/active"          # live pid, wrong start time
   [[ $(c1_session_status "$ROOT") == stale ]]
   c1_cleanup_all "$ROOT"
@@ -303,19 +309,19 @@ errexit_selfcheck() { false; true; }   # a failing middle assertion MUST fail th
 f 'test runner enforces every assertion in a case (errexit not masked)' errexit_selfcheck
 alive() { kill -0 "$1" 2>/dev/null && [[ "$(c1_proc_stat_field "$1" 1)" != Z ]]; }
 pidsformat() {
-  local s p; s=$(c1_session_new "$ROOT"); p=$(c1_spawn "$s" a sleep 300)
+  local s p; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); p=$(c1_spawn "$s" a sleep 300)
   grep -Eq "^$p [0-9]+$" "$s/pids"                       # "pid starttime"
   [[ "$(awk '{print $2}' "$s/pids")" == "$(c1_proc_start "$p")" ]]
   c1_cleanup_session "$ROOT" "$s"; ! alive "$p"
 }
 t 'c1_spawn records pid AND kernel start time' pidsformat
 ownedguard() {
-  local s; s=$(c1_session_new "$ROOT")
+  local s; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   local bad; for bad in -1 0 1 abc '' '12 34' "$$"; do if c1_owned_pid "$bad" "$s"; then return 1; fi; done
 }
 t 'ownership guard rejects -1, 0, 1, non-numeric and the caller itself' ownedguard
 reuse_with_start() {   # a recorded PID/starttime matches an UNRELATED process (no marker)
-  local s v rc=0 reg; s=$(c1_session_new "$ROOT")
+  local s v rc=0 reg; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   setsid sleep 300 </dev/null >/dev/null 2>&1 & v=$!; sleep 0.3
   printf '%s %s\n' "$v" "$(c1_proc_start "$v")" >"$s/pids"; printf '999999 1 %s\n' "$s" >"$ROOT/active"
   # No unrelated process may be signalled. The evidence must remain unresolved
@@ -332,7 +338,7 @@ reuse_with_start() {   # a recorded PID/starttime matches an UNRELATED process (
 }
 t 'stale recovery never signals an unrelated process (or its group) that reused a recorded PID' reuse_with_start
 reuse_legacy_line() {  # legacy/garbage pids lines must not signal or erase evidence
-  local s v rc=0 reg; s=$(c1_session_new "$ROOT")
+  local s v rc=0 reg; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   setsid sleep 300 </dev/null >/dev/null 2>&1 & v=$!; sleep 0.3
   printf '%s\nnot-a-pid 5\n-1 1\n' "$v" >"$s/pids"; printf '999999 1 %s\n' "$s" >"$ROOT/active"
   c1_cleanup_all "$ROOT" 2>/dev/null || rc=$?
@@ -349,7 +355,7 @@ reuse_legacy_line() {  # legacy/garbage pids lines must not signal or erase evid
 t 'stale recovery ignores pids lines without a verified start time' reuse_legacy_line
 
 recovery_refuses_unresolved() {  # active was deleted before a failed verify
-  local s v reg; s=$(c1_session_new "$ROOT")
+  local s v reg; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   setsid sleep 300 </dev/null >/dev/null 2>&1 & v=$!; sleep 0.2
   printf '%s %s\n' "$v" "$(c1_proc_start "$v")" >"$s/pids"
   c1_cleanup_session "$ROOT" "$s"
@@ -366,7 +372,7 @@ recovery_refuses_unresolved() {  # active was deleted before a failed verify
 t 'N-1: orphan survivor evidence refuses next session until independently retired' recovery_refuses_unresolved
 
 recovery_refuses_orphan_inode() {
-  local s reg; s=$(c1_session_new "$ROOT")
+  local s reg; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   c1_cleanup_session "$ROOT" "$s"
   reg="$ROOT/.${s##*/}.inodes"
   printf '999999999\n' >"$reg"
@@ -378,7 +384,7 @@ recovery_refuses_orphan_inode() {
 t 'N-1: orphan listener evidence is verified before next session' recovery_refuses_orphan_inode
 
 pid_preserve_denied() {
-  local s rc=0 archive; s=$(c1_session_new "$ROOT")
+  local s rc=0 archive; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   printf '123456789 1\n' >"$s/pids"
   archive="$ROOT/.${s##*/}.pids"
   mkdir "$archive"  # an archive directory must not be mistaken for a successful write
@@ -390,7 +396,7 @@ pid_preserve_denied() {
 t 'N-2: failed PID archive preservation retains source evidence and fails closed' pid_preserve_denied
 
 malformed_preserved_pid() {
-  local s reg rc=0; s=$(c1_session_new "$ROOT")
+  local s reg rc=0; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   c1_cleanup_session "$ROOT" "$s"
   reg="$ROOT/.${s##*/}.pids"
   printf '123456789\nnot-a-pid 1\n123 45 extra\n' >"$reg"
@@ -406,7 +412,7 @@ t 'N-4: malformed preserved PID lines remain unresolved across recovery' malform
 # N-8: dangling archived evidence must be inspected, retained, and must
 # prevent both cleanup and the next session, even though -e returns false.
 dangling_archive_recovery() {
-  local kind=$1 s reg rc=0; s=$(c1_session_new "$ROOT")
+  local kind=$1 s reg rc=0; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   c1_cleanup_session "$ROOT" "$s"
   reg="$ROOT/.${s##*/}.$kind"
   ln -s "$s/never-created" "$reg"
@@ -500,7 +506,7 @@ t 'N-10: unreadable live PID identity is retained and a retired valid record is 
 
 # N-6: malformed or empty inode archives must block and survive recovery.
 invalid_preserved_inode() {
-  local payload=$1 s reg rc=0; s=$(c1_session_new "$ROOT")
+  local payload=$1 s reg rc=0; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   c1_cleanup_session "$ROOT" "$s"
   reg="$ROOT/.$(basename "$s").inodes"
   printf "%s" "$payload" >"$reg"
@@ -517,7 +523,7 @@ t "N-6: unexpected extra fields fail closed" invalid_preserved_inode "123 456"
 t "N-6: empty inode archive fails closed" invalid_preserved_inode ""
 
 symlink_preserved_inode() {
-  local s reg target rc=0; s=$(c1_session_new "$ROOT")
+  local s reg target rc=0; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   c1_cleanup_session "$ROOT" "$s"
   reg="$ROOT/.$(basename "$s").inodes"; target="$ROOT/inode-test-target"
   printf "123456789\n" >"$target"
@@ -580,7 +586,7 @@ fi
 
 
 group_members() {      # a harness group member that dropped the marker (env -i) is still removed
-  local s leader child; s=$(c1_session_new "$ROOT")
+  local s leader child; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   leader=$(c1_spawn "$s" grp bash -c 'env -i sleep 300 & echo $! >"$0/child"; wait' "$s")
   for _ in $(seq 1 30); do [[ -s "$s/child" ]] && break; sleep 0.1; done
   child=$(cat "$s/child")
@@ -599,7 +605,7 @@ la_sup() { awk 'NR==1 {print $1}' "$1/supervisors"; }
 # la_case MODE -> 0 only if MODE's expected outcome holds AND the invariant does.
 la_case() (
   local mode=$1 s leader child cst sup crc=0 vrc=0
-  s=$(c1_session_new "$ROOT")
+  s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   if [[ $mode == intermediate ]]; then   # leader -> A -> scrubbed setsid B; A exits at once
     leader=$(c1_spawn "$s" la bash -c 'bash -c "env -i setsid sleep 300 & echo \$! >\"\$1/child\"" _ "$1"; exec sleep 300' _ "$s")
   else
@@ -669,12 +675,12 @@ la_mutant_no_proof_check() (
 t 'L-A mutation: verification that ignores missing reaping proofs is caught' la_mutant_no_proof_check
 
 la_failed_signals() (   # every cleanup signal fails: never success, nothing lost; a later cleanup recovers
-  local s leader child cst rc=0 vrc=0; s=$(c1_session_new "$ROOT")
+  local s leader child cst rc=0 vrc=0; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   leader=$(c1_spawn "$s" la bash -c 'env -i setsid sleep 300 & echo $! >"$1/child"; wait' _ "$s")
   la_wait '[[ -s "$s/child" ]]'; child=$(cat "$s/child"); cst=$(c1_proc_start "$child")
   trap '[[ "$(c1_proc_start "$child")" != "$cst" ]] || kill -KILL "$child" 2>/dev/null || true' EXIT
   kill -KILL "$leader"; la_wait '[[ $(c1_proc_stat_field "$child" 2) == "$(la_sup "$s")" ]]'
-  ( kill() { :; }; C1_SUPERVISOR_WAIT_STEPS=10; c1_cleanup_session "$ROOT" "$s" ) 2>/dev/null || rc=$?
+  ( kill() { :; }; c1_signal_identity() { :; }; C1_SUPERVISOR_WAIT_STEPS=10; c1_cleanup_session "$ROOT" "$s" ) 2>/dev/null || rc=$?
   c1_verify_cleanup "$s" 2>/dev/null || vrc=$?
   (( rc != 0 && vrc != 0 )) && [[ -d "$s" && "$(c1_proc_start "$child")" == "$cst" ]] || { echo "rc=$rc vrc=$vrc"; return 1; }
   c1_cleanup_session "$ROOT" "$s" && c1_verify_cleanup "$s" && [[ "$(c1_proc_start "$child")" != "$cst" ]]
@@ -682,7 +688,7 @@ la_failed_signals() (   # every cleanup signal fails: never success, nothing los
 t 'L-A: failed signals: cleanup and verification fail, session retained; retry removes the adopted child' la_failed_signals
 
 la_interrupted() (   # cleanup SIGKILLed mid-signal, then the next start's recovery finishes it
-  local s leader child cst cp; s=$(c1_session_new "$ROOT")
+  local s leader child cst cp; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   # shellcheck disable=SC2016
   leader=$(c1_spawn "$s" la bash -c 'trap "" TERM; env -i setsid "$2" -I -c "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open(\"$1/child\",\"w\").write(str(__import__(\"os\").getpid())); time.sleep(300)" & wait' _ "$s" "$PY3_LA")
   la_wait '[[ -s "$s/child" ]]'; child=$(cat "$s/child"); cst=$(c1_proc_start "$child")
@@ -698,7 +704,7 @@ PY3_LA=$(command -v python3)
 t 'L-A: interrupted cleanup: recovery removes the TERM-ignoring adopted child and retires all records' la_interrupted
 
 la_supervisor_lifetime() (   # the supervisor outlives every descendant through cleanup
-  local s leader child cst sup sst smp; s=$(c1_session_new "$ROOT"); smp="$TMP/la-samples.$BASHPID"
+  local s leader child cst sup sst smp; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); smp="$TMP/la-samples.$BASHPID"
   # shellcheck disable=SC2016
   leader=$(c1_spawn "$s" la bash -c 'env -i setsid "$2" -I -c "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open(\"$1/child\",\"w\").write(str(__import__(\"os\").getpid())); time.sleep(300)" & wait' _ "$s" "$PY3_LA")
   la_wait '[[ -s "$s/child" ]]'; child=$(cat "$s/child"); cst=$(c1_proc_start "$child")
@@ -721,20 +727,22 @@ t 'L-A: supervisor stays alive through cleanup until its last descendant is reap
 
 la_pid_reuse() (   # supervisor identities whose PID now names an UNRELATED process
   local s v vst rc=0 name=session.la-reuse
+  mkdir -m 700 -- "$ROOT"
   setsid sleep 300 </dev/null >/dev/null 2>&1 & v=$!; sleep 0.2; vst=$(c1_proc_start "$v")
   trap 'kill "$v" 2>/dev/null || true' EXIT
   # (a) recorded supervisor exited with proof; its PID was reused: retire, never signal.
   printf '%s 1\n' "$v" >"$ROOT/.$name.supervisors"; printf '%s 1\n' "$v" >"$ROOT/.$name.reaped"
-  c1_verify_cleanup "$ROOT/$name" && alive "$v" && [[ ! -e "$ROOT/.$name.supervisors" && ! -e "$ROOT/.$name.reaped" ]]
+  c1_verify_cleanup "$ROOT/$name" && alive "$v" &&
+    [[ ! -e "$ROOT/.$name.supervisors" && ! -e "$ROOT/.$name.reaped" ]] || return 1
   # (b) reused PID, no proof: fails closed, still never signalled.
   printf '%s 1\n' "$v" >"$ROOT/.$name.supervisors"
   if c1_verify_cleanup "$ROOT/$name" 2>/dev/null; then return 1; fi
   alive "$v"; rm -f -- "$ROOT/.$name.supervisors"
   # (c) a live record that matches the unrelated, unmarked process exactly: no signal reaches it.
-  s=$(c1_session_new "$ROOT"); printf '%s %s\n' "$v" "$vst" >"$s/supervisors"
+  s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); printf '%s %s\n' "$v" "$vst" >"$s/supervisors"
   # shellcheck disable=SC2034  # read by c1_cleanup_session
   ( C1_SUPERVISOR_WAIT_STEPS=4; c1_cleanup_session "$ROOT" "$s" ) 2>/dev/null || rc=$?
-  (( rc != 0 )) && alive "$v" && [[ -d "$s" ]]
+  (( rc != 0 )) && alive "$v" && [[ -d "$s" ]] || return 1
   rm -f -- "$s/supervisors"; c1_cleanup_session "$ROOT" "$s" && c1_verify_cleanup "$s" && alive "$v"
 )
 t 'L-A: PID reuse: supervisor records never authorize signalling an unrelated process' la_pid_reuse
@@ -744,7 +752,7 @@ t 'L-A: the supervisor is the only spawn path (no direct setsid exec in c1_spawn
 
 desktop_environment() (
   local s output
-  s=$(c1_session_new "$ROOT")
+  s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   trap 'c1_cleanup_session "$ROOT" "$s"' EXIT
   export GITHUB_TOKEN=fixture AZURE_CLIENT_ID=fixture FAL_KEY=fixture ARBITRARY_SECRET=fixture
   export DISPLAY=:123 XAUTHORITY="$s/Xauthority"
@@ -763,7 +771,7 @@ t 'L-C: desktop subprocess retains display configuration and drops launcher secr
 t 'L-C: desktop environment test detects removal of env isolation' desktop_environment_mutation
 
 nonleader_marked() {   # a marked process inside an UNRELATED group: kill it, never its group
-  local s lead; s=$(c1_session_new "$ROOT")
+  local s lead; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   setsid bash -c 'env C1_HARNESS_SESSION="$0" sleep 300 & exec sleep 300' "$s" </dev/null >/dev/null 2>&1 & lead=$!
   sleep 0.5
   local m; m=$(c1_marked_pids "$s"); [[ -n "$m" ]]
@@ -775,7 +783,7 @@ nonleader_marked() {   # a marked process inside an UNRELATED group: kill it, ne
 }
 t 'a marked non-leader is killed individually; its unrelated group leader survives' nonleader_marked
 jobleader_marked() {   # a marked JOB leader in an unrelated session (e.g. `env C1_...=s cmd | other`)
-  local s sess; s=$(c1_session_new "$ROOT")
+  local s sess; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   setsid bash -c 'set -m; env C1_HARNESS_SESSION="$0" sleep 300 | sleep 301 & wait' "$s" </dev/null >/dev/null 2>&1 & sess=$!
   sleep 0.8
   local m other; m=$(c1_marked_pids "$s"); [[ -n "$m" ]]
@@ -789,9 +797,10 @@ jobleader_marked() {   # a marked JOB leader in an unrelated session (e.g. `env 
 }
 t 'a marked job leader outside a harness session: only it is killed, never its job group' jobleader_marked
 watchdog_kill() {      # L-3: launcher SIGKILL -> watchdog tears the session down
-  local s fake w; s=$(c1_session_new "$ROOT")
+  local s fake w; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   sleep 300 & fake=$!
   w=$(c1_spawn "$s" victim sleep 300)
+  printf '%s %s %s\n' "$fake" "$(c1_proc_start "$fake")" "$s" >"$ROOT/active"
   c1_start_watchdog "$ROOT" "$s" "$fake" "$HERE/../lib/c1-lib.sh"
   sleep 1.5; alive "$w"                                   # launcher alive: watchdog idle
   kill -KILL "$fake"; wait "$fake" 2>/dev/null || true
@@ -800,7 +809,7 @@ watchdog_kill() {      # L-3: launcher SIGKILL -> watchdog tears the session dow
 }
 t 'watchdog removes processes and session files after the launcher is SIGKILLed' watchdog_kill
 watchdog_zombie() {    # launcher SIGKILLed but NOT yet reaped by its parent (zombie)
-  local s fake w parent; s=$(c1_session_new "$ROOT")
+  local s fake w parent; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   # A parent that never reaps: its child plays the launcher.
   python3 -I -c 'import os,sys,time
 p=os.fork()
@@ -809,6 +818,7 @@ print(p, flush=True); time.sleep(60)' >"$s/fake" & parent=$!
   for _ in $(seq 1 30); do [[ -s "$s/fake" ]] && break; sleep 0.1; done
   fake=$(cat "$s/fake")
   w=$(c1_spawn "$s" victim sleep 300)
+  printf '%s %s %s\n' "$fake" "$(c1_proc_start "$fake")" "$s" >"$ROOT/active"
   c1_start_watchdog "$ROOT" "$s" "$fake" "$HERE/../lib/c1-lib.sh"; sleep 0.5
   kill -KILL "$fake"; sleep 0.3
   [[ "$(c1_proc_stat_field "$fake" 1)" == Z ]]           # still an unreaped zombie
@@ -819,10 +829,11 @@ print(p, flush=True); time.sleep(60)' >"$s/fake" & parent=$!
 }
 t 'watchdog treats an unreaped (zombie) launcher as gone' watchdog_zombie
 watchdog_normal() {    # normal cleanup stops the watchdog without a competing cleanup
-  local s fake; s=$(c1_session_new "$ROOT")
+  local s fake; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   sleep 300 & fake=$!
+  printf '%s %s %s\n' "$fake" "$(c1_proc_start "$fake")" "$s" >"$ROOT/active"
   c1_start_watchdog "$ROOT" "$s" "$fake" "$HERE/../lib/c1-lib.sh"; sleep 0.5
-  [[ -n "$(c1_marked_pids "$s")" ]]
+  [[ -z "$(c1_marked_pids "$s")" ]]
   c1_cleanup_session "$ROOT" "$s"
   kill "$fake"; wait "$fake" 2>/dev/null || true
   [[ -z "$(c1_marked_pids "$s")" && ! -e "$s" ]]
@@ -904,7 +915,7 @@ C1_MOCK_SUDO
 }
 t 'dependency installers never receive GITHUB_TOKEN or tool overrides (behavioural, I-3)' installer_calls
 starttime_mismatch() {  # I-4: a MARKED process whose start time does not match is never signalled
-  local s p real; s=$(c1_session_new "$ROOT"); p=$(c1_spawn "$s" a sleep 300); real=$(c1_proc_start "$p")
+  local s p real; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); p=$(c1_spawn "$s" a sleep 300); real=$(c1_proc_start "$p")
   c1_pid_has_marker "$p" "$s"
   if c1_owned_pid "$p" "$s" "$((real + 1))"; then return 1; fi
   c1_signal_owned KILL "$p" "$s" "$((real + 1))"; sleep 0.3
@@ -931,7 +942,7 @@ vite_guard() {
   vitefix "$d/g"; rm "$d/g/frontend/vite.config.ts"; if c1_check_vite_host_guard "$d/g"; then echo no-config; return 1; fi
 }
 t 'Vite 5173 host-guard preflight: rejects allowedHosts, non-loopback binds, extra configs (L-11)' vite_guard
-mkdir -p "$TMP/outside"
+mkdir -m 700 -- "$TMP/outside" "$TMP/state"
 f 'safe_rm refuses paths outside the state root' c1_safe_rm "$TMP/outside" "$TMP/state"
 f 'safe_rm refuses removing the parent itself' c1_safe_rm "$TMP/state" "$TMP/state"
 t 'safe_rm ignores missing path' c1_safe_rm "$TMP/state/nope" "$TMP/state"
@@ -942,7 +953,7 @@ if command -v Xvfb >/dev/null && command -v x11vnc >/dev/null && command -v webs
   desktop() {
     set -Eeuo pipefail
     local s port pass d
-    s=$(c1_session_new "$ROOT"); export C1_HARNESS_SESSION=$s
+    s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); export C1_HARNESS_SESSION=$s
     port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
     pass=$(c1_gen_password)
     c1_start_desktop "$s" "$port" "$pass"
@@ -971,7 +982,7 @@ PY
   }
   t 'desktop: loopback-only noVNC, VNC auth required, no X/VNC TCP, cleaned up' desktop
   refuse_busy() {
-    local s port; s=$(c1_session_new "$ROOT"); export C1_HARNESS_SESSION=$s
+    local s port; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); export C1_HARNESS_SESSION=$s
     port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
     python3 -c 'import socket,time,sys;s=socket.socket();s.bind(("127.0.0.1",int(sys.argv[1])));s.listen();time.sleep(20)' "$port" &
     local lp=$!; sleep 0.5
@@ -1003,7 +1014,7 @@ if command -v openssl >/dev/null && command -v curl >/dev/null && command -v pyt
   mode() { echo "$1" >"$PV/state/mode"; }
   # shellcheck disable=SC2034  # C1_PRIVACY_TIMEOUT is read by the library
   decoy_expect() {  # decoy_expect MODE EXPECTED_STATE [HDR]
-    mode "$1"; local s rc=0; s=$(c1_session_new "$ROOT"); C1_PRIVACY_TIMEOUT=8
+    mode "$1"; local s rc=0; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); C1_PRIVACY_TIMEOUT=8
     c1_verify_private_with_decoy "$s" "$DP" "$BASE" "${3:-$PV/hdr}" "$CA" || rc=$?
     local st=$C1_PRIVACY_STATE
     c1_port_free "$DP"; [[ ! -e "$s/decoy" ]]            # decoy always stopped and removed
@@ -1300,7 +1311,7 @@ MOCK_GH
     local s ws wsst bin="$TMP/pf-integration-bin" start elapsed
     # shellcheck disable=SC2034  # dynamically read by the sourced library
     local C1_NOVNC_PORT=$DP C1_PRIVACY_TIMEOUT=4
-    s=$(c1_session_new "$ROOT")
+    s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
     trap 'mode private; c1_cleanup_session "$ROOT" "$s"' EXIT
     export C1_HARNESS_SESSION=$s CODESPACE_NAME=fixture-only
     export GH_FIXTURE_STATE="$s/visibility" GH_FIXTURE_CALLS="$s/gh-calls" GH_FIXTURE_PORT=$DP
@@ -1382,7 +1393,7 @@ MOCK_GH
   t 'DNS failure, refused connection and TLS failure are unverified, never private (M-2a)' transport_failures
   # shellcheck disable=SC2034  # C1_PRIVACY_TIMEOUT is read by the library
   token_argv() {   # the GitHub token never appears in any process command line
-    mode slow; local s; s=$(c1_session_new "$ROOT"); C1_PRIVACY_TIMEOUT=10
+    mode slow; local s; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); C1_PRIVACY_TIMEOUT=10
     c1_verify_private_with_decoy "$s" "$DP" "$BASE" "$PV/hdr" "$CA" >/dev/null 2>&1 & local bg=$!
     local seen=0 f
     for _ in $(seq 1 30); do
@@ -1410,7 +1421,7 @@ MOCK_GH
   t 'repository owner type is read with the token (org visibility cannot be excluded otherwise)' owner_type
   if command -v Xvfb >/dev/null && command -v x11vnc >/dev/null && command -v websockify >/dev/null && [[ -d "$C1_NOVNC_WEB" ]]; then
     novnc_recheck() {
-      local s ws; s=$(c1_session_new "$ROOT"); export C1_HARNESS_SESSION=$s
+      local s ws; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); export C1_HARNESS_SESSION=$s
       c1_start_display_vnc "$s" "$(c1_gen_password)"; ws=$(c1_start_websockify "$s" "$DP")
       c1_verify_private_novnc "$BASE" "$PV/hdr" "$CA"
       mode public
@@ -1445,7 +1456,7 @@ MOCK_GH
       printf '%s %s' "$ws" "$wsst"
     }
     monitor() {          # L-6: with a 1 s interval a public flip must close 6080 within 2.5 s
-      local s ws wsst; s=$(c1_session_new "$ROOT"); export C1_HARNESS_SESSION=$s
+      local s ws wsst; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); export C1_HARNESS_SESSION=$s
       read -r ws wsst <<<"$(start_mon "$s" private 0)"
       sleep 2.5; alive "$ws"; [[ ! -e "$s/privacy-failed" ]]   # stays up while private
       mode public
@@ -1458,7 +1469,7 @@ MOCK_GH
     }
     t 'privacy monitor closes noVNC within 2.5 s of the port turning public (1 s interval, L-6)' monitor
     monitor_ambiguous() { # M-2a in the monitor: an edge that resets unauthenticated clients is never "private"
-      local s ws wsst; s=$(c1_session_new "$ROOT"); export C1_HARNESS_SESSION=$s
+      local s ws wsst; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); export C1_HARNESS_SESSION=$s
       read -r ws wsst <<<"$(start_mon "$s" private 0)"
       sleep 1.5; alive "$ws"
       mode flaky
@@ -1470,7 +1481,7 @@ MOCK_GH
     t 'privacy monitor tears noVNC down when unauthenticated denial becomes ambiguous (M-2a)' monitor_ambiguous
     monitor_gh() {        # L-10: gh read-back changing to org (or public) tears down immediately
       local vis=$1 s ws wsst; usegh; echo private >"$PV/state/ghvis"
-      s=$(c1_session_new "$ROOT"); export C1_HARNESS_SESSION=$s
+      s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); export C1_HARNESS_SESSION=$s
       read -r ws wsst <<<"$(start_mon "$s" private 1)"
       sleep 2.5; alive "$ws"; [[ ! -e "$s/privacy-failed" ]]    # gh private + probe private: stays up
       echo "$vis" >"$PV/state/ghvis"                            # probe still says private
@@ -1483,7 +1494,7 @@ MOCK_GH
     t 'privacy monitor re-reads gh: a change to public visibility tears noVNC down (L-10)' monitor_gh public
     monitor_gh_unavailable() {   # L-10/R-1: lost gh read-back -> torn down once the last private read is stale
       local s ws wsst; usegh; echo private >"$PV/state/ghvis"
-      s=$(c1_session_new "$ROOT"); export C1_HARNESS_SESSION=$s
+      s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); export C1_HARNESS_SESSION=$s
       read -r ws wsst <<<"$(start_mon "$s" private 1)"
       sleep 1.5; alive "$ws"
       echo fail >"$PV/state/ghvis"
@@ -1495,7 +1506,7 @@ MOCK_GH
     t 'privacy monitor tears noVNC down when the gh read-back becomes unavailable (L-10, gh-stale)' monitor_gh_unavailable
     monitor_user_path_ignores_gh() {   # REQUIRE_GH=0 (user-owned repo path): gh is not consulted
       local s ws wsst; usegh; echo org >"$PV/state/ghvis"
-      s=$(c1_session_new "$ROOT"); export C1_HARNESS_SESSION=$s
+      s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); export C1_HARNESS_SESSION=$s
       read -r ws wsst <<<"$(start_mon "$s" private 0)"
       sleep 3; local ok=0; alive "$ws" && [[ ! -e "$s/privacy-failed" ]] && ok=1
       echo private >"$PV/state/ghvis"; unset C1_HARNESS_SESSION; c1_cleanup_session "$ROOT" "$s"
@@ -1506,7 +1517,7 @@ MOCK_GH
     # shellcheck disable=SC2034  # C1_NOVNC_RETRIES is read by the library
     gate() {     # gate MODE GHVIS REQGH EXPECTED_RC [REASON]
       local s ws wsst rc=0; usegh; echo "$2" >"$PV/state/ghvis"; C1_NOVNC_RETRIES=2
-      s=$(c1_session_new "$ROOT"); export C1_HARNESS_SESSION=$s
+      s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); export C1_HARNESS_SESSION=$s
       c1_start_display_vnc "$s" "$(c1_gen_password)" >/dev/null; ws=$(c1_start_websockify "$s" "$DP"); wsst=$(c1_proc_start "$ws")
       mode "$1"
       c1_privacy_gate "$s" "$DP" "$BASE" "$PV/hdr" "$ws" "$wsst" "$3" "$CA" || rc=$?
@@ -1522,7 +1533,7 @@ MOCK_GH
     t 'privacy gate re-reads gh: org visibility -> torn down (L-9, L-10)' gate private org 1 1 gh-visibility-org
     t 'privacy gate re-reads gh: unavailable read-back -> torn down (L-9, L-10)' gate private fail 1 1 gh-unavailable
     gate_monitor_flag() {   # the monitor's marker alone closes the gate (and the teardown is re-verified)
-      local s ws wsst rc=0; s=$(c1_session_new "$ROOT"); export C1_HARNESS_SESSION=$s
+      local s ws wsst rc=0; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); export C1_HARNESS_SESSION=$s
       c1_start_display_vnc "$s" "$(c1_gen_password)" >/dev/null; ws=$(c1_start_websockify "$s" "$DP"); wsst=$(c1_proc_start "$ws")
       printf 'x public\n' >"$s/privacy-failed"
       c1_privacy_gate "$s" "$DP" "$BASE" "$PV/hdr" "$ws" "$wsst" 0 "$CA" || rc=$?
@@ -1531,7 +1542,7 @@ MOCK_GH
     }
     t 'privacy gate honours the monitor marker and still verifies 6080 closed (L-9)' gate_monitor_flag
     gate_term_ignored() {   # websockify ignoring TERM: the KILL step must still close the port
-      local s ws wsst rc=0; s=$(c1_session_new "$ROOT"); export C1_HARNESS_SESSION=$s
+      local s ws wsst rc=0; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); export C1_HARNESS_SESSION=$s
       ws=$(c1_spawn "$s" stubborn python3 -I -c 'import signal,socket,sys,time
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(); time.sleep(300)' "$DP")
@@ -1545,7 +1556,7 @@ s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bi
     t 'privacy gate KILLs a TERM-ignoring noVNC and verifies 6080 closed (L-9)' gate_term_ignored
     # shellcheck disable=SC2034  # C1_NOVNC_RETRIES is read by the library
     gate_teardown_unverifiable() {   # an unowned listener keeps the port open: fail closed (rc 2)
-      local s rc=0 lp; s=$(c1_session_new "$ROOT"); C1_NOVNC_RETRIES=1
+      local s rc=0 lp; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); C1_NOVNC_RETRIES=1
       python3 -I -c 'import socket,sys,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(("127.0.0.1",int(sys.argv[1])));s.listen();time.sleep(300)' "$DP" & lp=$!
       for _ in $(seq 1 50); do c1_port_free "$DP" || break; sleep 0.1; done
       mode public
@@ -1562,7 +1573,7 @@ s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bi
       # shellcheck disable=SC2034  # read by the library
       C1_PRIVACY_TIMEOUT=4
       for m in flaky unauth5xx badredirect; do
-        s=$(c1_session_new "$ROOT"); export C1_HARNESS_SESSION=$s
+        s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); export C1_HARNESS_SESSION=$s
         c1_start_display_vnc "$s" "$(c1_gen_password)" >/dev/null
         mode "$m"; rc=0; c1_verify_private_with_decoy "$s" "$DP" "$BASE" "$PV/hdr" "$CA" || rc=$?
         (( rc != 0 )) && [[ $C1_PRIVACY_STATE == unverified ]]
@@ -1607,20 +1618,13 @@ monitor_teardown_failure_propagates() {
 t 'L-9: monitor propagates unverified teardown as rc 2, never success' monitor_teardown_failure_propagates
 
 watchdog_escalates_failed_teardown() {
-  local d="$TMP/watchdog-l9"; mkdir -p "$d/session" "$d/state"
-  printf 'now teardown-failed\n' >"$d/session/privacy-failed"
-  printf '4242 5678 %s\n' "$d/session" >"$d/state/active"
-  c1_proc_start() { printf '5678\n'; }
-  c1_proc_stat_field() { printf 'S\n'; }
-  c1_cleanup_session() { :; }
-  kill() { [[ "$1" == -TERM && "$2" == 4242 ]] && printf 'owner signalled\n' >"$d/signalled"; }
-  c1_watchdog_loop "$d/state" "$d/session" 4242 5678
-  [[ "$(cat "$d/signalled")" == 'owner signalled' ]]
-  # Never signal a stale or mismatched active record.
-  rm "$d/signalled"
-  printf '4242 9999 %s\n' "$d/session" >"$d/state/active"
-  c1_watchdog_loop "$d/state" "$d/session" 4242 5678
-  [[ ! -e "$d/signalled" ]]
+  local root="$TMP/watchdog-l9" session="$TMP/watchdog-l9/session.fixture"
+  mkdir -p "$session"
+  printf 'now teardown-failed\n' >"$session/privacy-failed"
+  printf '4242 9999 %s\n' "$session" >"$root/active"
+  c1_signal_identity() { touch "$root/signalled"; }
+  c1_watchdog_loop "$root" "$session" 4242 5678
+  [[ ! -e "$root/signalled" && -d "$session" ]]
 }
 t 'L-9: watchdog aborts only the exact recorded owner after teardown-failed marker' watchdog_escalates_failed_teardown
 
@@ -1735,7 +1739,7 @@ t 'R-1: production gh budget (120/h nominal, 360/h cap, 75 s freshness, 15 s tim
 # must stop the launcher and remove the marked session without a manual prompt.
 watchdog_teardown_end_to_end() {
   local root="$TMP/l9-real" s pid st i
-  s=$(c1_session_new "$root")
+  s=$(c1_session_new "$root" "$C1_TEST_OWNER")
   pid=$(c1_spawn "$s" test-launcher bash -c 'trap "exit 0" TERM; while :; do sleep 0.2; done')
   st=$(c1_proc_start "$pid"); [[ -n "$st" ]] || return 1
   printf '%s %s %s\n' "$pid" "$st" "$s" >"$root/active"
@@ -1844,7 +1848,7 @@ move_to_v6() {
   [[ -e "$d/tcp6" ]] || printf '%s\n' "$TCP6_HDR" >"$d/tcp6"
   v6row 90 "$addr" "$(hex4 "$port")" "$ino" >>"$d/tcp6"
 }
-newsess() { local s; s=$(c1_session_new "$ROOT"); printf '%s' "$s"; }
+newsess() { local s; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); printf '%s' "$s"; }
 endsess() { unset C1_HARNESS_SESSION; c1_cleanup_session "$ROOT" "$1"; }
 
 # ---- parsers: kernel tables -------------------------------------------------
@@ -2230,6 +2234,10 @@ ls -l /proc/$pid/fd/ > "$2/child-fds"; c1_harness_listeners "$2" > "$2/got"; ech
     read -r pid port ino < <(listen_on "$s" bulk-survivor 127.0.0.1 foreign)
     printf '%s\n' "$ino" >"$s/listen-inodes"
     unset C1_HARNESS_SESSION
+    # Bulk cleanup is an operator action. Model a crashed launcher while
+    # keeping the foreign listener alive for cleanup verification.
+    printf '%s 1 %s\n' "$C1_TEST_OWNER" "$s" >"$ROOT/active"
+    [[ "$(c1_session_status "$ROOT")" == stale ]]
     c1_cleanup_all "$ROOT" 2>/dev/null || rc=$?
     reg="$ROOT/.${s##*/}.inodes"
     (( rc != 0 )) && [[ -s "$reg" ]] && alive "$pid" || { kill "$pid" 2>/dev/null || true; return 1; }
@@ -2453,7 +2461,7 @@ echo '# R11 L-1/L-2: final monitor evidence and fail-closed verdict regression'
 r11_cleanup_snapshot() (
   local scenario=$1 expected=$2 d="$TMP/r11-snapshot-$1" s
   mkdir -p "$d"; s="$d/session.fixture"; mkdir -p "$s"
-  local C1_R11_PRIVACY_FINALIZED=pending
+  local C1_FINAL_PRIVACY=pending
   [[ "$scenario" != marked ]] || : >"$s/privacy-failed"
   c1_ancestors() { :; }
   c1_live_supervisors() { :; }
@@ -2490,9 +2498,9 @@ r11_cleanup_snapshot() (
   local rc=0
   c1_cleanup_session "$d" "$s" || rc=$?
   if [[ "$expected" == blocked ]]; then
-    [[ "$rc" != 0 && "$C1_R11_PRIVACY_FINALIZED" == pending && -d "$s" ]]
+    [[ "$rc" != 0 && "$C1_FINAL_PRIVACY" == pending && -d "$s" ]]
   else
-    [[ "$rc" == 0 && "$C1_R11_PRIVACY_FINALIZED" == "$expected" && ! -e "$s" ]]
+    [[ "$rc" == 0 && "$C1_FINAL_PRIVACY" == "$expected" && ! -e "$s" ]]
   fi
 )
 t 'R11 records clean monitor state after reaping' r11_cleanup_snapshot clear clean
@@ -2525,8 +2533,8 @@ r11_verdict_fixture() (
     exitfail) rc=3 ;;
   esac
   c1_cleanup_session() {
-    C1_R11_PRIVACY_FINALIZED=clean
-    [[ "$scenario" != late-marker ]] || C1_R11_PRIVACY_FINALIZED=failed
+    C1_FINAL_PRIVACY=clean
+    [[ "$scenario" != late-marker ]] || C1_FINAL_PRIVACY=failed
     rm -rf -- "$s"
     [[ "$scenario" != cleanup-fail ]]
   }
@@ -2560,18 +2568,22 @@ t 'R11 cannot short-circuit ambiguous 404' r11_no_early_stop
 
 echo '# R11 M-2: operator cleanup must not overlap live launchers'
 r11_active_operator_cleanup() (
-  local command=$1 status=$2 called=0
+  local command=$1 status=$2 called=0 s
   eval "$(sed -n '/^main() {$/,/^}$/p' "$HERE/../c1-session.sh")"
-  eval "$(sed -n '/^c1_refuse_active_cleanup() {$/,/^}$/p' "$HERE/../lib/c1-lib.sh")"
-  c1_session_status() { printf '%s\n' "$status"; }
   c1_err() { :; }
-  local ROOT="$TMP/r11-operator-root" C1_NOVNC_PORT=6080
-  mkdir -p "$ROOT"
+  if [[ "$status" != none ]]; then
+    s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
+    if [[ "$status" == stale ]]; then
+      printf '%s 1 %s\n' "$C1_TEST_OWNER" "$s" >"$ROOT/active"
+    fi
+  fi
+  [[ "$(c1_session_status "$ROOT")" == "$status" ]]
   c1_cleanup_all() { called=$((called + 1)); }
   c1_port_free() { :; }
   c1_log() { :; }
   local rc=0
   main "$command" || rc=$?
+  [[ -f "$ROOT/.lock" ]]
   if [[ "$status" == active ]]; then
     [[ "$rc" != 0 && "$called" == 0 ]]
   else

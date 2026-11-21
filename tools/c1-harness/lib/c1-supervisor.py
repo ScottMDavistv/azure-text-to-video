@@ -27,6 +27,7 @@ The supervisor never signals anything outside its own descendant tree.
 """
 
 import ctypes
+import fcntl
 import os
 import signal
 import sys
@@ -78,19 +79,15 @@ def signal_identity(pid, start, sig):
     try:
         pidfd = os.pidfd_open(pid)
     except (AttributeError, OSError):
-        pidfd = None
+        return
     try:
         if start_time(pid) != start:          # reused or exited: never signal
             return
-        if pidfd is not None:
-            signal.pidfd_send_signal(pidfd, sig)
-        else:
-            os.kill(pid, sig)
+        signal.pidfd_send_signal(pidfd, sig)
     except (OSError, ValueError, IndexError):
         pass
     finally:
-        if pidfd is not None:
-            os.close(pidfd)
+        os.close(pidfd)
 
 
 def signal_tree(sig):
@@ -121,6 +118,11 @@ def main(argv):
         return 125
     me = os.getpid()
     my_start = start_time(me)
+    # Serialize registration and the fork with cleanup. If cleanup deleted
+    # the directory while we waited, registration fails before any fork.
+    gate = os.open(os.path.join(session, ".spawn-lock"),
+                   os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    fcntl.flock(gate, fcntl.LOCK_EX)
     try:
         append_line(os.path.join(session, "supervisors"), f"{me} {my_start}\n")
     except OSError as exc:
@@ -155,6 +157,8 @@ def main(argv):
         os.rename(tmp, os.path.join(session, "tmp", f"spawn.{me}"))
     except OSError as exc:
         print(f"c1-supervisor: cannot publish child identity: {exc}", file=sys.stderr)
+    fcntl.flock(gate, fcntl.LOCK_UN)
+    os.close(gate)
     signal.pthread_sigmask(signal.SIG_SETMASK, set())
     while True:
         try:

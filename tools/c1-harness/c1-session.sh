@@ -27,7 +27,7 @@ CACHE=${C1_CACHE_ROOT:-$HOME/.cache/c1-harness}
 EVIDENCE_DIR=${C1_EVIDENCE_DIR:-$HOME/c1-evidence}
 WT="$CACHE/approved-${PW:0:12}"
 FE="$WT/frontend"
-ROOT=$(c1_state_root)
+ROOT=$(realpath -ms -- "$(c1_state_root)")
 S=''
 CHECKS=()
 PROD_PENDING=unknown
@@ -53,9 +53,11 @@ check() { CHECKS+=("$1"); }
 # errexit, so a failed verification would silently continue.)
 preflight() {
   local t major
-  for t in git node npm sha256sum setsid realpath awk getent mktemp curl python3 od timeout; do
+  for t in git node npm sha256sum setsid realpath awk getent mktemp curl python3 od timeout flock; do
     command -v "$t" >/dev/null || { c1_err "required tool missing: $t"; return 1; }
   done
+  python3 -I -c 'import os, signal; signal.pidfd_send_signal(os.pidfd_open(os.getpid()), 0)' ||
+    { c1_err 'kernel process handles are required for safe teardown'; return 1; }
   major=$(node -p 'process.versions.node.split(".")[0]')
   (( major >= 20 )) || { c1_err "Node.js >= 20 required (found $(node --version))"; return 1; }
   c1_verify_harness_clean "$REPO" "$HARNESS_REL" || return 1; check harness_clean
@@ -90,8 +92,9 @@ install_deps() {
 # Cleanup runs on EVERY exit path and is verified; a failed cleanup is never hidden.
 on_exit() {
   local rc=$?
-  trap - EXIT INT TERM HUP
-  if [[ -n "$S" && -d "$S" ]]; then
+  trap - EXIT
+  trap '' INT TERM HUP
+  if [[ -n "$S" ]]; then
     local s=$S; S=''
     c1_log 'cleaning up: stopping desktop/test processes, closing listeners, deleting session files'
     if ! c1_cleanup_session "$ROOT" "$s" || ! c1_verify_cleanup "$s"; then
@@ -110,7 +113,12 @@ pw_env() {
   "${e[@]}" TMPDIR="$S/tmp" PLAYWRIGHT_JSON_OUTPUT_NAME="$S/reports/$id.json" "$@"
 }
 
-clean_node() { local -a e; mapfile -d '' -t e < <(c1_clean_env); "${e[@]}" TMPDIR="$S/tmp" node "$@"; }
+clean_node() (
+  local -a e
+  mapfile -d '' -t e < <(c1_clean_env)
+  exec {C1_STATE_LOCK_FD}>&-
+  "${e[@]}" TMPDIR="${S:+$S/tmp}" node "$@"
+)
 
 # Terminal output is never raw Playwright/MSAL text (L-2/Q7, L-7): phase output
 # goes to the 0700 session directory. When a JSON report exists (pass OR fail)
@@ -135,7 +143,7 @@ run_phase() {
   start=$(c1_utc)
   c1_log "phase $id: starting ($start)"
   set +e
-  (cd "$dir" && "$@") >"$out" 2>&1
+  (exec {C1_STATE_LOCK_FD}>&-; cd "$dir" && "$@") >"$out" 2>&1
   rc=$?
   set -e
   printf '%s|ran|%s|%s|%s\n' "$id" "$start" "$(c1_utc)" "$rc" >>"$S/phases"
@@ -267,8 +275,8 @@ start_private_desktop() {
 
 # Dedicated R11 evidence is written after verified cleanup, including on errors.
 finish_r11() {
-  local rc=$1 listener=unverified cleanup=not-needed checkout=unverified verdict=FAIL listener_state listener_detail
-  local C1_R11_PRIVACY_FINALIZED=pending
+  local r11_exit=$1 listener=unverified cleanup_result=not-needed checkout=unverified verdict=FAIL
+  local listener_state='' listener_detail='' C1_FINAL_PRIVACY=pending
   trap - EXIT
   trap '' INT TERM HUP
 
@@ -280,18 +288,17 @@ finish_r11() {
         "$listener_detail" =~ ^127[.]0[.]0[.]1:$C1_NOVNC_PORT\ pid=[0-9]+\ comm=[A-Za-z0-9._-]+\ ino=[0-9]+$ ]]; then
       listener=verified-loopback
     fi
-    if [[ -e "$S/privacy-failed" ]]; then PORT_PRIVATE=failed; fi
-    cleanup=FAIL
-    if c1_cleanup_session "$ROOT" "$S" && c1_verify_cleanup "$S"; then cleanup=PASS; fi
+    cleanup_result=FAIL
+    if c1_cleanup_session "$ROOT" "$S" && c1_verify_cleanup "$S"; then cleanup_result=PASS; fi
     # L-1: late privacy failures during monitored teardown override startup proof.
-    [[ "$C1_R11_PRIVACY_FINALIZED" == clean ]] || PORT_PRIVATE=failed
+    [[ "$C1_FINAL_PRIVACY" == clean ]] || PORT_PRIVATE=failed
   fi
   if [[ "$(git -C "$REPO" rev-parse HEAD)" == "$R11_HEAD" ]] &&
     c1_verify_harness_clean "$REPO" "$HARNESS_REL"; then
     checkout=verified
   fi
-  if (( rc == 0 )) && [[ "$PORT_PRIVATE" == verified-* && "$listener" == verified-loopback &&
-    "$cleanup" == PASS && "$checkout" == verified ]]; then
+  if (( r11_exit == 0 )) && [[ "$PORT_PRIVATE" == verified-* && "$listener" == verified-loopback &&
+    "$cleanup_result" == PASS && "$checkout" == verified ]]; then
     verdict=PASS
   fi
 
@@ -304,15 +311,15 @@ finish_r11() {
     # The existing HTTPS classifier supplies a sanitized reason without redirect URLs or credentials.
     printf -- '- Last privacy probe: %s\n' "${C1_PRIVACY_DETAIL:-not run}"
     printf -- '- Desktop listener: %s\n' "$listener"
-    printf -- '- Cleanup: %s\n' "$cleanup"
+    printf -- '- Cleanup: %s\n' "$cleanup_result"
     printf -- '- Monitor coverage: startup only; sustained monitoring not tested\n'
     printf -- '- R11: %s\n' "$verdict"
   } >"$R11_EVIDENCE" || { c1_err 'could not write R11 evidence'; exit 1; }
 
   printf 'R11: %s\nEvidence: %s\n' "$verdict" "$R11_EVIDENCE"
   [[ "$verdict" == PASS ]] && exit 0
-  (( rc != 0 )) || rc=1
-  exit "$rc"
+  (( r11_exit != 0 )) || r11_exit=1
+  exit "$r11_exit"
 }
 
 r11_session() {
@@ -329,9 +336,9 @@ r11_session() {
   C1_PRIVACY_DETAIL=''
   trap 'finish_r11 "$?"' EXIT
   trap 'exit 130' INT TERM HUP
-  S=$(c1_session_new "$ROOT")
+  S=$(c1_session_new "$ROOT" "$$") || return 1
   export C1_HARNESS_SESSION=$S TMPDIR="$S/tmp"
-  c1_start_watchdog "$ROOT" "$S" "$$" "$LIB"
+  c1_start_watchdog "$ROOT" "$S" "$$" "$LIB" || return 1
   pass=$(c1_gen_password)
   if ! start_private_desktop "$pass"; then exit 1; fi
   exit 0
@@ -357,11 +364,11 @@ session() {
   local start; start=$(c1_utc)
   preflight || { c1_err 'preflight failed; nothing was started'; return 1; }
   install_deps || { c1_err 'dependency installation or post-install verification failed'; return 1; }
-  S=$(c1_session_new "$ROOT")
+  S=$(c1_session_new "$ROOT" "$$") || return 1
   export C1_HARNESS_SESSION=$S TMPDIR="$S/tmp"
   trap on_exit EXIT
   trap 'exit 130' INT TERM HUP
-  c1_start_watchdog "$ROOT" "$S" "$$" "$LIB"
+  c1_start_watchdog "$ROOT" "$S" "$$" "$LIB" || return 1
   local pwver bver expb expbh
   pwver=$(node -p "require('$FE/node_modules/@playwright/test/package.json').version")
   expb=$(c1_expected_browser "$FE" chromium-headless-shell)
@@ -423,7 +430,7 @@ Test 2: a sign-in popup opens; CLOSE it without signing in, then Resume.'; then
         run_supplemental cancelled-logout
       elif ! grep -q '^cancelled-logout|' "$S/phases"; then skip_phase cancelled-logout; fi
       CLIENT_ID=''
-      [[ ! -e "$S/privacy-failed" ]] || PORT_PRIVATE=failed
+      if c1_privacy_failed "$S"; then PORT_PRIVATE=failed; fi
     fi
   fi
   # --- sanitized evidence -----------------------------------------------------
@@ -453,25 +460,34 @@ Test 2: a sign-in popup opens; CLOSE it without signing in, then Resume.'; then
   # Exact-head re-check AFTER the run: nothing may have changed the checkout or harness.
   c1_verify_clean_tree "$WT" "$PW" || sed -i 's/^CHECKOUT_VERIFIED=PASS$/CHECKOUT_VERIFIED=FAIL/' "$S/meta"
   c1_verify_harness_clean "$REPO" "$HARNESS_REL" || sed -i 's/^HARNESS_CLEAN=true$/HARNESS_CLEAN=false/' "$S/meta"
-  local outv; outv=$(clean_node "$HERE/lib/c1-evidence.mjs" --session="$S" --out="$EVIDENCE_DIR")
-  local ev rp verdict; ev=$(sed -n 1p <<<"$outv"); rp=$(sed -n 2p <<<"$outv"); verdict=$(sed -n 3p <<<"$outv")
-  # --- cleanup and verification ---------------------------------------------
-  local sess=$S; S=''
-  unset C1_HARNESS_SESSION
-  local cv='PASS — desktop and test processes stopped, ports 5173/6080 closed, session directory (VNC socket, X cookie, probe token files, raw reports, browser profiles) deleted'
-  if ! c1_cleanup_session "$ROOT" "$sess" || ! c1_verify_cleanup "$sess"; then cv='FAIL — see terminal; run c1-session.sh cleanup'; fi
-  sed -i "s|@@C1_CLEANUP_VERDICT@@|$cv ($(c1_utc))|" "$ev" "$rp"
-  [[ "$cv" == PASS* ]] || { verdict=FAIL; sed -i 's/^\*\*Harness summary: [A-Z ]*\.\*\*/**Harness summary: FAIL.**/' "$ev" "$rp"; }
+  local snapshot outv ev rp verdict
+  snapshot=$(clean_node "$HERE/lib/c1-evidence.mjs" --session="$S")
+  # Finalize the sanitized evidence after the monitor and its supervisor stop.
+  local sess=$S C1_FINAL_PRIVACY=pending cleanup_result=FAIL privacy_failed=false
+  trap '' INT TERM HUP
+  unset C1_HARNESS_SESSION TMPDIR
+  if c1_cleanup_session "$ROOT" "$sess" && c1_verify_cleanup "$sess"; then cleanup_result=PASS; fi
+  S=''
+  trap 'exit 130' INT TERM HUP
+  if (( ! offline_only )) && [[ "$C1_FINAL_PRIVACY" != clean ]]; then privacy_failed=true; fi
+  outv=$(clean_node "$HERE/lib/c1-evidence.mjs" --out="$EVIDENCE_DIR" \
+    --cleanup="$cleanup_result" --privacy-failed="$privacy_failed" <<<"$snapshot")
+  ev=$(sed -n 1p <<<"$outv"); rp=$(sed -n 2p <<<"$outv"); verdict=$(sed -n 3p <<<"$outv")
   printf '\nC1 harness summary: %s\nEvidence:        %s\nReview package:  %s\n' "$verdict" "$ev" "$rp"
   printf 'Paste the review package into a SEPARATE Claude session for independent security review.\n'
   # Exit status: non-zero on FAIL or failed cleanup; INCOMPLETE/READY exit 0.
-  [[ "$cv" == PASS* && "$verdict" != FAIL ]]
+  [[ "$cleanup_result" == PASS && "$verdict" != FAIL ]]
 }
 
 main() {
   local sub=${1:-run} offline=0
   [[ "$sub" == --offline-only ]] && { sub=run; offline=1; }
   [[ "${2:-}" == --offline-only ]] && offline=1
+  case $sub in
+    run|r11-only|preflight|cleanup|purge)
+      c1_lock_state "$ROOT" || { c1_err 'cannot acquire the C1 state lock; another operation may be running'; return 1; }
+      ;;
+  esac
   case $sub in
     run) session "$offline" ;;
     r11-only) [[ $# -eq 1 ]] || { usage; return 2; }; r11_session ;;
@@ -483,7 +499,7 @@ main() {
            c1_cleanup_all "$ROOT" || return 1
            if [[ -e "$WT" ]]; then git -C "$REPO" worktree remove --force "$WT" 2>/dev/null || c1_safe_rm "$WT" "$CACHE"; fi
            git -C "$REPO" worktree prune; rm -f "$CACHE"/deps-ok-*; c1_log 'purged cached approved worktree' ;;
-    selftest) bash "$HERE/tests/test_c1_lib.sh" && node --test "$HERE"/tests/*.test.mjs ;;
+    selftest) bash "$HERE/tests/test_c1_lifecycle.sh" && bash "$HERE/tests/test_c1_lib.sh" && node --test "$HERE"/tests/*.test.mjs ;;
     -h|--help|help) usage ;;
     *) usage; return 2 ;;
   esac

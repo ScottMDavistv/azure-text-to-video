@@ -315,7 +315,7 @@ export function evaluate({ meta, phases, reports, artifactHits }) {
   return { rows, allTests, credential, egress, hosts, overall, artifactHits }
 }
 
-export function renderEvidence({ meta, phases, result, generated }) {
+export function renderEvidence({ meta, phases, result, generated, cleanup }) {
   const L = []
   const v = x => x ?? 'unknown'
   L.push('# C1 sanitized evidence — ' + generated, '')
@@ -357,7 +357,7 @@ export function renderEvidence({ meta, phases, result, generated }) {
       '; Microsoft server sign-out confirmed = ' + obs.serverSignoutConfirmed + '.',
       '- MSAL 4.x clears the local cache before opening the sign-out popup and treats server sign-out as best effort, so a cancelled popup can leave the Microsoft SSO session alive in that browser profile while the app is locally signed out. The harness browser context is discarded at test end. Reviewer: decide whether PR #46 should surface this to users.')
   }
-  L.push('', '## Cleanup', '', '- @@C1_CLEANUP_VERDICT@@', '')
+  L.push('', '## Cleanup', '', '- ' + (cleanup ?? '@@C1_CLEANUP_VERDICT@@'), '')
   L.push('## Not covered by this evidence', '')
   L.push('- No tokens, claims, cookies, URLs, UPNs, HAR files, traces, screenshots or console dumps were retained. Raw Playwright reports were read in memory and deleted with the session.')
   L.push('- INCOMPLETE rows require another supervised session; they are not failures of the application.')
@@ -440,18 +440,20 @@ function main(argv) {
   }
   const session = args.session
   const out = args.out
-  if (!session || !out) throw new Error('usage: c1-evidence.mjs --session=DIR --out=DIR')
-  const meta = parseMeta(existsSync(join(session, 'meta')) ? readFileSync(join(session, 'meta'), 'utf8') : '')
-  const phases = parsePhases(existsSync(join(session, 'phases')) ? readFileSync(join(session, 'phases'), 'utf8') : '')
-  const reports = {}
-  for (const id of Object.keys(PHASES)) {
-    const p = join(session, 'reports', id + '.json')
-    if (existsSync(p)) { try { reports[id] = summarizeReport(JSON.parse(readFileSync(p, 'utf8'))) } catch { reports[id] = [] } }
+  if (!session && !args.cleanup) throw new Error('session or cleanup result required')
+  const snapshot = session ? snapshotSession(session) : JSON.parse(readFileSync(0, 'utf8'))
+  if (!out) {
+    process.stdout.write(JSON.stringify(snapshot))
+    return
   }
-  const artifactHits = scanArtifacts(session)
-  const result = evaluate({ meta, phases, reports, artifactHits })
+  const { meta } = snapshot
+  if (args['privacy-failed'] === 'true') meta.PORT_PRIVATE = 'failed'
+  const result = evaluate(snapshot)
+  if (args.cleanup === 'FAIL') result.overall = 'FAIL'
+  const cleanup = args.cleanup === 'PASS' ? 'PASS — desktop and test processes stopped, listeners closed, session files deleted'
+    : args.cleanup === 'FAIL' ? 'FAIL — inspect terminal diagnostics and retry cleanup' : undefined
   const generated = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
-  const evidence = assertSanitized(renderEvidence({ meta, phases, result, generated }))
+  const evidence = assertSanitized(renderEvidence({ meta, phases: snapshot.phases, result, generated, cleanup }))
   const pkg = assertSanitized(renderReviewPackage({ evidence, meta }))
   mkdirSync(out, { recursive: true, mode: 0o700 })
   const stamp = generated.replace(/[-:]/g, '')
@@ -461,6 +463,17 @@ function main(argv) {
   writeFileSync(rp, pkg, { mode: 0o600 })
   chmodSync(out, 0o700)
   process.stdout.write(ev + '\n' + rp + '\n' + result.overall + '\n')
+}
+
+function snapshotSession(session) {
+  const meta = parseMeta(existsSync(join(session, 'meta')) ? readFileSync(join(session, 'meta'), 'utf8') : '')
+  const phases = parsePhases(existsSync(join(session, 'phases')) ? readFileSync(join(session, 'phases'), 'utf8') : '')
+  const reports = {}
+  for (const id of Object.keys(PHASES)) {
+    const p = join(session, 'reports', id + '.json')
+    if (existsSync(p)) { try { reports[id] = summarizeReport(JSON.parse(readFileSync(p, 'utf8'))) } catch { reports[id] = [] } }
+  }
+  return { meta, phases, reports, artifactHits: scanArtifacts(session) }
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
