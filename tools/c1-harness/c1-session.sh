@@ -476,8 +476,11 @@ main() {
     run) session "$offline" ;;
     r11-only) [[ $# -eq 1 ]] || { usage; return 2; }; r11_session ;;
     preflight) scrub_env; c1_recover_before_start "$ROOT" || return 1; preflight || return 1; install_deps || return 1; c1_log "preflight PASS: ${CHECKS[*]}" ;;
-    cleanup) c1_cleanup_all "$ROOT"; c1_port_free "$C1_NOVNC_PORT" && c1_log 'no harness sessions remain' ;;
-    purge) c1_cleanup_all "$ROOT"
+    cleanup) c1_refuse_active_cleanup "$ROOT" || return 1
+             c1_cleanup_all "$ROOT" || return 1
+             c1_port_free "$C1_NOVNC_PORT" && c1_log 'no harness sessions remain' ;;
+    purge) c1_refuse_active_cleanup "$ROOT" || return 1
+           c1_cleanup_all "$ROOT" || return 1
            if [[ -e "$WT" ]]; then git -C "$REPO" worktree remove --force "$WT" 2>/dev/null || c1_safe_rm "$WT" "$CACHE"; fi
            git -C "$REPO" worktree prune; rm -f "$CACHE"/deps-ok-*; c1_log 'purged cached approved worktree' ;;
     selftest) bash "$HERE/tests/test_c1_lib.sh" && node --test "$HERE"/tests/*.test.mjs ;;
