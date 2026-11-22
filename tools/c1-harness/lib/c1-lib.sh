@@ -1782,6 +1782,37 @@ c1_record_privacy_failure() {
   printf '%s %s\n' "$(c1_utc)" "$reason" >>"$register"
 }
 
+# Diagnostic only: first complete failure observation wins, even when another
+# process reports during teardown. No probe data or caller strings enter it.
+c1_first_failure_valid() {
+  case "$1" in
+    'monitor-startup startup-timeout'|'monitor-startup launcher-monitor-start'|\
+    'monitor-startup private-sweep-failed'|'monitor-active private-sweep-failed'|\
+    'monitor-shutdown private-sweep-failed'|'monitor-active monitor-unhealthy'|\
+    'launcher-exit before-cleanup') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+c1_record_first_failure() {
+  local session=$1 value="$2 $3"
+  c1_first_failure_valid "$value" || return 1
+  # Noclobber provides create-once publication using builtins only. A writer
+  # killed before the newline leaves unavailable evidence, not a new verdict.
+  (umask 077; set -o noclobber; printf '%s\n' "$value" >"$session/first-failure") 2>/dev/null
+}
+
+c1_read_first_failure() {
+  local value='' record="$1/first-failure"
+  [[ -f "$record" && ! -L "$record" && -O "$record" &&
+     "$(stat -c %s -- "$record")" -le 64 ]] || return 1
+  if IFS= read -r -d '' value <"$record"; then return 1; fi
+  [[ "$value" == *$'\n' ]] || return 1
+  value=${value%$'\n'}
+  c1_first_failure_valid "$value" || return 1
+  printf '%s\n' "$value"
+}
+
 # Only the fixed classifier outputs and numeric probe metadata leave the
 # session. Do not preserve response bodies, redirect URLs, or request headers.
 c1_monitor_probe_detail_valid() {
@@ -2084,6 +2115,10 @@ c1_privacy_monitor_loop() {
       fi
     fi
     if [[ "$reason" == public || "$reason" == unverified ]]; then
+      local phase=monitor-startup
+      if [[ -f "$s/monitor-stop" ]]; then phase=monitor-shutdown
+      elif [[ -f "$s/monitor-required" ]]; then phase=monitor-active; fi
+      c1_record_first_failure "$s" "$phase" private-sweep-failed || true
       c1_record_monitor_probe_failure "$s" "$C1_PRIVACY_DETAIL" ||
         c1_err 'could not preserve the sanitized monitor probe failure'
     fi
@@ -2203,6 +2238,7 @@ c1_watchdog_loop() {
       fi
       if ! c1_deadline_remaining "$startup_deadline" >/dev/null; then
         C1_CLOSE_DEADLINE=$startup_close_deadline
+        c1_record_first_failure "$session" monitor-startup startup-timeout || true
         c1_record_privacy_failure "$session" startup-timeout || true
         c1_close_supervisor "$session" "$C1_NOVNC_PORT" "$startup_pid" "$startup_start" 10 ||
           c1_record_privacy_failure "$session" teardown-failed || true
@@ -2237,6 +2273,7 @@ c1_watchdog_loop() {
       else
         C1_CLOSE_DEADLINE=$((10#$now + 75))
       fi
+      c1_record_first_failure "$session" monitor-active monitor-unhealthy || true
       c1_teardown_novnc "$session" "$C1_NOVNC_PORT" "$websockify" "$websockify_start" monitor-unhealthy || true
       if c1_active_matches "$root" "$session" "$owner" "$owner_start"; then
         c1_signal_identity TERM "$owner" "$owner_start" || return 1

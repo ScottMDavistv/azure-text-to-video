@@ -225,6 +225,9 @@ privacy_gate() {
 
 # fail_desktop -> stop noVNC (if started) and mark the desktop failed; aborts on an unverified teardown
 fail_desktop() {
+  if [[ "${1:-}" == monitor-start ]]; then
+    c1_record_first_failure "$S" monitor-startup launcher-monitor-start || true
+  fi
   PORT_PRIVATE=failed
   if [[ -n "$WS" ]] && ! c1_teardown_novnc "$S" "$C1_NOVNC_PORT" "$WS" "$WSST" "${1:-unverified}"; then
     c1_err 'noVNC teardown could not be verified; aborting the session (full cleanup and verification follow)'
@@ -293,7 +296,7 @@ start_private_desktop() {
 # Dedicated R11 evidence is written after verified cleanup, including on errors.
 finish_r11() {
   local r11_exit=$1 listener=unverified cleanup_result=not-needed checkout=unverified verdict=FAIL
-  local listener_state='' listener_detail='' C1_FINAL_PRIVACY=pending
+  local listener_state='' listener_detail='' C1_FINAL_PRIVACY=pending first_failure=none-recorded
   local monitor_shutdown=not-run session_cleanup=not-run cleanup_verification=not-run monitor_probe_failure=none-recorded
   trap - EXIT
   trap '' INT TERM HUP
@@ -314,6 +317,10 @@ finish_r11() {
         PORT_PRIVATE=failed
       fi
     fi
+    if (( r11_exit != 0 )) || [[ "$monitor_shutdown" == FAIL* ]]; then
+      c1_record_first_failure "$S" launcher-exit before-cleanup || true
+    fi
+    first_failure=$(c1_read_first_failure "$S") || first_failure=none-recorded
     cleanup_result=FAIL
     if c1_cleanup_launcher "$ROOT" "$S"; then
       session_cleanup=PASS
@@ -338,6 +345,7 @@ finish_r11() {
     verdict=PASS
   fi
 
+  c1_log "R11 first failure observation: $first_failure"
   c1_log "R11 monitor probe failure: $monitor_probe_failure"
   c1_log "R11 monitor shutdown: $monitor_shutdown"
   c1_log "R11 session cleanup: $session_cleanup"
@@ -353,6 +361,7 @@ finish_r11() {
     # The existing HTTPS classifier supplies a sanitized reason without redirect URLs or credentials.
     printf -- '- Last privacy probe: %s\n' "${C1_PRIVACY_DETAIL:-not run}"
     printf -- '- Desktop listener: %s\n' "$listener"
+    printf -- '- First failure observation: %s\n' "$first_failure"
     printf -- '- Monitor probe failure: %s\n' "$monitor_probe_failure"
     printf -- '- Monitor shutdown: %s\n' "$monitor_shutdown"
     printf -- '- Session cleanup: %s\n' "$session_cleanup"

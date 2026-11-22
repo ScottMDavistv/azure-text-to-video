@@ -237,7 +237,11 @@ r11_exit_status_and_late_privacy() (
       exit 0
     ) >"$FIXTURE/$variant.log" 2>&1 || status=$?
     case "$variant" in
-      clean) [[ "$status" == 0 ]] && grep -qx -- '- R11: PASS' "$R11_EVIDENCE" || return 1 ;;
+      clean)
+        [[ "$status" == 0 ]] &&
+          grep -Fxq -- '- First failure observation: none-recorded' "$R11_EVIDENCE" &&
+          grep -qx -- '- R11: PASS' "$R11_EVIDENCE" || return 1
+        ;;
       late)
         [[ "$status" == 1 ]] &&
           grep -Fxq -- '- Port privacy: failed' "$R11_EVIDENCE" &&
@@ -659,9 +663,7 @@ websockify_reaping_ack() (
 )
 
 monitor_probe_failure_evidence() (
-  local session="$STATE/session.probe" record
-  local expected='authenticated probe transport failure (curl-exit-28 timing=0.010,0.020,0.030,0.000,0.400)'
-  mkdir -m 700 "$session" || return 1
+  local session record expected seq=0
   c1_owned_pid() { return 0; }
   c1_privacy_check() {
     C1_PRIVACY_STATE=unverified
@@ -669,12 +671,24 @@ monitor_probe_failure_evidence() (
     return 1
   }
   c1_teardown_novnc() {
-    [[ "$5" == unverified && "$(c1_read_monitor_probe_failure "$1")" == "$expected" ]] ||
+    [[ "$5" == unverified && "$(c1_read_monitor_probe_failure "$1")" == "$expected" &&
+       "$(c1_read_first_failure "$1")" == 'monitor-startup private-sweep-failed' ]] ||
       return 1
-    rmdir -- "$1"
   }
-  c1_privacy_monitor_loop "$session" unused unused 11 31 '' 0 || return 1
-  [[ ! -e "$session" && "$(c1_read_monitor_probe_failure "$session")" == "$expected" ]] || return 1
+  local -a details=(
+    'authenticated probe transport failure (curl-exit-143)'
+    'authenticated probe transport failure (curl-exit-28 timing=0.010,0.020,0.030,0.000,0.400)'
+  )
+  for expected in "${details[@]}"; do
+    seq=$((seq + 1))
+    session="$STATE/session.probe.$seq"
+    mkdir -m 700 "$session" || return 1
+    c1_privacy_monitor_loop "$session" unused unused 11 31 '' 0 || return 1
+    c1_record_first_failure "$session" monitor-startup startup-timeout && return 1
+    [[ "$(c1_read_first_failure "$session")" == 'monitor-startup private-sweep-failed' ]] || return 1
+    rm -- "$session/first-failure" && rmdir -- "$session" || return 1
+    [[ "$(c1_read_monitor_probe_failure "$session")" == "$expected" ]] || return 1
+  done
   c1_record_monitor_probe_failure "$session" 'authenticated probe did not reach the marker (HTTP 503)' ||
     return 1
   [[ "$(c1_read_monitor_probe_failure "$session")" == "$expected" ]] || return 1
@@ -978,6 +992,22 @@ startup_unknown_port() (
       observed_tick=$fake_tick observed_deadline=$C1_CLOSE_DEADLINE
       (( fake_tick == expected_tick && C1_CLOSE_DEADLINE == expected_deadline &&
          fake_tick < C1_CLOSE_DEADLINE )) || exit 1
+      [[ "$(c1_read_first_failure "$session")" == 'monitor-startup startup-timeout' ]] || exit 1
+      if [[ "$variant" == unknown ]]; then
+        # A sweep finishing during forced teardown must not overwrite the watchdog.
+        (
+          c1_owned_pid() { return 0; }
+          c1_privacy_check() {
+            C1_PRIVACY_STATE=unverified
+            C1_PRIVACY_DETAIL='authenticated probe transport failure (curl-exit-143)'
+            return 1
+          }
+          c1_teardown_novnc() { :; }
+          c1_privacy_monitor_loop "$session" unused unused 11 31 '' 0 || exit 1
+        ) || exit 1
+        [[ "$(c1_read_first_failure "$session")" == 'monitor-startup startup-timeout' &&
+           "$(c1_read_monitor_probe_failure "$session")" == 'authenticated probe transport failure (curl-exit-143)' ]] || exit 1
+      fi
       return 0  # Inert teardown-request observation, not a real reaping claim.
     }
     c1_active_matches() { [[ "$*" == "$STATE $session 12 32" ]]; }
