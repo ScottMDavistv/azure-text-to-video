@@ -299,6 +299,7 @@ start_private_desktop() {
 finish_r11() {
   local r11_exit=$1 listener=unverified cleanup_result=not-needed checkout=unverified verdict=FAIL
   local listener_state='' listener_detail='' C1_FINAL_PRIVACY=pending
+  local monitor_shutdown=not-run session_cleanup=not-run cleanup_verification=not-run
   trap - EXIT
   trap '' INT TERM HUP
 
@@ -310,10 +311,26 @@ finish_r11() {
         "$listener_detail" =~ ^127[.]0[.]0[.]1:$C1_NOVNC_PORT\ pid=[0-9]+\ comm=[A-Za-z0-9._-]+\ ino=[0-9]+$ ]]; then
       listener=verified-loopback
     fi
-    if [[ "$PORT_PRIVATE" == verified-* ]] &&
-       ! c1_stop_privacy_monitor "$S" "${MONITOR_PID:-}" "${MONITOR_START:-}"; then PORT_PRIVATE=failed; fi
+    if [[ "$PORT_PRIVATE" == verified-* ]]; then
+      if c1_stop_privacy_monitor "$S" "${MONITOR_PID:-}" "${MONITOR_START:-}"; then
+        monitor_shutdown=PASS
+      else
+        monitor_shutdown="FAIL (exit $?)"
+        PORT_PRIVATE=failed
+      fi
+    fi
     cleanup_result=FAIL
-    if c1_cleanup_launcher "$ROOT" "$S" && c1_verify_cleanup "$S"; then cleanup_result=PASS; fi
+    if c1_cleanup_launcher "$ROOT" "$S"; then
+      session_cleanup=PASS
+      if c1_verify_cleanup "$S"; then
+        cleanup_verification=PASS
+        cleanup_result=PASS
+      else
+        cleanup_verification="FAIL (exit $?)"
+      fi
+    else
+      session_cleanup="FAIL (exit $?)"
+    fi
     # L-1: late privacy failures during monitored teardown override startup proof.
     [[ "$C1_FINAL_PRIVACY" == clean ]] || PORT_PRIVATE=failed
   fi
@@ -326,6 +343,11 @@ finish_r11() {
     verdict=PASS
   fi
 
+  c1_log "R11 monitor shutdown: $monitor_shutdown"
+  c1_log "R11 session cleanup: $session_cleanup"
+  c1_log "R11 post-cleanup verification: $cleanup_verification"
+  c1_log "R11 final privacy evidence: $C1_FINAL_PRIVACY"
+
   {
     printf '# C1 R11 privacy evidence\n\n'
     printf -- '- Harness commit: %s\n' "$R11_HEAD"
@@ -335,6 +357,10 @@ finish_r11() {
     # The existing HTTPS classifier supplies a sanitized reason without redirect URLs or credentials.
     printf -- '- Last privacy probe: %s\n' "${C1_PRIVACY_DETAIL:-not run}"
     printf -- '- Desktop listener: %s\n' "$listener"
+    printf -- '- Monitor shutdown: %s\n' "$monitor_shutdown"
+    printf -- '- Session cleanup: %s\n' "$session_cleanup"
+    printf -- '- Post-cleanup verification: %s\n' "$cleanup_verification"
+    printf -- '- Final privacy evidence: %s\n' "$C1_FINAL_PRIVACY"
     printf -- '- Cleanup: %s\n' "$cleanup_result"
     printf -- '- Monitor coverage: startup and shutdown only; sustained monitoring not tested\n'
     printf -- '- R11: %s\n' "$verdict"

@@ -202,9 +202,19 @@ r11_exit_status_and_late_privacy() (
   ROOT="$root_fixture" REPO=fixture HARNESS_REL=fixture R11_HEAD=fixture
   c1_port_free() { return 0; }
   c1_verify_harness_clean() { return 0; }
-  c1_stop_privacy_monitor() { return 0; }
+  c1_stop_privacy_monitor() { [[ "$variant" != stop-failed ]] || return 6; }
+  eval "$(declare -f c1_cleanup_launcher | sed '1s/c1_cleanup_launcher/fixture_cleanup_launcher/')"
+  eval "$(declare -f c1_verify_cleanup | sed '1s/c1_verify_cleanup/fixture_verify_cleanup/')"
+  c1_cleanup_launcher() {
+    fixture_cleanup_launcher "$@" || return
+    [[ "$variant" != cleanup-failed ]] || return 7
+  }
+  c1_verify_cleanup() {
+    fixture_verify_cleanup "$@" || return
+    [[ "$variant" != verify-failed ]] || return 8
+  }
   git() { printf 'fixture\n'; }
-  for variant in clean late interrupted; do
+  for variant in clean late interrupted stop-failed cleanup-failed verify-failed; do
     S=$(c1_session_new "$ROOT" "$$") || return 1
     R11_EVIDENCE="$FIXTURE/$variant.md"
     PORT_PRIVATE=verified-probe-gh
@@ -220,6 +230,24 @@ r11_exit_status_and_late_privacy() (
       clean) [[ "$status" == 0 ]] && grep -qx -- '- R11: PASS' "$R11_EVIDENCE" || return 1 ;;
       late) [[ "$status" == 1 ]] && grep -qx -- '- Port privacy: failed' "$R11_EVIDENCE" || return 1 ;;
       interrupted) [[ "$status" == 130 ]] && grep -qx -- '- R11: FAIL' "$R11_EVIDENCE" || return 1 ;;
+      stop-failed)
+        [[ "$status" == 1 ]] &&
+          grep -Fxq -- '- Monitor shutdown: FAIL (exit 6)' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Cleanup: PASS' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- R11: FAIL' "$R11_EVIDENCE" || return 1
+        ;;
+      cleanup-failed)
+        [[ "$status" == 1 ]] &&
+          grep -Fxq -- '- Session cleanup: FAIL (exit 7)' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Post-cleanup verification: not-run' "$R11_EVIDENCE" &&
+          grep -Fxq -- '[c1] R11 session cleanup: FAIL (exit 7)' "$FIXTURE/$variant.log" || return 1
+        ;;
+      verify-failed)
+        [[ "$status" == 1 ]] &&
+          grep -Fxq -- '- Session cleanup: PASS' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Post-cleanup verification: FAIL (exit 8)' "$R11_EVIDENCE" &&
+          grep -Fxq -- '[c1] R11 post-cleanup verification: FAIL (exit 8)' "$FIXTURE/$variant.log" || return 1
+        ;;
     esac
     [[ ! -e "$S" ]] || return 1
   done

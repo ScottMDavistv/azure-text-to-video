@@ -980,20 +980,30 @@ c1_live_supervisors() {
 # The launcher has its own PID and session path even if active was damaged.
 c1_cleanup_launcher() {
   local owner_start
-  owner_start=$(c1_proc_start "$$") || return 1
-  [[ "$owner_start" =~ ^[1-9][0-9]*$ ]] || return 1
+  if ! owner_start=$(c1_proc_start "$$") || [[ ! "$owner_start" =~ ^[1-9][0-9]*$ ]]; then
+    c1_err 'cleanup could not verify the launcher identity'
+    return 1
+  fi
   c1_cleanup_session "$1" "$2" "$$" "$owner_start"
 }
 
 # The optional owner tuple is supplied only by the launcher or its watchdog.
 c1_cleanup_session() {
   local cleanup_gate cleanup_exit=0
-  if [[ -n "${3:-}" ]]; then c1_session_path_valid "$1" "$2" || return 1; fi
-  if [[ -L "$2" ]]; then return 1; fi
+  if { [[ -n "${3:-}" ]] && ! c1_session_path_valid "$1" "$2"; } || [[ -L "$2" ]]; then
+    c1_err 'cleanup refused an invalid session path'
+    return 1
+  fi
   if [[ -d "$2" ]]; then
-    [[ ! -L "$2/.spawn-lock" ]] || return 1
-    exec {cleanup_gate}>>"$2/.spawn-lock" || return 1
-    if ! flock -w 5 "$cleanup_gate"; then exec {cleanup_gate}>&-; return 1; fi
+    if [[ -L "$2/.spawn-lock" ]] || ! exec {cleanup_gate}>>"$2/.spawn-lock"; then
+      c1_err 'cleanup could not open the session spawn lock safely'
+      return 1
+    fi
+    if ! flock -w 5 "$cleanup_gate"; then
+      c1_err 'cleanup could not acquire the session spawn lock'
+      exec {cleanup_gate}>&-
+      return 1
+    fi
   fi
   _c1_cleanup_session "$@" || cleanup_exit=$?
   if [[ -n "${cleanup_gate:-}" ]]; then exec {cleanup_gate}>&-; fi
@@ -1837,17 +1847,31 @@ c1_monitor_stopped() {
 
 c1_stop_privacy_monitor() {
   local s=$1 pid=$2 start=$3 step
-  [[ -n "$pid" && -n "$start" ]] || return 1
-  c1_monitor_healthy "$s" "$pid" "$start" || return 1
-  (set -o noclobber; : >"$s/monitor-stop") || return 1
+  if [[ -z "$pid" || -z "$start" ]]; then
+    c1_err 'privacy monitor shutdown: monitor identity is missing'
+    return 1
+  fi
+  if ! c1_monitor_healthy "$s" "$pid" "$start"; then
+    c1_err 'privacy monitor shutdown: monitor health could not be verified'
+    return 1
+  fi
+  if ! (set -o noclobber; : >"$s/monitor-stop"); then
+    c1_err 'privacy monitor shutdown: could not publish the stop request'
+    return 1
+  fi
   for (( step=0; step<60; step++ )); do
     if c1_monitor_stopped "$s" "$pid" "$start"; then
-      ! c1_privacy_failed "$s"
-      return
+      if ! c1_privacy_failed "$s"; then return 0; fi
+      break
     fi
-    c1_privacy_failed "$s" && return 1
+    if c1_privacy_failed "$s"; then break; fi
     sleep 0.05
   done
+  if (( step < 60 )); then
+    c1_err 'privacy monitor shutdown: a privacy failure was recorded'
+  else
+    c1_err 'privacy monitor shutdown: timed out waiting for the verified stop acknowledgment'
+  fi
   return 1
 }
 
