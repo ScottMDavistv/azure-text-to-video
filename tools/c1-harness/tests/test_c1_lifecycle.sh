@@ -258,7 +258,7 @@ watchdog_ambiguous_record() { ambiguous_owner_teardown watchdog; }
 
 ambiguous_owner_teardown() (
   local mode=$1 first owner owner_start session_path victim victim_start
-  local other other_start watchdog watchdog_start status=0
+  local other other_start watchdog watchdog_start step status=0
   : >"$FIXTURE/spawn-victim"
   if [[ "$mode" == launcher ]]; then : >"$FIXTURE/finish-r11"; fi
   entry run >"$FIXTURE/launcher.log" 2>&1 & first=$!
@@ -297,7 +297,13 @@ ambiguous_owner_teardown() (
     kill -STOP "$watchdog" 2>/dev/null || return 1
     kill -KILL "$owner" || return 1
     wait "$first" 2>/dev/null || true
-    c1_lock_state "$STATE" || return 1
+    # The killed launcher's last short-lived child may still hold the lock.
+    # Keep the watchdog stopped until the fixture actually owns it.
+    for (( step=0; step<20; step++ )); do
+      if c1_lock_state "$STATE"; then break; fi
+      sleep 0.05
+    done
+    (( step < 20 )) || return 1
     kill -CONT "$watchdog" || return 1
     sleep 0.4
     process_is_live "$watchdog" "$watchdog_start" &&
@@ -400,7 +406,7 @@ META
 )
 
 monitor_shutdown_and_loss() (
-  local variant launcher status session_path ws monitor register
+  local variant launcher status session_path ws worker monitor register
   cat >"$FIXTURE/monitor-launcher.sh" <<'MONITOR_FIXTURE'
 set -Eeuo pipefail
 source "$1/lib/c1-lib.sh"
@@ -410,10 +416,22 @@ c1_lock_state "$root"
 session_path=$(c1_session_new "$root" "$$")
 export C1_HARNESS_SESSION=$session_path TMPDIR="$session_path/tmp"
 trap 'c1_cleanup_launcher "$root" "$session_path"; c1_verify_cleanup "$session_path"' EXIT
-trap 'exit 130' TERM
+trap '
+  if [[ -n "${worker:-}" ]] && kill -0 "$worker" 2>/dev/null; then
+    printf "desktop worker survived until launcher signal\n" >&2
+    exit 2
+  fi
+  exit 130
+' TERM
 c1_start_watchdog "$root" "$session_path" "$$" "$1/lib/c1-lib.sh"
-ws=$(c1_spawn "$session_path" desktop sleep 60)
+ws=$(c1_spawn "$session_path" websockify bash -c '
+  setsid sleep 60 &
+  printf "%s\n" "$!" >"$1"
+  wait
+' _ "$fixture/$variant.worker")
 ws_start=$(c1_proc_start "$ws")
+while [[ ! -s "$fixture/$variant.worker" ]]; do sleep 0.02; done
+read -r worker <"$fixture/$variant.worker"
 monitor=$(c1_spawn "$session_path" privacy-monitor bash -c '
   source "$1"
   c1_privacy_check() { return 0; }
@@ -426,7 +444,9 @@ c1_arm_privacy_monitor "$session_path" "$monitor" "$monitor_start" "$ws" "$ws_st
 printf '%s %s %s\n' "$session_path" "$ws" "$monitor" >"$fixture/$variant.ready"
 if [[ "$variant" == orderly ]]; then
   c1_stop_privacy_monitor "$session_path" "$monitor" "$monitor_start"
-  ! c1_owned_pid "$ws" "$session_path" "$ws_start"
+  if c1_owned_pid "$ws" "$session_path" "$ws_start" || kill -0 "$worker" 2>/dev/null; then
+    exit 1
+  fi
   ! c1_privacy_failed "$session_path"
 else
   while :; do sleep 0.05; done
@@ -439,6 +459,7 @@ MONITOR_FIXTURE
     launcher=$!
     wait_for_file "$FIXTURE/$variant.ready" || return 1
     read -r session_path ws monitor <"$FIXTURE/$variant.ready" || return 1
+    read -r worker <"$FIXTURE/$variant.worker" || return 1
     case "$variant" in
       exited) kill -TERM "$monitor" || return 1 ;;
       stalled) kill -STOP "$monitor" || return 1 ;;
@@ -452,7 +473,7 @@ MONITOR_FIXTURE
       register=$(c1_privacy_register "$session_path")
       grep -q ' monitor-unhealthy$' "$register" || return 1
     fi
-    [[ ! -e "$session_path" ]] && ! kill -0 "$ws" 2>/dev/null || return 1
+    [[ ! -e "$session_path" ]] && ! kill -0 "$ws" 2>/dev/null && ! kill -0 "$worker" 2>/dev/null || return 1
   done
 )
 

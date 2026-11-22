@@ -1355,7 +1355,7 @@ c1_reaped_register() { printf '%s/.%s.reaped' "$(dirname -- "$1")" "${1##*/}"; }
 # PREFIX is the environment wrapper the supervisor itself runs under, so the
 # supervisor of a desktop process holds the same scrubbed environment (L-C).
 _c1_spawn_supervised() {
-  local s=$1 name=$2 n=$3 py reg i; shift 3
+  local s=$1 name=$2 n=$3 py reg i supervisor_start; shift 3
   local -a pre=("${@:1:n}"); shift "$n"
   py=$(command -v python3) || { c1_err 'python3 is required to supervise harness processes'; return 1; }
   reg=$(c1_reaped_register "$s")
@@ -1380,6 +1380,11 @@ _c1_spawn_supervised() {
   # The setsid leader is recorded as before ("pid starttime"); its supervisor
   # recorded itself. A child that already exited is never signalled by PID.
   printf '%s %s\n' "$pid" "$st" >>"$s/pids" || return 1
+  if [[ "$name" == websockify ]]; then
+    supervisor_start=$(c1_proc_start "$sup") || return 1
+    [[ "$supervisor_start" =~ ^[1-9][0-9]*$ ]] || return 1
+    printf '%s %s %s %s\n' "$pid" "$st" "$sup" "$supervisor_start" >"$s/websockify-supervisor" || return 1
+  fi
   printf '%s' "$pid"
 }
 
@@ -1752,6 +1757,10 @@ c1_teardown_novnc() {
 c1_close_novnc() {
   local s=$1 port=$2 ws=$3 wsst=$4 wait_steps=20 i error=0
   [[ "${C1_MONITOR_FAST_TEARDOWN:-}" == 1 ]] && wait_steps=5
+  if [[ -e "$s/websockify-supervisor" || -L "$s/websockify-supervisor" ]]; then
+    c1_close_websockify_tree "$s" "$port" "$ws" "$wsst" "$wait_steps"
+    return
+  fi
   c1_signal_owned TERM "$ws" "$s" "$wsst" || error=1
   for (( i=0; i<wait_steps; i++ )); do
     if c1_port_free "$port" && ! c1_owned_pid "$ws" "$s" "$wsst"; then break; fi
@@ -1760,6 +1769,26 @@ c1_close_novnc() {
   c1_signal_owned KILL "$ws" "$s" "$wsst" || error=1
   for (( i=0; i<wait_steps; i++ )); do c1_port_free "$port" && break; sleep 0.1; done
   (( error == 0 )) && c1_port_free "$port"
+}
+
+# Websockify can fork workers with established desktop connections. Stop its
+# dedicated supervisor's whole tree and wait for the subreaper's proof.
+c1_close_websockify_tree() {
+  local s=$1 port=$2 ws=$3 wsst=$4 wait_steps=$5 record_pid record_start supervisor start extra reg i
+  [[ -f "$s/websockify-supervisor" && ! -L "$s/websockify-supervisor" ]] || return 1
+  read -r record_pid record_start supervisor start extra <"$s/websockify-supervisor" || return 1
+  [[ "$record_pid" == "$ws" && "$record_start" == "$wsst" && -z "$extra" &&
+     "$supervisor" =~ ^[1-9][0-9]*$ && "$start" =~ ^[1-9][0-9]*$ ]] || return 1
+  grep -Fxq -- "$supervisor $start" "$s/supervisors" || return 1
+  c1_signal_owned USR1 "$supervisor" "$s" "$start" || return 1
+  reg=$(c1_reaped_register "$s")
+  for (( i=0; i<=wait_steps; i++ )); do
+    if [[ -f "$reg" && ! -L "$reg" ]] && grep -Fxq -- "$supervisor $start" "$reg" && c1_port_free "$port"; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
 }
 
 # The heartbeat uses the kernel clock and advances only after a private sweep.
