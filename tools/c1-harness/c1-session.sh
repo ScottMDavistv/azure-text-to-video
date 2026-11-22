@@ -299,7 +299,7 @@ start_private_desktop() {
 finish_r11() {
   local r11_exit=$1 listener=unverified cleanup_result=not-needed checkout=unverified verdict=FAIL
   local listener_state='' listener_detail='' C1_FINAL_PRIVACY=pending
-  local monitor_shutdown=not-run session_cleanup=not-run cleanup_verification=not-run
+  local monitor_shutdown=not-run session_cleanup=not-run cleanup_verification=not-run monitor_probe_failure=none-recorded
   trap - EXIT
   trap '' INT TERM HUP
 
@@ -333,6 +333,7 @@ finish_r11() {
     fi
     # L-1: late privacy failures during monitored teardown override startup proof.
     [[ "$C1_FINAL_PRIVACY" == clean ]] || PORT_PRIVATE=failed
+    monitor_probe_failure=$(c1_read_monitor_probe_failure "$S") || monitor_probe_failure=none-recorded
   fi
   if [[ "$(git -C "$REPO" rev-parse HEAD)" == "$R11_HEAD" ]] &&
     c1_verify_harness_clean "$REPO" "$HARNESS_REL"; then
@@ -343,6 +344,7 @@ finish_r11() {
     verdict=PASS
   fi
 
+  c1_log "R11 monitor probe failure: $monitor_probe_failure"
   c1_log "R11 monitor shutdown: $monitor_shutdown"
   c1_log "R11 session cleanup: $session_cleanup"
   c1_log "R11 post-cleanup verification: $cleanup_verification"
@@ -357,6 +359,7 @@ finish_r11() {
     # The existing HTTPS classifier supplies a sanitized reason without redirect URLs or credentials.
     printf -- '- Last privacy probe: %s\n' "${C1_PRIVACY_DETAIL:-not run}"
     printf -- '- Desktop listener: %s\n' "$listener"
+    printf -- '- Monitor probe failure: %s\n' "$monitor_probe_failure"
     printf -- '- Monitor shutdown: %s\n' "$monitor_shutdown"
     printf -- '- Session cleanup: %s\n' "$session_cleanup"
     printf -- '- Post-cleanup verification: %s\n' "$cleanup_verification"

@@ -219,7 +219,12 @@ r11_exit_status_and_late_privacy() (
     R11_EVIDENCE="$FIXTURE/$variant.md"
     PORT_PRIVATE=verified-probe-gh
     printf 'verified\n127.0.0.1:6080 pid=11 comm=websockify ino=31\n' >"$S/listener-state"
-    if [[ "$variant" == late ]]; then c1_record_privacy_failure "$S" public || return 1; fi
+    if [[ "$variant" == late ]]; then
+      c1_record_privacy_failure "$S" public || return 1
+      c1_record_monitor_probe_failure "$S" 'unauthenticated probe got HTTP 200' 2>/dev/null &&
+        return 1
+      c1_record_monitor_probe_failure "$S" 'unauthenticated probe got (HTTP 200)' || return 1
+    fi
     status=0
     (
       trap 'finish_r11 "$?"' EXIT
@@ -228,7 +233,11 @@ r11_exit_status_and_late_privacy() (
     ) >"$FIXTURE/$variant.log" 2>&1 || status=$?
     case "$variant" in
       clean) [[ "$status" == 0 ]] && grep -qx -- '- R11: PASS' "$R11_EVIDENCE" || return 1 ;;
-      late) [[ "$status" == 1 ]] && grep -qx -- '- Port privacy: failed' "$R11_EVIDENCE" || return 1 ;;
+      late)
+        [[ "$status" == 1 ]] &&
+          grep -Fxq -- '- Port privacy: failed' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Monitor probe failure: unauthenticated probe got (HTTP 200)' "$R11_EVIDENCE" || return 1
+        ;;
       interrupted) [[ "$status" == 130 ]] && grep -qx -- '- R11: FAIL' "$R11_EVIDENCE" || return 1 ;;
       stop-failed)
         [[ "$status" == 1 ]] &&
@@ -505,6 +514,31 @@ MONITOR_FIXTURE
   done
 )
 
+monitor_probe_failure_evidence() (
+  local session="$STATE/session.probe" record
+  local expected='authenticated probe transport failure (curl-exit-28 timing=0.010,0.020,0.030,0.000,0.400)'
+  mkdir -m 700 "$session" || return 1
+  c1_owned_pid() { return 0; }
+  c1_privacy_check() {
+    C1_PRIVACY_STATE=unverified
+    C1_PRIVACY_DETAIL=$expected
+    return 1
+  }
+  c1_teardown_novnc() {
+    [[ "$5" == unverified && "$(c1_read_monitor_probe_failure "$1")" == "$expected" ]] ||
+      return 1
+    rmdir -- "$1"
+  }
+  c1_privacy_monitor_loop "$session" unused unused 11 31 '' 0 || return 1
+  [[ ! -e "$session" && "$(c1_read_monitor_probe_failure "$session")" == "$expected" ]] || return 1
+  c1_record_monitor_probe_failure "$session" 'authenticated probe did not reach the marker (HTTP 503)' ||
+    return 1
+  [[ "$(c1_read_monitor_probe_failure "$session")" == "$expected" ]] || return 1
+  record=$(c1_monitor_probe_record "$session")
+  printf '%s\n%s\n' 'bad arguments' 'unexpected report contents' >"$record"
+  ! c1_read_monitor_probe_failure "$session"
+)
+
 harness_head_drift() (
   local repo="$FIXTURE/repo" pinned
   git init -q "$repo" &&
@@ -579,7 +613,7 @@ if [[ "${1:-}" == --mutations ]]; then
   done
 else
   for case_name in competing_launchers overlapping_cleaners malformed_active retained_privacy_failure reused_owner watchdog_waits_for_launcher r11_exit_status_and_late_privacy launcher_crash_recovery active_publication_preserves_owner verification_is_retried \
-    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss harness_head_drift; do
+    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss monitor_probe_failure_evidence harness_head_drift; do
     if ! run_case "$HERE" "$case_name"; then
       printf 'FAIL: %s\n' "$case_name" >&2
       for log in "$FIXTURE"/*.log; do [[ ! -f "$log" ]] || cat "$log" >&2; done

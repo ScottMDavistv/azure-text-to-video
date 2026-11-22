@@ -1744,6 +1744,51 @@ c1_record_privacy_failure() {
   printf '%s %s\n' "$(c1_utc)" "$reason" >>"$register"
 }
 
+# Only the fixed classifier outputs and numeric probe metadata leave the
+# session. Do not preserve response bodies, redirect URLs, or request headers.
+c1_monitor_probe_detail_valid() {
+  local detail=$1
+  local http='^(unauthenticated probe (received the marker|got|was not positively denied)|authenticated probe did not reach the marker) [(]HTTP [0-9]{3}[)]$'
+  local transport='^(unauthenticated|authenticated) probe transport failure [(]curl-exit-[0-9]{1,3}( timing=[0-9]+[.][0-9]+(,[0-9]+[.][0-9]+){4})?[)]$'
+  case "$detail" in
+    'bad arguments'|'untrusted forwarding origin'|\
+    'github.dev sign-in redirect for unexpected forwarding origin'|\
+    'github.dev sign-in redirect without fresh private port visibility'|\
+    'github.dev sign-in redirect without confirmed private port visibility') return 0 ;;
+  esac
+  [[ ${#detail} -le 240 && ( "$detail" =~ $http || "$detail" =~ $transport ) ]]
+}
+
+c1_monitor_probe_record() { printf '%s/.%s.monitor-probe-failure' "${1%/*}" "${1##*/}"; }
+
+# Publish the first complete record outside the session directory.
+c1_record_monitor_probe_failure() {
+  local session=$1 detail=$2 record temp
+  c1_monitor_probe_detail_valid "$detail" || return 1
+  record=$(c1_monitor_probe_record "$session")
+  if [[ -f "$record" && ! -L "$record" ]]; then return 0; fi
+  temp=$(mktemp "$record.XXXXXXXX") || return 1
+  if printf '%s\n' "$detail" >"$temp" && ln -T -- "$temp" "$record" 2>/dev/null; then
+    rm -f -- "$temp"
+    return
+  fi
+  rm -f -- "$temp" || return 1
+  [[ -f "$record" && ! -L "$record" ]]
+}
+
+c1_read_monitor_probe_failure() {
+  local record detail=''
+  record=$(c1_monitor_probe_record "$1")
+  [[ -f "$record" && ! -L "$record" && -O "$record" && -r "$record" &&
+     "$(stat -c %s -- "$record")" -le 241 ]] || return 1
+  # A successful NUL-delimited read means the record contained a NUL.
+  if IFS= read -r -d '' detail <"$record"; then return 1; fi
+  [[ "$detail" == *$'\n' ]] || return 1
+  detail=${detail%$'\n'}
+  c1_monitor_probe_detail_valid "$detail" || return 1
+  printf '%s\n' "$detail"
+}
+
 # c1_teardown_novnc SESSION PORT WSPID WSSTART [REASON]
 # Shared by the monitor and the launcher's privacy gate (L-9). Writes the
 # privacy-failed marker FIRST, then TERM -> wait -> KILL (ownership-verified),
@@ -1921,7 +1966,7 @@ c1_privacy_monitor_loop() {
   local C1_PROBE_MAX_TIME=0.4 C1_MONITOR_FAST_TEARDOWN=1
   local C1_GH_READ_TIMEOUT C1_GH_EVIDENCE=cached C1_GH_CACHED_PRIVATE=0
   printf -v C1_GH_READ_TIMEOUT '%d.%03d' $(( C1_MON_GH_TIMEOUT_MS / 1000 )) $(( C1_MON_GH_TIMEOUT_MS % 1000 ))
-  local reason detail teardown_rc now gh_ok gh_next gh_started=0 gh_job='' gh_out g vis
+  local reason teardown_rc now gh_ok gh_next gh_started=0 gh_job='' gh_out g vis
   local track=${C1_MONITOR_TRACK:-0} monitor_pid=$BASHPID monitor_start tick ack
   if (( track )); then monitor_start=$(c1_proc_start "$monitor_pid") || return 2; fi
   gh_out="${TMPDIR:-/tmp}/c1-gh-monitor.$BASHPID"
@@ -1932,7 +1977,7 @@ c1_privacy_monitor_loop() {
   (( req_gh )) && C1_GH_CACHED_PRIVATE=1
   while c1_owned_pid "$ws" "$s" "$wsst"; do
     sleep "$iv"
-    reason='' detail=''
+    reason=''
     c1_now_ms now
     if (( req_gh )); then
       if [[ -n "$gh_job" && -f "$gh_out" ]]; then
@@ -1975,16 +2020,16 @@ c1_privacy_monitor_loop() {
       elif [[ $C1_PRIVACY_STATE == public ]]; then reason=public
       else reason=unverified
       fi
-      detail=$C1_PRIVACY_DETAIL
+    fi
+    if [[ "$reason" == public || "$reason" == unverified ]]; then
+      c1_record_monitor_probe_failure "$s" "$C1_PRIVACY_DETAIL" ||
+        c1_err 'could not preserve the sanitized monitor probe failure'
     fi
     # A stalled/ambiguous edge is not a positive privacy proof: fail closed on
     # its first observation. L-9: an unverifiable teardown propagates rc 2.
     teardown_rc=0
     c1_teardown_novnc "$s" "$port" "$ws" "$wsst" "$reason" || teardown_rc=2
     c1_monitor_gh_stop
-    if [[ -n "$detail" ]]; then
-      printf '%s %s\n' "$(c1_utc)" "$detail" >"$s/privacy-diagnostic" || true
-    fi
     return "$teardown_rc"
   done
   c1_monitor_gh_stop
