@@ -1755,7 +1755,8 @@ c1_teardown_novnc() {
 }
 
 c1_close_novnc() {
-  local s=$1 port=$2 ws=$3 wsst=$4 wait_steps=20 i error=0
+  local s=$1 port=$2 ws=$3 wsst=$4
+  local wait_steps=20 i error=0
   [[ "${C1_MONITOR_FAST_TEARDOWN:-}" == 1 ]] && wait_steps=5
   if [[ -e "$s/websockify-supervisor" || -L "$s/websockify-supervisor" ]]; then
     c1_close_websockify_tree "$s" "$port" "$ws" "$wsst" "$wait_steps"
