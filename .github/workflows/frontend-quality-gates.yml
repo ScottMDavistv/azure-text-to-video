@@ -98,7 +98,7 @@ jobs:
 
   c1-harness:
     name: C1 harness syntax, ShellCheck and regression suites
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
