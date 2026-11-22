@@ -1141,7 +1141,7 @@ MOCK_GH
   # guard, the mismatched-origin rejection oracle MUST fail.
   pf_signin_origin_binding_mutation() (
     local original mutated
-    original=$(declare -f c1_privacy_check)
+    original=$(declare -f c1_classify_privacy_sweep)
     [[ $original == *'unexpected forwarding origin'* ]] || return 1
     mutated=$(printf '%s\n' "$original" |
       awk 'index($0, "if [[ \"$base\" != \"$(c1_codespace_base") && $0 !~ /&&/ { drop=1 }
@@ -1221,7 +1221,7 @@ MOCK_GH
   )
   forwarding_origin_mutation() (
     local original mutated
-    original=$(declare -f c1_privacy_check)
+    original=$(declare -f c1_classify_privacy_sweep)
     mutated=$(awk 'index($0, "if [[ \"$base\" != \"$(c1_codespace_base") && !seen { drop=1; seen=1 }
       drop && /^[[:space:]]*fi;/ { drop=0; next } !drop { print }' <<<"$original")
     [[ $mutated != "$original" ]] || return 1
