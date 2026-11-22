@@ -461,7 +461,7 @@ META
 )
 
 monitor_shutdown_and_loss() (
-  local variant launcher status session_path ws worker monitor register
+  local variant launcher status session_path ws worker monitor register started closed
   cat >"$FIXTURE/monitor-launcher.sh" <<'MONITOR_FIXTURE'
 set -Eeuo pipefail
 source "$1/lib/c1-lib.sh"
@@ -476,6 +476,7 @@ trap '
     printf "desktop worker survived until launcher signal\n" >&2
     exit 2
   fi
+  c1_monitor_tick >"$fixture/$variant.closed"
   exit 130
 ' TERM
 c1_start_watchdog "$root" "$session_path" "$$" "$1/lib/c1-lib.sh"
@@ -518,7 +519,10 @@ MONITOR_FIXTURE
     read -r worker <"$FIXTURE/$variant.worker" || return 1
     case "$variant" in
       exited) kill -TERM "$monitor" || return 1 ;;
-      stalled) kill -STOP "$monitor" || return 1 ;;
+      stalled)
+        started=$(c1_monitor_tick) || return 1
+        kill -STOP "$monitor" || return 1
+        ;;
     esac
     status=0
     wait "$launcher" || status=$?
@@ -528,6 +532,10 @@ MONITOR_FIXTURE
       [[ "$status" == 130 ]] || return 1
       register=$(c1_privacy_register "$session_path")
       grep -q ' monitor-unhealthy$' "$register" || return 1
+      if [[ "$variant" == stalled ]]; then
+        read -r closed <"$FIXTURE/$variant.closed" || return 1
+        (( 10#$closed >= 10#$started && 10#$closed - 10#$started <= 250 )) || return 1
+      fi
     fi
     [[ ! -e "$session_path" ]] && ! kill -0 "$ws" 2>/dev/null && ! kill -0 "$worker" 2>/dev/null || return 1
   done

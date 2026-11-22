@@ -1639,12 +1639,44 @@ monitor_slow_authenticated_probe() {
     printf '%s\n' "$5" >"$1/privacy-failed"
   }
   local before=$EPOCHREALTIME rc=0 elapsed
-  c1_privacy_monitor_loop "$d" https://example.invalid "$d/header" 98765 1 '' 0.2 6080 0 || rc=$?
+  c1_privacy_monitor_loop "$d" https://localhost:6080 "$d/header" 98765 1 fixture-ca 0.2 6080 0 || rc=$?
   elapsed=$(awk -v start="$before" -v stop="$EPOCHREALTIME" 'BEGIN { print stop - start }')
   (( rc == 0 )) && [[ "$(cat "$d/privacy-failed")" == unverified ]] &&
     awk -v t="$elapsed" 'BEGIN { exit !(t <= 2.5) }'
 }
 t 'L-6: slow authentication probes fail closed and finish teardown within 2.5 s' monitor_slow_authenticated_probe
+
+monitor_parallel_probe_pair() (
+  local fixture="$TMP/parallel-privacy" denial=403
+  local C1_GH_EVIDENCE=cached C1_PROBE_MAX_TIME=0.4 C1_MONITOR_AUTH_TIMEOUT=1.0
+  mkdir -p "$fixture" || return 1
+  printf '%s\n' fixture >"$fixture/header"
+  c1_https_probe() {
+    if [[ -n "$3" ]]; then
+      [[ "$C1_PROBE_MAX_TIME" == 1.0 ]] || return 1
+      printf '%s\n' 'fixture-marker' >"$2"
+      : >"$fixture/auth-started"
+      printf '%s' 200
+    else
+      [[ "$C1_PROBE_MAX_TIME" == 0.4 ]] || return 1
+      local i
+      for (( i=0; i<40; i++ )); do
+        [[ -f "$fixture/auth-started" ]] && break
+        sleep 0.01
+      done
+      [[ -f "$fixture/auth-started" ]] || return 1
+      : >"$2"
+      printf '%s' "$denial"
+    fi
+  }
+  c1_privacy_check https://localhost:6080 /fixture fixture-marker "$fixture/header" fixture-ca &&
+    [[ "$C1_PRIVACY_STATE" == private ]] || return 1
+  rm -f -- "$fixture/auth-started"
+  denial=503
+  if c1_privacy_check https://localhost:6080 /fixture fixture-marker "$fixture/header" fixture-ca; then return 1; fi
+  [[ "$C1_PRIVACY_STATE" == unverified ]]
+)
+t 'L-6: parallel probe pair requires both denial and authenticated proof' monitor_parallel_probe_pair
 
 # ---- R-1: budgeted, freshness-bounded gh read-back in the privacy monitor ----
 # The real monitor loop runs with a stub gh (call log, latency, concurrency

@@ -1618,8 +1618,7 @@ c1_codespaces_pf_signin_redirect() {
 # (and C1_PRIVACY_DETAIL to a short, token-free reason). Private requires BOTH a
 # positive unauthenticated denial AND an authenticated 200 carrying the marker.
 c1_privacy_check() {
-  local base=$1 path=$2 marker=$3 hdr=$4 ca=${5:-} f code loc
-  local transport='^curl-exit-[0-9]{1,3}( timing=[0-9]+[.][0-9]+(,[0-9]+[.][0-9]+){4})?$'
+  local base=$1 path=$2 marker=$3 hdr=$4 ca=${5:-} probes auth_fd= auth_started= result rc=0
   C1_PRIVACY_STATE=unverified C1_PRIVACY_DETAIL='bad arguments'
   C1_PRIVACY_GH_PRIVATE=0
   [[ -n "$base" && -n "$marker" && -s "$hdr" ]] || return 1
@@ -1629,22 +1628,39 @@ c1_privacy_check() {
     ! [[ -n "$ca" && "$base" =~ ^https://localhost:[0-9]{1,5}$ ]]; then
     C1_PRIVACY_DETAIL='untrusted forwarding origin'; return 1
   fi
-  f=$(mktemp "${TMPDIR:-/tmp}/c1probe.XXXXXXXX") || return 1
-  read -r code loc <<<"$(c1_https_probe "$base$path" "$f" "" "$ca")" || true
+  probes=$(mktemp -d "${TMPDIR:-/tmp}/c1probe.XXXXXXXX") || return 1
+  if [[ "$C1_GH_EVIDENCE" == cached && -n "${C1_MONITOR_AUTH_TIMEOUT:-}" ]]; then
+    # The origin was verified above. Start the authenticated half now, but
+    # require anonymous denial and a matching marker before accepting privacy.
+    auth_started=$(c1_monitor_tick) || { rm -rf -- "$probes"; return 1; }
+    exec {auth_fd}< <(result=$(C1_PROBE_MAX_TIME=$C1_MONITOR_AUTH_TIMEOUT \
+      c1_https_probe "$base$path" "$probes/auth" "$hdr" "$ca")
+      printf '%s\n' "$result") || { rm -rf -- "$probes"; return 1; }
+  fi
+  c1_classify_privacy_sweep "$base" "$path" "$marker" "$hdr" "$ca" "$probes" "$auth_fd" "$auth_started" || rc=$?
+  if [[ -n "$auth_fd" ]]; then exec {auth_fd}<&-; fi
+  rm -rf -- "$probes"
+  return "$rc"
+}
+
+c1_classify_privacy_sweep() {
+  local base=$1 path=$2 marker=$3 hdr=$4 ca=$5 probes=$6 auth_fd=$7 auth_started=$8 code loc now remaining wait_time
+  local transport='^curl-exit-[0-9]{1,3}( timing=[0-9]+[.][0-9]+(,[0-9]+[.][0-9]+){4})?$'
+  read -r code loc <<<"$(c1_https_probe "$base$path" "$probes/anon" "" "$ca")" || true
   code=${code:-000}
-  if grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe received the marker (HTTP $code)"; rm -f "$f"; return 1; fi
+  if grep -qF -- "$marker" "$probes/anon"; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe received the marker (HTTP $code)"; return 1; fi
   # Any 2xx to an unauthenticated client is treated as exposure (fail closed).
-  if [[ "$code" == 2?? ]]; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe got HTTP $code"; rm -f "$f"; return 1; fi
+  if [[ "$code" == 2?? ]]; then C1_PRIVACY_STATE=public C1_PRIVACY_DETAIL="unauthenticated probe got HTTP $code"; return 1; fi
   if [[ "$code" == 000 && "$loc" =~ $transport ]]; then
     C1_PRIVACY_DETAIL="unauthenticated probe transport failure ($loc)"
-    rm -f "$f"; return 1
+    return 1
   fi
   if c1_codespaces_pf_signin_redirect "$code" "${loc:-}"; then
     # Bind the independently checked port visibility to the exact forwarding
     # origin under probe; never let a private 6080 attest to a different URL.
     if [[ "$base" != "$(c1_codespace_base "$C1_NOVNC_PORT")" ]]; then
       C1_PRIVACY_DETAIL='github.dev sign-in redirect for unexpected forwarding origin'
-      rm -f "$f"; return 1
+      return 1
     fi
     # This specific redirect is accepted only alongside independently verified
     # current Private visibility; gh failure, org/public, or missing evidence
@@ -1654,24 +1670,38 @@ c1_privacy_check() {
     if [[ "$C1_GH_EVIDENCE" == cached ]]; then
       if [[ "$C1_GH_CACHED_PRIVATE" != 1 ]]; then
         C1_PRIVACY_DETAIL='github.dev sign-in redirect without fresh private port visibility'
-        rm -f "$f"; return 1
+        return 1
       fi
     elif ! c1_gh_private "$C1_NOVNC_PORT"; then
       C1_PRIVACY_DETAIL='github.dev sign-in redirect without confirmed private port visibility'
-      rm -f "$f"; return 1
+      return 1
     fi
     C1_PRIVACY_GH_PRIVATE=1
   elif ! c1_unauth_denied "$code" "${loc:-}"; then
-    C1_PRIVACY_DETAIL="unauthenticated probe was not positively denied (HTTP $code)"; rm -f "$f"; return 1
+    C1_PRIVACY_DETAIL="unauthenticated probe was not positively denied (HTTP $code)"; return 1
   fi
-  read -r code loc <<<"$(c1_https_probe "$base$path" "$f" "$hdr" "$ca")" || true
-  if [[ "${code:-}" == 200 ]] && grep -qF -- "$marker" "$f"; then C1_PRIVACY_STATE=private C1_PRIVACY_DETAIL='denied unauthenticated; authenticated probe reached the marker'; rm -f "$f"; return 0; fi
+  if [[ -n "$auth_fd" ]]; then
+    # A complete line is published only after the authenticated probe
+    # finishes. A partial read or missing result is never positive evidence.
+    now=$(c1_monitor_tick) || return 1
+    remaining=$(( 100 - (10#$now - 10#$auth_started) ))
+    code=000 loc=''
+    if (( remaining > 0 && remaining <= 100 )); then
+      printf -v wait_time '%d.%02d' "$((remaining / 100))" "$((remaining % 100))"
+      if ! read -r -t "$wait_time" -u "$auth_fd" code loc; then
+        code=000 loc='curl-exit-28'
+      fi
+    fi
+  else
+    read -r code loc <<<"$(c1_https_probe "$base$path" "$probes/auth" "$hdr" "$ca")" || true
+  fi
+  if [[ "${code:-}" == 200 ]] && grep -qF -- "$marker" "$probes/auth"; then C1_PRIVACY_STATE=private C1_PRIVACY_DETAIL='denied unauthenticated; authenticated probe reached the marker'; return 0; fi
   if [[ "$code" == 000 && "$loc" =~ $transport ]]; then
     C1_PRIVACY_DETAIL="authenticated probe transport failure ($loc)"
   else
     C1_PRIVACY_DETAIL="authenticated probe did not reach the marker (HTTP ${code:-000})"
   fi
-  rm -f "$f"; return 1
+  return 1
 }
 
 c1_nonce() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
@@ -1862,7 +1892,9 @@ c1_monitor_healthy() {
   IFS= read -r tick <"$s/monitor-beat" || return 1
   [[ "$tick" =~ ^[0-9]{1,12}$ ]] || return 1
   now=$(c1_monitor_tick) || return 1
-  (( 10#$now >= 10#$tick && 10#$now - 10#$tick <= 300 )) || return 1
+  # This watchdog lease leaves time for its poll and supervisor teardown
+  # within the 2.5-second target even if the monitor stops mid-request.
+  (( 10#$now >= 10#$tick && 10#$now - 10#$tick <= 150 )) || return 1
   [[ "$(c1_owner_status "$pid" "$start")" == active ]] && c1_owned_pid "$pid" "$s" "$start"
 }
 
@@ -1962,9 +1994,10 @@ c1_now_ms() { local t=${EPOCHREALTIME//[!0-9]/}; printf -v "$1" '%s' "$(( 10#$t 
 # budget above, so a slow gh never pauses the HTTPS sweeps.
 c1_privacy_monitor_loop() {
   local s=$1 base=$2 hdr=$3 ws=$4 wsst=$5 ca=${6:-} iv=${7:-0.2} port=${8:-$C1_NOVNC_PORT} req_gh=${9:-0}
-  # HTTPS sweeps stay fast: at most two 0.4 s probes per sweep. Teardown gets
-  # up to 1 s of signal grace.
+  # The monitor starts both HTTPS probes together. Anonymous denial has
+  # 400 ms, authenticated proof has 1 s, and either failure closes noVNC.
   local C1_PROBE_MAX_TIME=0.4 C1_MONITOR_FAST_TEARDOWN=1
+  local C1_MONITOR_AUTH_TIMEOUT=1.0
   local C1_GH_READ_TIMEOUT C1_GH_EVIDENCE=cached C1_GH_CACHED_PRIVATE=0
   printf -v C1_GH_READ_TIMEOUT '%d.%03d' $(( C1_MON_GH_TIMEOUT_MS / 1000 )) $(( C1_MON_GH_TIMEOUT_MS % 1000 ))
   local reason teardown_rc now gh_ok gh_next gh_started=0 gh_job='' gh_out g vis
