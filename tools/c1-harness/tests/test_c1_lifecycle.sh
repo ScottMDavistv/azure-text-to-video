@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034  # Fixture variables are consumed by extracted entry points.
-# Real launcher/cleaner processes with local fixtures and no sockets or credentials.
+# Real launcher/cleaner processes with local-only fixtures and inert credentials.
 set -Eeuo pipefail
 umask 077
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -494,6 +494,10 @@ from pathlib import Path
 
 with socket.socket() as listener:
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # The exposure bound starts before bind, not before the supervisor's
+    # non-listening acknowledgment wait. Use the same kernel monotonic clock.
+    tick = Path("/proc/uptime").read_text().split()[0].replace(".", "")
+    Path(sys.argv[1] + ".bound").write_text(tick + "\n", encoding="ascii")
     listener.bind(("127.0.0.1", int(sys.argv[2])))
     listener.listen()
     child = os.fork()
@@ -520,7 +524,7 @@ ws_start=$(c1_proc_start "$ws")
 while [[ ! -s "$fixture/$variant.worker" ]]; do sleep 0.02; done
 read -r worker <"$fixture/$variant.worker"
 if [[ "$variant" == startup ]]; then
-  read -r _ _ started <"$session_path/startup"
+  read -r started <"$fixture/$variant.worker.bound"
   printf '%s\n' "$started" >"$fixture/$variant.started"
   printf '%s %s %s\n' "$session_path" "$ws" 0 >"$fixture/$variant.ready"
   while :; do sleep 0.05; done
@@ -598,11 +602,13 @@ MONITOR_FIXTURE
         exec {C1_STATE_LOCK_FD}>&-
         wait "$launcher" || true
         for ((step=0; step<150; step++)); do
-          [[ -e "$session_path" ]] || break
+          if [[ ! -e "$session_path" && ! -e "$STATE/active" ]] &&
+             ! kill -0 "$owner" 2>/dev/null && ! kill -0 "$worker" 2>/dev/null; then break; fi
           sleep 0.02
         done
         (( verified && 10#$closed >= 10#$started && 10#$closed - 10#$started <= 250 )) || return 1
-        [[ ! -e "$session_path" && ! -e "$STATE/active" ]] || return 1
+        [[ ! -e "$session_path" && ! -e "$STATE/active" ]] &&
+          ! kill -0 "$owner" 2>/dev/null && ! kill -0 "$worker" 2>/dev/null || return 1
         printf 'Launcher loss to verified worker reaping and port closure: %d ms\n' "$(( (10#$closed - 10#$started) * 10 ))"
         continue
         ;;
@@ -624,6 +630,7 @@ MONITOR_FIXTURE
       if [[ "$variant" != exited ]]; then
         read -r closed <"$FIXTURE/$variant.closed" || return 1
         (( 10#$closed >= 10#$started && 10#$closed - 10#$started <= 250 )) || return 1
+        printf '%s to verified reaping and port closure: %d ms\n' "$variant" "$(( (10#$closed - 10#$started) * 10 ))"
       fi
     fi
     [[ ! -e "$session_path" ]] && ! kill -0 "$ws" 2>/dev/null && ! kill -0 "$worker" 2>/dev/null || return 1
@@ -750,11 +757,199 @@ harness_head_drift() (
   done
 )
 
+
+# No actual desktop or external forwarding: the normal launcher function,
+# startup guard, supervisor, listener checks, monitor and cleanup all run.
+# Only unavailable display/forwarding boundaries are inert local fixtures.
+guarded_delayed_startup() (
+  local variant status
+  cp "$BASE/lib/"{c1-lib.sh,c1-supervisor.py} "$FIXTURE/"
+  cat >>"$FIXTURE/c1-lib.sh" <<'BOUNDARIES'
+c1_gh_visibility() { printf 'private\n'; }
+c1_https_probe() {
+  local url=$1 output=$2 hdr=${3:-} s=${TMPDIR%/tmp}
+  : >"$output"
+  if [[ -z "$hdr" ]]; then
+    sleep 0.1  # bounded local forwarding latency
+    printf 'anonymous\n' >>"$s/probes"
+    if [[ -e "$s/deny-preflight" ]]; then printf '503\n'; else printf '403\n'; fi
+  else
+    sleep 0.3
+    printf 'authenticated\n' >>"$s/probes"
+    if [[ -e "$s/deny-monitor" && "$url" == */vnc.html ]]; then printf '503\n'
+    else printf '%s\n' "$C1_NOVNC_SIGNATURE" >"$output"; printf '200\n'; fi
+  fi
+}
+c1_start_display_vnc() { c1_port_free "$C1_NOVNC_PORT"; }
+c1_verify_private_with_decoy() {
+  c1_port_free "$2" &&
+    c1_privacy_check "$3" /preflight "$C1_NOVNC_SIGNATURE" "$4" &&
+    touch "$1/prechecked"
+}
+c1_cmd_websockify() {
+  printf '%s\n' python3 -I "${TMPDIR%/tmp}/worker.py" "$2" "$1"
+}
+BOUNDARIES
+  cat >"$FIXTURE/start.sh" <<'START'
+set -Eeuo pipefail
+harness=$1 fixture=$2 variant=$3
+source "$fixture/c1-lib.sh"
+eval "$(sed -n '/^start_private_desktop() {$/,/^}$/p; /^fail_desktop() {$/,/^}$/p' "$harness/c1-session.sh")"
+root="$fixture/state-$variant"
+c1_lock_state "$root"
+S=$(c1_session_new "$root" "$$")
+export C1_HARNESS_SESSION=$S TMPDIR="$S/tmp"
+export CODESPACE_NAME=c1-offline-fixture GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN=app.github.dev
+export GITHUB_TOKEN=INERT_LOCAL_FIXTURE_TOKEN UNEXPECTED_DESKTOP_SECRET=must-not-inherit
+LIB="$fixture/c1-lib.sh" PORT_PRIVATE=unverified WS='' WSST='' MONITOR_PID='' MONITOR_START=''
+finish() {
+  local rc=$?
+  trap - EXIT
+  trap '' INT TERM HUP  # Match the launcher's non-interruptible cleanup trap.
+  cp "$S/probes" "$fixture/$variant.probes" 2>/dev/null || true
+  [[ ! -e "$S/worker-started" ]] || cp "$S/worker-started" "$fixture/$variant.worker"
+  c1_cleanup_launcher "$root" "$S" || rc=90
+  c1_verify_cleanup "$S" || rc=91
+  if [[ -f "$(c1_privacy_register "$S")" ]]; then
+    cp "$(c1_privacy_register "$S")" "$fixture/$variant.privacy.log"
+  fi
+  [[ ! -e "$S" && ! -e "$root/active" ]] && c1_port_free "$C1_NOVNC_PORT" || rc=92
+  printf '%s\n' "$S" >"$fixture/$variant.cleaned"
+  exit "$rc"
+}
+trap finish EXIT
+trap 'exit 130' TERM
+[[ "$variant" != deny-preflight ]] || touch "$S/deny-preflight"
+[[ "$variant" != deny-monitor ]] || touch "$S/deny-monitor"
+[[ "$variant" != never-listens ]] || touch "$S/never-listens"
+cp "$fixture/worker.py" "$S/worker.py"
+c1_start_watchdog "$root" "$S" "$$" "$LIB"
+if start_private_desktop INERT_PASSWORD; then
+  [[ "$variant" == success && "$PORT_PRIVATE" == verified-probe-gh ]] || exit 10
+  [[ -s "$S/worker-started" && -f "$S/startup-watched" && -f "$S/monitor-watched" ]] || exit 11
+  grep -qx anonymous "$S/probes" && grep -qx authenticated "$S/probes" || exit 12
+  c1_monitor_healthy "$S" "$MONITOR_PID" "$MONITOR_START" || exit 13
+  c1_stop_privacy_monitor "$S" "$MONITOR_PID" "$MONITOR_START" || exit 14
+  c1_port_free "$C1_NOVNC_PORT" && ! c1_privacy_failed "$S" || exit 15
+else
+  [[ "$variant" != success ]] || exit 16
+  if [[ "$variant" == deny-preflight ]]; then
+    [[ ! -e "$S/startup" && ! -e "$S/worker-started" ]] || exit 17
+  else
+    c1_privacy_failed "$S" && c1_port_free "$C1_NOVNC_PORT" || exit 18
+  fi
+fi
+START
+  cat >"$FIXTURE/worker.py" <<'WORKER'
+import os
+import signal
+import socket
+import sys
+import time
+from pathlib import Path
+
+session = Path(sys.argv[1])
+# Simulate a cold Python/websockify import before binding. No exposure exists.
+time.sleep(8.0 if (session / "never-listens").exists() else 2.0)
+assert (session / "prechecked").is_file()
+assert (session / "startup-watched").is_file()
+assert os.environ.get("C1_GUARD_STARTUP") == "1"
+assert "GITHUB_TOKEN" not in os.environ
+assert "UNEXPECTED_DESKTOP_SECRET" not in os.environ
+assert any(line.split()[0] == str(os.getppid())
+           for line in (session / "supervisors").read_text().splitlines())
+with socket.socket() as listener:
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", int(sys.argv[2])))
+    listener.listen()
+    (session / "worker-started").write_text(f"{os.getpid()}\n")
+    signal.pause()
+WORKER
+  for variant in success deny-preflight deny-monitor never-listens; do
+    status=0
+    timeout -k 4s 25s bash "$FIXTURE/start.sh" "$BASE" "$FIXTURE" "$variant" \
+      >"$FIXTURE/$variant.log" 2>&1 || status=$?
+    [[ -s "$FIXTURE/$variant.cleaned" ]] || { printf '%s: missing cleanup, exit %s\n' "$variant" "$status" >&2; return 1; }
+    if [[ "$variant" == never-listens ]]; then
+      [[ "$status" == 130 && ! -e "$FIXTURE/$variant.worker" ]] || return 1
+      local cleaned
+      read -r cleaned <"$FIXTURE/$variant.cleaned" || return 1
+      grep -q ' startup-timeout$' "$(c1_privacy_register "$cleaned")" || return 1
+      continue
+    fi
+    [[ "$status" == 0 ]] || { printf '%s: exit %s\n' "$variant" "$status" >&2; return 1; }
+    if [[ "$variant" == deny-preflight ]]; then
+      [[ ! -e "$FIXTURE/$variant.worker" ]] || return 1
+    else
+      local worker
+      read -r worker <"$FIXTURE/$variant.worker" || return 1
+      ! kill -0 "$worker" 2>/dev/null || return 1
+    fi
+  done
+)
+
+# A verified stop can complete between the watchdog's acknowledgment and
+# health reads. Only the exact monitor acknowledgment may suppress teardown.
+monitor_stop_ack_race() (
+  source "$BASE/lib/c1-lib.sh"
+  local session="$STATE/session.ack" checks=0
+  mkdir "$session" || return 1
+  printf '11 31 12 32\n' >"$session/monitor-required"
+  c1_owner_status() { printf 'active\n'; }
+  c1_monitor_stopped() { checks=$((checks + 1)); (( checks > 1 )); }
+  c1_monitor_healthy() { return 1; }
+  c1_teardown_novnc() { touch "$FIXTURE/unexpected-teardown"; }
+  c1_active_matches() { return 1; }
+  c1_marked_pids() { :; }
+  sleep() { rm -rf -- "$session"; }
+  c1_watchdog_loop "$STATE" "$session" 13 33 || return 1
+  [[ "$checks" == 2 && ! -e "$FIXTURE/unexpected-teardown" ]]
+)
+
+drain_timeout_evidence() (
+  source "$BASE/lib/c1-lib.sh"
+  local session="$STATE/session.timeout" register C1_CLOSE_DEADLINE=150
+  mkdir "$session" || return 1
+  printf '11 31 12 32\n' >"$session/websockify-supervisor"
+  printf '12 32\n' >"$session/supervisors"
+  # Inert identities, no process, no listener. Clock is already past the
+  # caller's drain deadline; termination must still be requested, but late
+  # reaping and positive port closure must never turn timeout into success.
+  c1_monitor_tick() { printf '151\n'; }
+  c1_signal_owned() { [[ "$*" == "USR1 12 $session 32" ]]; }
+  c1_port_free() { return 0; }
+  printf '12 32\n' >"$(c1_reaped_register "$session")"
+  if c1_teardown_novnc "$session" 6080 11 31 monitor-unhealthy; then return 1; fi
+  [[ "$C1_CLOSE_DEADLINE" == 150 ]] || return 1
+  register=$(c1_privacy_register "$session") || return 1
+  grep -q ' teardown-failed$' "$register" || return 1
+  # Remove only inert identity fixtures before exercising real cleanup.
+  rm -- "$session/supervisors" "$session/websockify-supervisor" "$(c1_reaped_register "$session")"
+  c1_cleanup_session "$STATE" "$session" && c1_verify_cleanup "$session" || return 1
+  [[ ! -e "$session" && -s "$register" ]] &&
+    grep -q ' teardown-failed$' "$register" && c1_privacy_failed "$session"
+)
+
 run_case() {
   BASE=$1 FIXTURE=$(mktemp -d "$TMP/case.XXXXXXXX")
   STATE="$FIXTURE/state"
   mkdir -m 700 "$STATE"
   "$2"
+}
+
+# Negative lifecycle cases can return while their watchdog completes cleanup.
+# This is test isolation AFTER timing assertions, never extra drain time for
+# the product. Do not let a busy port make the next mutant fail spuriously.
+wait_for_fixture_port_release() {
+  local now deadline
+  now=$(c1_monitor_tick) || return 1
+  deadline=$((10#$now + 1000))
+  while c1_deadline_remaining "$deadline" >/dev/null; do
+    c1_port_free "$C1_NOVNC_PORT" && return 0
+    sleep 0.05
+  done
+  printf 'FAIL: prior fixture still owns the test port\n' >&2
+  return 1
 }
 
 # Mutate temporary copies only. Each mutation must violate the same oracle
@@ -771,7 +966,9 @@ if [[ "${1:-}" == --mutations ]]; then
     'signal_identity_checks_start_time:signal-identity' \
     'r11_exit_status_and_late_privacy:trap-status' 'r11_exit_status_and_late_privacy:monitor-stop' \
     'websockify_reaping_ack:port-only' 'harness_head_drift:harness-drift' \
-    'monitor_shutdown_and_loss:launcher-loss-drain'; do
+    'monitor_shutdown_and_loss:launcher-loss-drain' \
+    'guarded_delayed_startup:startup-guard' 'guarded_delayed_startup:cold-start-budget' \
+    'drain_timeout_evidence:drain-deadline' 'monitor_stop_ack_race:stop-ack-race'; do
     case_name=${spec%:*} mutation=${spec#*:}
     mutant=$(mktemp -d "$TMP/mutant.XXXXXXXX")
     mkdir "$mutant/lib"
@@ -803,22 +1000,40 @@ if [[ "${1:-}" == --mutations ]]; then
       signal-identity) sed -i '/if fields\[19\] == start.encode():/d; /signal.pidfd_send_signal(fd/s/^        /    /' "$mutant/lib/c1-lib.sh" ;;
       trap-status) sed -i '/rm -f -- "\$root\/active"$/{n;s/return "\$?"/return/;}' "$mutant/lib/c1-lib.sh" ;;
       monitor-stop) sed -i '/monitor_shutdown="FAIL (exit \$?)"/{n;/PORT_PRIVATE=failed/d;}' "$mutant/c1-session.sh" ;;
-      port-only) sed -i '/^    if .*"\$reg".*c1_port_free/s/^    if .*c1_port_free/    if c1_port_free/' "$mutant/lib/c1-lib.sh" ;;
+      stop-ack-race) sed -i '/! c1_monitor_stopped .*; then/s/! c1_monitor_stopped .*; then/true; then/' "$mutant/lib/c1-lib.sh" ;;
+      cold-start-budget) sed -i 's/startup_tick + 500/startup_tick + 150/' "$mutant/lib/c1-lib.sh" ;;
+      startup-guard) sed -i 's/WS=$(C1_GUARD_STARTUP=1 /WS=$(C1_GUARD_STARTUP=0 /' "$mutant/c1-session.sh" ;;
+      drain-deadline) sed -i '/c1_deadline_remaining "\$C1_CLOSE_DEADLINE" >\/dev\/null || return 1/d; s/ \&\& c1_deadline_remaining "\$C1_CLOSE_DEADLINE" >\/dev\/null; then/; then/' "$mutant/lib/c1-lib.sh" ;;
+      port-only) sed -i '/^    if .*"\$reg".*grep -Fxq/c\    if' "$mutant/lib/c1-lib.sh" ;;
       harness-drift) sed -i '/^  c1_verify_harness_head .*HARNESS_CLEAN=false/d' "$mutant/c1-session.sh" ;;
       launcher-loss-drain) sed -i '/if \[\[ "\$launcher_state" == stale \&\& -n "\$startup_pid" \]\]; then/,/^    fi$/d' "$mutant/lib/c1-lib.sh" ;;
       watchdog)
         sed -i '/c1_signal_identity TERM "\$owner"/i\      c1_cleanup_session "$root" "$session"' "$mutant/lib/c1-lib.sh"
         ;;
     esac
+    if cmp -s "$HERE/lib/c1-lib.sh" "$mutant/lib/c1-lib.sh" &&
+       cmp -s "$HERE/c1-session.sh" "$mutant/c1-session.sh" &&
+       cmp -s "$HERE/lib/c1-evidence.mjs" "$mutant/lib/c1-evidence.mjs"; then
+      printf 'FAIL: %s transformation changed no fixture\n' "$mutation" >&2
+      exit 1
+    fi
+    bash -n "$mutant/lib/c1-lib.sh" "$mutant/c1-session.sh" || exit 1
+    wait_for_fixture_port_release || exit 1
+    if ! run_case "$HERE" "$case_name"; then
+      printf 'FAIL: unmodified baseline for %s (%s)\n' "$mutation" "$case_name" >&2
+      exit 1
+    fi
+    wait_for_fixture_port_release || exit 1
     if run_case "$mutant" "$case_name"; then
       printf 'FAIL: %s mutation escaped %s\n' "$mutation" "$case_name" >&2
       exit 1
     fi
-    printf 'DETECTED: %s by %s\n' "$mutation" "$case_name"
+    printf 'DETECTED: %s by %s (baseline passed)\n' "$mutation" "$case_name"
+    wait_for_fixture_port_release || exit 1
   done
 else
   for case_name in competing_launchers overlapping_cleaners malformed_active retained_privacy_failure reused_owner watchdog_waits_for_launcher r11_exit_status_and_late_privacy launcher_crash_recovery active_publication_preserves_owner verification_is_retried \
-    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss websockify_reaping_ack monitor_probe_failure_evidence harness_head_drift; do
+    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss websockify_reaping_ack monitor_probe_failure_evidence harness_head_drift guarded_delayed_startup drain_timeout_evidence monitor_stop_ack_race; do
     if ! run_case "$HERE" "$case_name"; then
       printf 'FAIL: %s\n' "$case_name" >&2
       for log in "$FIXTURE"/*.log; do [[ ! -f "$log" ]] || cat "$log" >&2; done

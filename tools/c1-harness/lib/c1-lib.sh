@@ -2144,6 +2144,7 @@ c1_watchdog_loop() {
   local root=$1 session=$2 owner=$3 owner_start=$4 sent=0 register launcher_state
   local monitor='' monitor_start websockify websockify_start extra
   local startup_pid='' startup_start startup_tick beat now
+  local startup_last_closed='' startup_exposure='' startup_deadline startup_close_deadline
   local C1_MONITOR_FAST_TEARDOWN=1 C1_CLOSE_DEADLINE
   register=$(c1_privacy_register "$session")
   while :; do
@@ -2176,8 +2177,32 @@ c1_watchdog_loop() {
         grep -Fxq -- "$startup_pid $startup_start" "$session/supervisors" || return 1
         (set -o noclobber; : >"$session/startup-watched") || return 1
       fi
-      if ! c1_deadline_remaining "$((10#$startup_tick + 150))" >/dev/null; then
-        C1_CLOSE_DEADLINE=$((10#$startup_tick + 250))
+      # Import/initialization may take seconds, but cannot expose a desktop
+      # while the port is positively closed. Never extend the exposure lease:
+      # its origin is the LAST closed observation, not the first open one.
+      # Unknown port state counts as exposure and never resets this lease.
+      now=$(c1_monitor_tick) || return 1
+      if [[ -z "$startup_exposure" ]]; then
+        if c1_port_free "$C1_NOVNC_PORT"; then
+          startup_last_closed=$now
+        else
+          startup_exposure=${startup_last_closed:-$startup_tick}
+        fi
+      fi
+      if [[ -n "$startup_exposure" ]]; then
+        # Initial arming includes listener inventory, monitor spawn and its
+        # first bounded private sweep. Give it 2s of the SAME 2.5s total
+        # exposure budget; reserve the final 0.5s for identity-checked drain.
+        # Steady-state heartbeat and probe deadlines remain unchanged.
+        startup_deadline=$((10#$startup_exposure + 200))
+        startup_close_deadline=$((10#$startup_exposure + 250))
+      else
+        # Separate bounded, non-listening readiness phase (same 5s as launcher).
+        startup_deadline=$((10#$startup_tick + 500))
+        startup_close_deadline=$((startup_deadline + 100))
+      fi
+      if ! c1_deadline_remaining "$startup_deadline" >/dev/null; then
+        C1_CLOSE_DEADLINE=$startup_close_deadline
         c1_record_privacy_failure "$session" startup-timeout || true
         c1_close_supervisor "$session" "$C1_NOVNC_PORT" "$startup_pid" "$startup_start" 10 ||
           c1_record_privacy_failure "$session" teardown-failed || true
@@ -2196,7 +2221,10 @@ c1_watchdog_loop() {
     fi
     if [[ "$launcher_state" == active && "$sent" == 0 && -n "$monitor" && -d "$session" ]] &&
        ! c1_monitor_stopped "$session" "$monitor" "$monitor_start" &&
-       ! c1_monitor_healthy "$session" "$monitor" "$monitor_start"; then
+       ! c1_monitor_healthy "$session" "$monitor" "$monitor_start" &&
+       ! c1_monitor_stopped "$session" "$monitor" "$monitor_start"; then
+      # Recheck the identity-bound stop acknowledgment after the health read:
+      # the monitor may have completed verified draining and exited meanwhile.
       # Close the listener before signalling the launcher, whose foreground
       # Playwright process may delay its TERM trap.
       now=$(c1_monitor_tick) || return 1
@@ -2221,7 +2249,12 @@ c1_watchdog_loop() {
       c1_signal_identity TERM "$owner" "$owner_start" || return 1
       sent=1
     fi
-    sleep 0.25
+    if [[ -n "$startup_pid" && -z "$monitor" && "$sent" == 0 ]]; then
+      # Prompt arming/timeout observation preserves the reserved drain budget.
+      sleep 0.05
+    else
+      sleep 0.25
+    fi
   done
 }
 

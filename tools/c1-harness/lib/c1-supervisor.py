@@ -136,6 +136,9 @@ def main(argv):
             with open("/proc/uptime", encoding="ascii") as uptime:
                 return int(uptime.read().split()[0].replace(".", ""))
 
+        # This is the watchdog acknowledgment deadline, before fork. Slow
+        # command initialization is separately bounded by the watchdog using
+        # positive closed-port evidence; it never extends the exposure lease.
         started = tick()
         with open(os.path.join(session, "startup.tmp"), "x", encoding="ascii") as record:
             record.write(f"{me} {my_start} {started}\n")
