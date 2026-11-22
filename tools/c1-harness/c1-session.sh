@@ -258,25 +258,20 @@ start_private_desktop() {
   # still demands GitHub sign-in, so only gh can see a later change to it).
   REQ_GH=0
   if [[ "$vis" == private || "$C1_PRIVACY_GH_PRIVATE" == 1 ]]; then REQ_GH=1; fi
+  # Complete the live visibility read before the listener can start.
+  if (( REQ_GH )) && ! c1_gh_private "$C1_NOVNC_PORT"; then
+    c1_err 'gh no longer confirms private port visibility'
+    PORT_PRIVATE=failed
+    return 1
+  fi
   local wrc=0
-  WS=$(c1_start_websockify "$S" "$C1_NOVNC_PORT") || wrc=$?
+  WS=$(C1_GUARD_STARTUP=1 c1_start_websockify "$S" "$C1_NOVNC_PORT") || wrc=$?
   if (( wrc )); then
     WS=''
     (( wrc != 2 )) || { c1_err 'noVNC teardown could not be verified; aborting the session (full cleanup and verification follow)'; exit 4; }
     PORT_PRIVATE=failed; return 1
   fi
   WSST=$(c1_proc_start "$WS"); [[ -n "$WSST" ]] || { fail_desktop websockify-start; return 1; }
-  if ! c1_verify_private_novnc "$BASE" "$HDR"; then
-    c1_err "noVNC privacy re-check failed ($C1_PRIVACY_STATE: $C1_PRIVACY_DETAIL)"
-    fail_desktop "$C1_PRIVACY_STATE"; return 1
-  fi
-  # The real endpoint can switch to the GitHub sign-in redirect after the
-  # decoy. Carry its successful private read-back into the monitor policy.
-  if [[ "$C1_PRIVACY_GH_PRIVATE" == 1 ]]; then REQ_GH=1; fi
-  if (( REQ_GH )) && ! c1_gh_private "$C1_NOVNC_PORT"; then
-    c1_err "gh no longer reads back port $C1_NOVNC_PORT as private (${C1_GH_VIS:-unavailable})"
-    fail_desktop gh-visibility; return 1
-  fi
   if (( REQ_GH )); then PORT_PRIVATE=verified-probe-gh; else PORT_PRIVATE=verified-probe-user-repo; fi
   # Do not give the operator access until the monitor completes a private sweep.
   # shellcheck disable=SC2016

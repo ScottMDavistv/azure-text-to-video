@@ -398,7 +398,13 @@ c1_parse_ss_listen() {
 c1_ss_listen_table() {
   local out
   command -v "$C1_SS_BIN" >/dev/null 2>&1 || { c1_err 'listener evidence: ss (iproute2) is unavailable'; return 1; }
-  out=$("$C1_SS_BIN" -Hltne 2>/dev/null) || { c1_err 'listener evidence: ss failed'; return 1; }
+  local budget=0.15
+  if [[ -n "${C1_CLOSE_DEADLINE:-}" ]]; then
+    local remaining
+    remaining=$(c1_deadline_remaining "$C1_CLOSE_DEADLINE") || return 1
+    if (( remaining < 15 )); then printf -v budget '0.%02d' "$remaining"; fi
+  fi
+  out=$(timeout -k 0.02s "$budget" "$C1_SS_BIN" -Hltne 2>/dev/null) || { c1_err 'listener evidence: ss failed'; return 1; }
   c1_parse_ss_listen <<<"$out"
 }
 
@@ -1411,7 +1417,8 @@ c1_spawn_desktop() {
   local s=$1 name=$2; shift 2
   local -a clean
   mapfile -d '' -t clean < <(c1_clean_env)
-  _c1_spawn_supervised "$s" "$name" $(( ${#clean[@]} + 1 )) "${clean[@]}" C1_HARNESS_SESSION="$s" "$@"
+  _c1_spawn_supervised "$s" "$name" $(( ${#clean[@]} + 2 )) "${clean[@]}" \
+    C1_HARNESS_SESSION="$s" C1_GUARD_STARTUP="${C1_GUARD_STARTUP:-0}" "$@"
 }
 
 # c1_start_display_vnc SESSION PASSWORD -> Xvfb + fluxbox + x11vnc (no TCP at all);
@@ -1861,21 +1868,39 @@ c1_close_novnc() {
 # Websockify can fork workers with established desktop connections. Stop its
 # dedicated supervisor's whole tree and wait for the subreaper's proof.
 c1_close_websockify_tree() {
-  local s=$1 port=$2 ws=$3 wsst=$4 wait_steps=$5 record_pid record_start supervisor start extra reg i
+  local s=$1 port=$2 ws=$3 wsst=$4 wait_steps=$5 record_pid record_start supervisor start extra
   [[ -f "$s/websockify-supervisor" && ! -L "$s/websockify-supervisor" ]] || return 1
   read -r record_pid record_start supervisor start extra <"$s/websockify-supervisor" || return 1
   [[ "$record_pid" == "$ws" && "$record_start" == "$wsst" && -z "$extra" &&
      "$supervisor" =~ ^[1-9][0-9]*$ && "$start" =~ ^[1-9][0-9]*$ ]] || return 1
   grep -Fxq -- "$supervisor $start" "$s/supervisors" || return 1
+  c1_close_supervisor "$s" "$port" "$supervisor" "$start" "$wait_steps"
+}
+
+c1_close_supervisor() {
+  local s=$1 port=$2 supervisor=$3 start=$4 wait_steps=$5 reg now i
+  now=$(c1_monitor_tick) || return 1
+  local C1_CLOSE_DEADLINE=${C1_CLOSE_DEADLINE:-$(( 10#$now + wait_steps * 10 + 15 ))}
+  # Even if the deadline elapsed, request worker termination. Closure
+  # evidence obtained after the deadline cannot make this check pass.
   c1_signal_owned USR1 "$supervisor" "$s" "$start" || return 1
   reg=$(c1_reaped_register "$s")
   for (( i=0; i<=wait_steps; i++ )); do
-    if [[ -f "$reg" && ! -L "$reg" ]] && grep -Fxq -- "$supervisor $start" "$reg" && c1_port_free "$port"; then
+    c1_deadline_remaining "$C1_CLOSE_DEADLINE" >/dev/null || return 1
+    if [[ -f "$reg" && ! -L "$reg" ]] && grep -Fxq -- "$supervisor $start" "$reg" &&
+       c1_port_free "$port" && c1_deadline_remaining "$C1_CLOSE_DEADLINE" >/dev/null; then
       return 0
     fi
-    sleep 0.1
+    sleep 0.05
   done
   return 1
+}
+
+c1_deadline_remaining() {
+  local now
+  now=$(c1_monitor_tick) || return 1
+  (( $1 > 10#$now )) || return 1
+  printf '%s\n' "$(( $1 - 10#$now ))"
 }
 
 # The heartbeat uses the kernel clock and advances only after a private sweep.
@@ -2000,7 +2025,8 @@ c1_privacy_monitor_loop() {
   local C1_MONITOR_AUTH_TIMEOUT=1.0
   local C1_GH_READ_TIMEOUT C1_GH_EVIDENCE=cached C1_GH_CACHED_PRIVATE=0
   printf -v C1_GH_READ_TIMEOUT '%d.%03d' $(( C1_MON_GH_TIMEOUT_MS / 1000 )) $(( C1_MON_GH_TIMEOUT_MS % 1000 ))
-  local reason teardown_rc now gh_ok gh_next gh_started=0 gh_job='' gh_out g vis
+  local reason teardown_rc now gh_ok gh_next gh_started=0 gh_job='' gh_out g vis sweep_tick
+  local C1_CLOSE_DEADLINE
   local track=${C1_MONITOR_TRACK:-0} monitor_pid=$BASHPID monitor_start tick ack
   if (( track )); then monitor_start=$(c1_proc_start "$monitor_pid") || return 2; fi
   gh_out="${TMPDIR:-/tmp}/c1-gh-monitor.$BASHPID"
@@ -2011,6 +2037,8 @@ c1_privacy_monitor_loop() {
   (( req_gh )) && C1_GH_CACHED_PRIVATE=1
   while c1_owned_pid "$ws" "$s" "$wsst"; do
     sleep "$iv"
+    sweep_tick=$(c1_monitor_tick) || return 2
+    C1_CLOSE_DEADLINE=$((10#$sweep_tick + 250))
     reason=''
     c1_now_ms now
     if (( req_gh )); then
@@ -2115,7 +2143,8 @@ c1_gh_visibility() {
 c1_watchdog_loop() {
   local root=$1 session=$2 owner=$3 owner_start=$4 sent=0 register launcher_state
   local monitor='' monitor_start websockify websockify_start extra
-  local C1_MONITOR_FAST_TEARDOWN=1
+  local startup_pid='' startup_start startup_tick beat now
+  local C1_MONITOR_FAST_TEARDOWN=1 C1_CLOSE_DEADLINE
   register=$(c1_privacy_register "$session")
   while :; do
     if [[ ! -e "$root/active" && ! -L "$root/active" && ! -e "$session" && ! -L "$session" ]] &&
@@ -2130,6 +2159,26 @@ c1_watchdog_loop() {
       return
     fi
     if [[ "$launcher_state" == active && "$sent" == 0 && -z "$monitor" &&
+          -f "$session/startup" ]]; then
+      if [[ -z "$startup_pid" ]]; then
+        read -r startup_pid startup_start startup_tick extra <"$session/startup" || return 1
+        [[ "$startup_pid" =~ ^[1-9][0-9]*$ && "$startup_start" =~ ^[1-9][0-9]*$ &&
+           "$startup_tick" =~ ^[0-9]{1,12}$ && -z "$extra" ]] || return 1
+        grep -Fxq -- "$startup_pid $startup_start" "$session/supervisors" || return 1
+        (set -o noclobber; : >"$session/startup-watched") || return 1
+      fi
+      if ! c1_deadline_remaining "$((10#$startup_tick + 150))" >/dev/null; then
+        C1_CLOSE_DEADLINE=$((10#$startup_tick + 250))
+        c1_record_privacy_failure "$session" startup-timeout || true
+        c1_close_supervisor "$session" "$C1_NOVNC_PORT" "$startup_pid" "$startup_start" 10 ||
+          c1_record_privacy_failure "$session" teardown-failed || true
+        if c1_active_matches "$root" "$session" "$owner" "$owner_start"; then
+          c1_signal_identity TERM "$owner" "$owner_start" || return 1
+        fi
+        sent=1
+      fi
+    fi
+    if [[ "$launcher_state" == active && "$sent" == 0 && -z "$monitor" &&
           -f "$session/monitor-required" && ! -L "$session/monitor-required" ]]; then
       read -r monitor monitor_start websockify websockify_start extra <"$session/monitor-required" || return 1
       [[ "$monitor" =~ ^[1-9][0-9]*$ && "$monitor_start" =~ ^[1-9][0-9]*$ &&
@@ -2141,6 +2190,16 @@ c1_watchdog_loop() {
        ! c1_monitor_healthy "$session" "$monitor" "$monitor_start"; then
       # Close the listener before signalling the launcher, whose foreground
       # Playwright process may delay its TERM trap.
+      now=$(c1_monitor_tick) || return 1
+      beat=''
+      if [[ -f "$session/monitor-beat" ]]; then
+        IFS= read -r beat <"$session/monitor-beat" || beat=''
+      fi
+      if [[ "$beat" =~ ^[0-9]{1,12}$ ]] && (( 10#$beat <= 10#$now )); then
+        C1_CLOSE_DEADLINE=$((10#$beat + 250))
+      else
+        C1_CLOSE_DEADLINE=$((10#$now + 75))
+      fi
       c1_teardown_novnc "$session" "$C1_NOVNC_PORT" "$websockify" "$websockify_start" monitor-unhealthy || true
       if c1_active_matches "$root" "$session" "$owner" "$owner_start"; then
         c1_signal_identity TERM "$owner" "$owner_start" || return 1

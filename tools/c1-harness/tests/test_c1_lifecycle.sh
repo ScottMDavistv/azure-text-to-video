@@ -466,7 +466,7 @@ monitor_shutdown_and_loss() (
 set -Eeuo pipefail
 source "$1/lib/c1-lib.sh"
 root=$2 fixture=$3 variant=$4
-c1_port_free() { return 0; }  # No actual network listener in this fixture.
+
 c1_lock_state "$root"
 session_path=$(c1_session_new "$root" "$$")
 export C1_HARNESS_SESSION=$session_path TMPDIR="$session_path/tmp"
@@ -476,24 +476,59 @@ trap '
     printf "desktop worker survived until launcher signal\n" >&2
     exit 2
   fi
+  if ! c1_port_free "$C1_NOVNC_PORT" ||
+     ! grep -Fxq "$supervisor $supervisor_start" "$(c1_reaped_register "$session_path")"; then
+    exit 3
+  fi
   c1_monitor_tick >"$fixture/$variant.closed"
   exit 130
 ' TERM
 c1_start_watchdog "$root" "$session_path" "$$" "$1/lib/c1-lib.sh"
-ws=$(c1_spawn "$session_path" websockify bash -c '
-  setsid sleep 60 &
-  printf "%s\n" "$!" >"$1"
-  wait
-' _ "$fixture/$variant.worker")
+cat >"$fixture/worker.py" <<'PYTHON'
+import os
+import signal
+import socket
+import sys
+from pathlib import Path
+
+with socket.socket() as listener:
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", int(sys.argv[2])))
+    listener.listen()
+    child = os.fork()
+    if child:
+        listener.close()
+        os.waitpid(child, 0)
+    else:
+        os.setsid()
+        Path(sys.argv[1]).write_text(f"{os.getpid()}\n", encoding="ascii")
+        signal.pause()
+PYTHON
+ws=$(C1_GUARD_STARTUP=1 c1_spawn_desktop "$session_path" websockify python3 -I "$fixture/worker.py" \
+  "$fixture/$variant.worker" "$C1_NOVNC_PORT")
+read -r _ _ supervisor supervisor_start <"$session_path/websockify-supervisor"
 ws_start=$(c1_proc_start "$ws")
 while [[ ! -s "$fixture/$variant.worker" ]]; do sleep 0.02; done
 read -r worker <"$fixture/$variant.worker"
+if [[ "$variant" == startup ]]; then
+  read -r _ _ started <"$session_path/startup"
+  printf '%s\n' "$started" >"$fixture/$variant.started"
+  printf '%s %s %s\n' "$session_path" "$ws" 0 >"$fixture/$variant.ready"
+  while :; do sleep 0.05; done
+fi
 monitor=$(c1_spawn "$session_path" privacy-monitor bash -c '
   source "$1"
-  c1_privacy_check() { return 0; }
-  c1_port_free() { return 0; }
+  fail_probe=$5
+  c1_privacy_check() {
+    if [[ -f "$fail_probe" ]]; then
+      C1_PRIVACY_STATE=unverified
+      C1_PRIVACY_DETAIL="authenticated probe transport failure (curl-exit-28)"
+      return 1
+    fi
+    return 0
+  }
   C1_MONITOR_TRACK=1 c1_privacy_monitor_loop "$2" unused unused "$3" "$4" "" 0.05
-' _ "$1/lib/c1-lib.sh" "$session_path" "$ws" "$ws_start")
+' _ "$1/lib/c1-lib.sh" "$session_path" "$ws" "$ws_start" "$fixture/$variant.fail-probe")
 monitor_start=$(c1_proc_start "$monitor")
 while ! c1_monitor_healthy "$session_path" "$monitor" "$monitor_start"; do sleep 0.02; done
 c1_arm_privacy_monitor "$session_path" "$monitor" "$monitor_start" "$ws" "$ws_start"
@@ -509,7 +544,7 @@ else
 fi
 MONITOR_FIXTURE
 
-  for variant in orderly exited stalled; do
+  for variant in startup orderly exited stalled ambiguous; do
     # This guard covers startup, heartbeat expiry and full process cleanup.
     timeout -k 4s 30s bash "$FIXTURE/monitor-launcher.sh" "$BASE" "$STATE" "$FIXTURE" "$variant" \
       >"$FIXTURE/$variant.log" 2>&1 &
@@ -519,9 +554,13 @@ MONITOR_FIXTURE
     read -r worker <"$FIXTURE/$variant.worker" || return 1
     case "$variant" in
       exited) kill -TERM "$monitor" || return 1 ;;
-      stalled)
+      stalled|ambiguous)
         started=$(c1_monitor_tick) || return 1
-        kill -STOP "$monitor" || return 1
+        if [[ "$variant" == stalled ]]; then
+          kill -STOP "$monitor" || return 1
+        else
+          : >"$FIXTURE/$variant.fail-probe"
+        fi
         ;;
     esac
     status=0
@@ -531,8 +570,14 @@ MONITOR_FIXTURE
     else
       [[ "$status" == 130 ]] || return 1
       register=$(c1_privacy_register "$session_path")
-      grep -q ' monitor-unhealthy$' "$register" || return 1
-      if [[ "$variant" == stalled ]]; then
+      if [[ "$variant" == startup ]]; then
+        grep -q ' startup-timeout$' "$register" || return 1
+        read -r started <"$FIXTURE/$variant.started" || return 1
+      else
+        grep -q ' monitor-unhealthy$' "$register" || return 1
+        if [[ "$variant" == ambiguous ]]; then grep -q ' unverified$' "$register" || return 1; fi
+      fi
+      if [[ "$variant" != exited ]]; then
         read -r closed <"$FIXTURE/$variant.closed" || return 1
         (( 10#$closed >= 10#$started && 10#$closed - 10#$started <= 250 )) || return 1
       fi

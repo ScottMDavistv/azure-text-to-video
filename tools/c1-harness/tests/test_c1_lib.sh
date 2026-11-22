@@ -1190,9 +1190,9 @@ MOCK_GH
       fallback) [[ $rc == 0 && $checks == 0 && $monitor == 0 && $PORT_PRIVATE == verified-probe-user-repo ]] ;;
     esac
   )
-  t 'R11: real endpoint redirect enables monitored private visibility after personal-repo fallback' desktop_visibility_handoff 0 1 0 monitor
+  t 'R11: decoy redirect carries confirmed private visibility into the monitor' desktop_visibility_handoff 1 1 0 monitor
   t 'R11: decoy redirect keeps private visibility monitoring after a missed read-back' desktop_visibility_handoff 1 0 0 monitor
-  t 'R11: unavailable final private read-back shuts down before monitor handoff' desktop_visibility_handoff 0 1 1 closed
+  t 'R11: unavailable private read-back prevents listener startup' desktop_visibility_handoff 1 1 1 closed
   t 'R11: personal-repo fallback remains available with positive denial and no redirect' desktop_visibility_handoff 0 0 1 fallback
 
   forwarding_origin_pinned() (

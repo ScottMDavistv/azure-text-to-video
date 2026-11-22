@@ -131,6 +131,21 @@ def main(argv):
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, on_term)
     signal.signal(signal.SIGUSR1, on_kill)
+    if argv[3] == "websockify" and os.environ.get("C1_GUARD_STARTUP") == "1":
+        def tick():
+            with open("/proc/uptime", encoding="ascii") as uptime:
+                return int(uptime.read().split()[0].replace(".", ""))
+
+        started = tick()
+        with open(os.path.join(session, "startup.tmp"), "x", encoding="ascii") as record:
+            record.write(f"{me} {my_start} {started}\n")
+        os.replace(os.path.join(session, "startup.tmp"), os.path.join(session, "startup"))
+        while not os.path.isfile(os.path.join(session, "startup-watched")) and tick() < started + 150:
+            time.sleep(0.01)
+        if STATE["kill"] or tick() >= started + 150:
+            append_line(reaped, f"{me} {my_start}\n")
+            return 125
+
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGUSR1})
     child = os.fork()
     if child == 0:
