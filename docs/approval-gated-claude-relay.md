@@ -133,3 +133,34 @@ The offline review-preparation policy now requires binding integration evidence 
 The applicability of CI checks must be supplied by a protected, trusted task ledger based on actual workflow path filters and repository protections. The planner rejects absent, empty, duplicate, unknown, or untrusted applicability declarations; it checks all declared applicable workflows at the target exact head. Individual runs must carry independently attested GitHub workflow-file provenance (trusted workflow, path, protected-main revision and exact head). **A triggering actor is not workflow provenance.** Approved `workflow_dispatch` evidence may count only with separate trusted manual-run attestation; this does not authorize a dispatch. Do not use a caller-supplied snapshot or PR description as trusted evidence.
 
 These checks remain an offline proposal, **not an activated GitHub required check or active collector**. The future adapter must independently authenticate GitHub metadata, policy applicability, approval provenance, workflow revision, race-safe current heads and branch creation. Independent security review and exact-head CI are still required before any development-only merge. Existing manual workflow approvals, protected-main rules, no paid FAL/overage, and no automatic agents remain unchanged.
+
+### Exact workflow evidence (offline re-review planner)
+
+A task snapshot supplies only candidate workflow names and positive Actions
+run IDs. It cannot authenticate its own evidence. The in-process offline
+planner must receive a separate trusted evidence lookup for each run and fixed
+workflow path; the JSON CLI has no authenticated adapter and returns a blocked
+review result. No such live adapter or permission to dispatch is included.
+
+The lookup must independently read the repository's Actions run and workflow
+metadata, protected-main identity, exact execution workflow source and its Git
+tree entries. Use records from the authenticated API or a separately trusted
+execution verifier, not task text, candidate-authored artifacts, archived job
+messages, trigger actors, or claimed boolean/string provenance. The planner
+requires the numeric run/workflow/repository identity and exact reviewed target
+head, and compares the exact allowlisted workflow's regular-file mode and Git
+blob ID at protected main, candidate head and actual execution revision.
+
+For pull requests, require the matching GitHub PR association, the canonical
+`refs/pull/<target>/merge` workflow ref, and independently verified merge
+parents (event-time main base and target head). The event-time main workflow
+blob must agree as well. The REST Actions run response alone does not prove
+this execution context; if it has no verified PR association or there is no
+trustworthy source/merge evidence for that run attempt, block rather than
+infer it from the trigger actor, display name, or current merge ref. Manual
+evidence requires the target branch/ref and exact head, plus a separate
+protected-ledger approval bound to repository, target, workflow and exact
+run/attempt. This only prepares a pending proposal; no workflow is started.
+
+The coding and target PR numbers must both be positive integer identifiers,
+must match the task, and must be different in both branch and review planning.

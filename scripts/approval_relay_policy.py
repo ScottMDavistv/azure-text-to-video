@@ -13,17 +13,118 @@ from pathlib import Path
 
 REPO = "ScottMDavistv/azure-text-to-video"
 HEX = re.compile(r"[0-9a-f]{40}\Z")
-REQUIRED = frozenset({
-    "Backend Python Tests", "Security Checks",
-    "Design Management - Regression Tests",
-    "Autonomous Engineering - Policy Tests",
-    "Frontend Quality Gates", "Synthetic 300-second MP4 Acceptance",
-    "Azure Read-Only Operations",
-})
+REPO_ID = 1457187422
+WORKFLOWS = {
+    "Backend Python Tests": "backend-tests.yml",
+    "Security Checks": "security-checks.yml",
+    "Design Management - Regression Tests": "design-management-tests.yml",
+    "Autonomous Engineering - Policy Tests": "autonomous-policy-tests.yml",
+    "Frontend Quality Gates": "frontend-quality-gates.yml",
+    "Synthetic 300-second MP4 Acceptance": "synthetic-300s-acceptance.yml",
+    "Azure Read-Only Operations": "azure-readonly-operations.yml",
+}
+REQUIRED = frozenset(WORKFLOWS)
 
 
 def _sha(value):
     return isinstance(value, str) and HEX.fullmatch(value) is not None
+
+def _positive_int(value):
+    return type(value) is int and value > 0
+
+
+def _repository(value):
+    return (isinstance(value, dict) and type(value.get("id")) is int
+            and value["id"] == REPO_ID
+            and ("full_name" not in value or value["full_name"] == REPO))
+
+
+def _distinct_prs(task, target, coding):
+    numbers = (task.get("target_pr"), task.get("coding_pr"),
+               target.get("number"), coding.get("number"))
+    return (all(_positive_int(n) for n in numbers)
+            and numbers[0] == numbers[2] and numbers[1] == numbers[3]
+            and numbers[0] != numbers[1])
+
+
+def _verified_run(run_id, name, target, lookup):
+    """Validate authenticated adapter data, never assertions in the input draft.
+
+    The callback is an explicit offline trust boundary, not an authenticator.
+    It must independently read immutable Git objects and run/workflow metadata
+    through trusted credentials, plus authenticated execution-source evidence.
+    The CLI intentionally cannot supply such a callback.
+    """
+    path = ".github/workflows/" + WORKFLOWS[name]
+    packet = lookup(run_id, path)
+    run, workflow, execution = packet["run"], packet["workflow"], packet["execution"]
+    head, main = target["head_sha"], packet["protected_main_sha"]
+    event = run.get("event")
+    if (not _sha(main) or run.get("id") != run_id
+            or not _positive_int(run.get("id"))
+            or not _positive_int(run.get("run_attempt"))
+            or not _positive_int(run.get("workflow_id"))
+            or not _positive_int(workflow.get("id"))
+            or workflow["id"] != run["workflow_id"] or workflow.get("path") != path
+            or run.get("name") != name or run.get("head_sha") != head
+            or run.get("status") != "completed" or run.get("conclusion") != "success"
+            or not _repository(run.get("repository"))
+            or not _repository(run.get("head_repository"))
+            or execution.get("run_id") != run_id or not _positive_int(execution.get("run_id"))
+            or not _positive_int(execution.get("run_attempt"))
+            or execution["run_attempt"] != run["run_attempt"]
+            or not _sha(execution.get("workflow_sha"))):
+        return False
+    retrieved_sha = execution["workflow_sha"]
+    if event == "pull_request":
+        ref = f'refs/pull/{target["number"]}/merge'
+        links = run.get("pull_requests")
+        if not isinstance(links, list):
+            return False
+        same_pr = [row for row in links if isinstance(row, dict)
+                   and _positive_int(row.get("number")) and row["number"] == target["number"]]
+        if len(same_pr) != 1:
+            return False
+        link = same_pr[0]
+        pr_head, base = link["head"], link["base"]
+        if (pr_head.get("sha") != head or pr_head.get("ref") != target.get("head_branch")
+                or not _repository(pr_head.get("repo")) or base.get("ref") != "main"
+                or not _sha(base.get("sha")) or not _repository(base.get("repo"))
+                or execution.get("merge_parents") != [base["sha"], head]):
+            return False
+        commits = (main, base["sha"], head, retrieved_sha)
+    elif event == "workflow_dispatch":
+        # Manual approval must be collected from a protected task ledger,
+        # bound to the exact run attempt, workflow, target and reviewed head.
+        branch = target.get("head_branch")
+        if (not isinstance(branch, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", branch)
+                or run.get("head_branch") != branch or retrieved_sha != head
+                or packet.get("manual_approval") != {
+                    "repository": REPO, "target_pr": target["number"],
+                    "head_sha": head, "workflow_id": workflow["id"],
+                    "run_id": run_id, "run_attempt": run["run_attempt"],
+                }):
+            return False
+        ref = f"refs/heads/{branch}"
+        commits = (main, head)
+    else:
+        return False
+    if (run.get("path") not in (path, f"{path}@{ref}")
+            or execution.get("workflow_ref") != f"{REPO}/{path}@{ref}"):
+        return False
+    # Exact blob equality across protected main, candidate and actual run
+    # source, plus event-time base for PR runs. The adapter independently
+    # obtains these path+commit Git tree entries; no task/run label can vouch
+    # for its own workflow bytes. Symlinks and unknown objects do not qualify.
+    source = packet["workflow_files"]
+    blobs = []
+    for commit in commits:
+        entry = source[commit]
+        if entry.get("mode") not in ("100644", "100755") or not _sha(entry.get("blob_sha")):
+            return False
+        blobs.append((entry["mode"], entry["blob_sha"]))
+    return len(set(blobs)) == 1
 
 
 def check_coding_pr(task, target, coding):
@@ -32,14 +133,15 @@ def check_coding_pr(task, target, coding):
     base auto-retarget is safe only when branch creation was independently
     attested at exact target head AND the same head is still current.
     """
-    if task.get("repository") != REPO or target.get("repository") != REPO or coding.get("repository") != REPO:
+    if not all(isinstance(x, dict) and x.get("repository") == REPO
+               for x in (task, target, coding)):
         return {"action": "block", "reason": "repository mismatch"}
     if not all(_sha(v) for v in (task.get("pinned_target_sha"), target.get("head_sha"), coding.get("origin_sha"))):
         return {"action": "block", "reason": "invalid or missing SHA attestation"}
-    if (task.get("target_pr") != target.get("number") or
-            task.get("coding_pr") != coding.get("number") or
-            not isinstance(target.get("head_branch"), str) or
-            target.get("state") != "open" or coding.get("state") != "open" or not coding.get("draft")):
+    if (not _distinct_prs(task, target, coding)
+            or not isinstance(target.get("head_branch"), str)
+            or target.get("state") != "open" or coding.get("state") != "open"
+            or coding.get("draft") is not True):
         return {"action": "block", "reason": "PR identity/state mismatch"}
     if target["head_sha"] != task["pinned_target_sha"]:
         return {"action": "block", "reason": "target moved; reissue pinned assignment"}
@@ -55,7 +157,7 @@ def check_coding_pr(task, target, coding):
     return {"action": "block", "reason": "unexpected base branch"}
 
 
-def prepare_review(task, target, coding, ci):
+def prepare_review(task, target, coding, ci, *, lookup_workflow_evidence=None):
     """Produce only a PENDING owner-approval review draft after exact-head CI.
 
     Source integrator must independently prove the approved implementation is
@@ -65,16 +167,14 @@ def prepare_review(task, target, coding, ci):
             task.get("repository") != REPO or target.get("repository") != REPO or
             coding.get("repository") != REPO):
         return {"state": "blocked", "reason": "repository mismatch"}
-    if task.get("target_pr") != target.get("number") or not _sha(target.get("head_sha")):
+    if not _distinct_prs(task, target, coding) or not _sha(target.get("head_sha")):
         return {"state": "blocked", "reason": "invalid target identity/head"}
     if (target.get("state") != "open" or target.get("draft") is not True or
             target.get("base_branch") != "main"):
         return {"state": "blocked", "reason": "target must remain open draft against main"}
     if not task.get("approved_remediation_issue") or type(task["approved_remediation_issue"]) is not int:
         return {"state": "blocked", "reason": "missing authorized remediation issue"}
-    if (type(task.get("coding_pr")) is not int or task["coding_pr"] < 1 or
-            type(coding.get("number")) is not int or coding["number"] != task["coding_pr"] or
-            type(coding.get("integration_target_pr")) is not int or
+    if (not _positive_int(coding.get("integration_target_pr")) or
             coding["integration_target_pr"] != target["number"] or
             not _sha(coding.get("head_sha")) or
             coding.get("integrated_coding_head_sha") != coding["head_sha"] or
@@ -90,36 +190,30 @@ def prepare_review(task, target, coding, ci):
     required = task.get("applicable_required_workflows")
     if (task.get("ci_policy_source") != "trusted-protected-task-ledger" or
             not isinstance(required, list) or not required or
+            not all(isinstance(name, str) for name in required) or
             len(required) != len(set(required)) or
             not set(required).issubset(REQUIRED)):
         return {"state": "blocked", "reason": "required CI applicability unverified"}
     if not isinstance(ci, list) or not ci:
         return {"state": "blocked", "reason": "no CI evidence"}
-    observed = set()
-    for run in ci:
-        if not isinstance(run, dict):
+    if not callable(lookup_workflow_evidence):
+        return {"state": "blocked", "reason": "trusted workflow evidence adapter unavailable"}
+    observed, run_ids = set(), set()
+    for claim in ci:
+        if not isinstance(claim, dict):
             return {"state": "blocked", "reason": "malformed CI evidence"}
-        # Actor is NOT provenance: a legitimate run may be triggered by a user.
-        # A trusted adapter must verify workflow file/path/ref from GitHub APIs.
-        if (run.get("head_sha") != target["head_sha"] or
-                run.get("status") != "completed" or run.get("conclusion") != "success" or
-                run.get("trusted_workflow") is not True or
-                run.get("provenance") != "verified-github-workflow-api" or
-                not isinstance(run.get("workflow_path"), str) or
-                not run["workflow_path"].startswith(".github/workflows/") or
-                not isinstance(run.get("workflow_ref"), str) or
-                not run["workflow_ref"].startswith("refs/heads/main@") or
-                not _sha(run["workflow_ref"].split("@", 1)[-1])):
+        run_id, name = claim.get("id"), claim.get("name")
+        if (not _positive_int(run_id) or not isinstance(name, str)
+                or name not in REQUIRED or run_id in run_ids):
+            return {"state": "blocked", "reason": "invalid workflow claim"}
+        try:
+            verified = _verified_run(run_id, name, target, lookup_workflow_evidence)
+        except Exception:
+            verified = False
+        if not verified:
             return {"state": "blocked", "reason": "CI missing/stale/failed or untrusted"}
-        if run.get("event") == "workflow_dispatch":
-            if (run.get("manual_run_approved") is not True or
-                    run.get("manual_approval_provenance") != "trusted-protected-task-ledger"):
-                return {"state": "blocked", "reason": "manual CI approval unverified"}
-        elif run.get("event") != "pull_request":
-            return {"state": "blocked", "reason": "unexpected CI event"}
-        if run.get("name") not in REQUIRED:
-            return {"state": "blocked", "reason": "unexpected CI workflow"}
-        observed.add(run["name"])
+        observed.add(name)
+        run_ids.add(run_id)
     if not set(required).issubset(observed):
         return {"state": "blocked", "reason": "applicable required CI not verified"}
     return {"state": "pending_owner_approval",

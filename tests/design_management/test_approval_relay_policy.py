@@ -2,10 +2,15 @@
 import copy
 import unittest
 
-from scripts.approval_relay_policy import check_coding_pr, prepare_review, REQUIRED
+from scripts.approval_relay_policy import (
+    check_coding_pr, prepare_review as plan_review, REQUIRED, REPO, REPO_ID, WORKFLOWS,
+)
 
 A = "a" * 40
 B = "b" * 40
+MAIN = "c" * 40
+MERGE = "d" * 40
+BLOB = "e" * 40
 
 
 def sample():
@@ -25,13 +30,41 @@ def sample():
               "integrated_in_target": True,
               "integration_provenance": "verified-git-ancestry",
               "integrated_head_sha": A}
-    ci = [{"name": name, "head_sha": A, "status": "completed",
-           "conclusion": "success", "event": "pull_request",
-           "actor": "user", "trusted_workflow": True,
-           "provenance": "verified-github-workflow-api",
-           "workflow_path": ".github/workflows/tests.yml",
-           "workflow_ref": "refs/heads/main@" + B} for name in sorted(REQUIRED)]
+    ci = [{"id": 100 + i, "workflow_id": 200 + i, "run_attempt": 1,
+           "name": name, "head_sha": A, "status": "completed", "conclusion": "success",
+           "event": "pull_request", "actor": {"login": "user"},
+           "repository": {"id": REPO_ID, "full_name": REPO},
+           "head_repository": {"id": REPO_ID, "full_name": REPO},
+           "head_branch": target["head_branch"],
+           "path": ".github/workflows/" + WORKFLOWS[name],
+           "pull_requests": [{"number": 46,
+                              "head": {"ref": target["head_branch"], "sha": A,
+                                       "repo": {"id": REPO_ID}},
+                              "base": {"ref": "main", "sha": MAIN, "repo": {"id": REPO_ID}}}]}
+          for i, name in enumerate(sorted(REQUIRED))]
     return task, target, coding, ci
+
+
+def evidence(run, target):
+    ref = (f'refs/pull/{target["number"]}/merge' if run["event"] == "pull_request"
+           else f'refs/heads/{target["head_branch"]}')
+    sha = MERGE if run["event"] == "pull_request" else target["head_sha"]
+    return {"run": run,
+            "workflow": {"id": run["workflow_id"],
+                         "path": ".github/workflows/" + WORKFLOWS[run["name"]]},
+            "execution": {"run_id": run["id"], "run_attempt": run["run_attempt"],
+                          "workflow_sha": sha, "workflow_ref": f'{REPO}/{run["path"]}@{ref}',
+                          "merge_parents": [MAIN, target["head_sha"]]},
+            "protected_main_sha": MAIN,
+            "workflow_files": {commit: {"mode": "100644", "blob_sha": BLOB}
+                               for commit in (MAIN, target["head_sha"], sha)},
+            "manual_approval": run.get("ledger_fixture")}
+
+
+def prepare_review(task, target, coding, ci):
+    # Stub models independent authoritative reads, not a trusted live adapter.
+    return plan_review(task, target, coding, ci, lookup_workflow_evidence=lambda ident, path:
+                       evidence(next(run for run in ci if run["id"] == ident), target))
 
 
 class BranchChecks(unittest.TestCase):
@@ -131,9 +164,10 @@ class ReReviewChecks(unittest.TestCase):
         self.assertEqual(prepare_review(t, p, c, ci)["state"], "blocked")
 
     def test_wrong_or_unattested_workflow_blocks(self):
-        for field, value in [("trusted_workflow", False), ("provenance", "PR-comment"),
-                             ("workflow_path", "malicious.yml"), ("workflow_ref", "refs/heads/evil@" + B),
-                             ("event", "push")]:
+        for field, value in [("path", ".github/workflows/../backend-tests.yml"),
+                             ("path", ".github/workflows/malicious.yml"),
+                             ("repository", {"id": 999}), ("head_repository", {"id": 999}),
+                             ("pull_requests", []), ("event", "push"), ("run_attempt", True)]:
             with self.subTest(field=field):
                 t, p, c, ci = sample()
                 ci[0][field] = value
@@ -152,7 +186,82 @@ class ReReviewChecks(unittest.TestCase):
         self.assertEqual(prepare_review(t, p, c, ci)["state"], "blocked")
         ci[0]["manual_run_approved"] = True
         ci[0]["manual_approval_provenance"] = "trusted-protected-task-ledger"
+        self.assertEqual(prepare_review(t, p, c, ci)["state"], "blocked")
+        ci[0]["ledger_fixture"] = {"repository": REPO, "target_pr": p["number"],
+                                  "head_sha": A, "workflow_id": ci[0]["workflow_id"],
+                                  "run_id": ci[0]["id"], "run_attempt": ci[0]["run_attempt"]}
         self.assertEqual(prepare_review(t, p, c, ci)["state"], "pending_owner_approval")
+        ci[0]["ledger_fixture"]["run_attempt"] = 2
+        self.assertEqual(prepare_review(t, p, c, ci)["state"], "blocked")
+
+    def test_same_coding_pr_never_aligns_or_prepares(self):
+        t, p, c, ci = sample()
+        c["number"] = t["coding_pr"] = p["number"]
+        c["base_branch"] = p["head_branch"]
+        self.assertEqual(check_coding_pr(t, p, c)["action"], "block")
+        c["base_branch"] = "main"
+        self.assertEqual(check_coding_pr(t, p, c)["action"], "block")
+        self.assertEqual(prepare_review(t, p, c, ci)["state"], "blocked")
+        for bad in (True, 0, "63"):
+            t, p, c, ci = sample()
+            c["number"] = t["coding_pr"] = bad
+            self.assertEqual(check_coding_pr(t, p, c)["action"], "block")
+            self.assertEqual(prepare_review(t, p, c, ci)["state"], "blocked")
+
+    def test_raw_snapshot_cannot_self_attest(self):
+        t, p, c, ci = sample()
+        for record in ci:
+            record.update(trusted_workflow=True, provenance="verified-github-workflow-api")
+        self.assertEqual(plan_review(t, p, c, ci)["reason"],
+                         "trusted workflow evidence adapter unavailable")
+
+    def test_candidate_or_execution_workflow_change_and_bad_git_metadata_block(self):
+        t, p, c, ci = sample()
+        pick = ci[0]["id"]
+        for mutation in (
+            lambda e: e["workflow_files"][A].update(blob_sha="f" * 40),
+            lambda e: e["workflow_files"][MERGE].update(blob_sha="f" * 40),
+            lambda e: e["workflow_files"][MAIN].update(mode="120000"),
+            lambda e: e["workflow"].update(path=".github/workflows/not-allowed.yml"),
+            lambda e: e["workflow"].update(id=9999999),
+            lambda e: e["execution"].update(workflow_ref=f"{REPO}/.github/workflows/other.yml@refs/pull/46/merge"),
+            lambda e: e["execution"].update(workflow_ref=f"{REPO}/.github/workflows/backend-tests.yml@refs/heads/main"),
+            lambda e: e["execution"].update(merge_parents=[A, MAIN]),
+            lambda e: e["execution"].update(run_attempt=3),
+        ):
+            def lookup(ident, path):
+                entry = evidence(next(r for r in ci if r["id"] == ident), p)
+                if ident == pick:
+                    mutation(entry)
+                return entry
+            self.assertEqual(plan_review(t, p, c, ci, lookup_workflow_evidence=lookup)["state"], "blocked")
+
+    def test_actual_pr_run_api_shape_requires_separate_source_evidence(self):
+        # Sanitized REST fields from exact PR #58 run 44222311501.
+        # Execution context/Git refs are synthetic, not an attestation of that old run.
+        t, p, c, _ = sample()
+        head = "5dd57b434942eec01de5f86ee41ec948b4d81d75"
+        base = "18d436d0d7f23eb725e28d672e8208ba3e393563"
+        p.update(number=58, head_sha=head, head_branch="docs/approval-gated-claude-relay-nov17")
+        t.update(target_pr=58, applicable_required_workflows=["Backend Python Tests"])
+        c.update(integration_target_pr=58, integrated_head_sha=head)
+        row = {"id": 44222311501, "workflow_id": 419422801, "run_attempt": 1,
+               "name": "Backend Python Tests", "status": "completed", "conclusion": "success",
+               "path": ".github/workflows/backend-tests.yml", "event": "pull_request",
+               "actor": {"login": "ScottMDavistv"}, "head_sha": head,
+               "repository": {"id": REPO_ID, "full_name": REPO},
+               "head_repository": {"id": REPO_ID, "full_name": REPO},
+               "pull_requests": [{"number": 58,
+                                  "head": {"ref": p["head_branch"], "sha": head, "repo": {"id": REPO_ID}},
+                                  "base": {"ref": "main", "sha": base, "repo": {"id": REPO_ID}}}]}
+        def lookup(ident, path):
+            self.assertEqual((ident, path), (row["id"], row["path"]))
+            entry = evidence(row, p)
+            entry["execution"]["merge_parents"] = [base, head]
+            entry["workflow_files"][base] = {"mode": "100644", "blob_sha": BLOB}
+            return entry
+        self.assertFalse(plan_review(t, p, c, [row], lookup_workflow_evidence=lookup)["dispatch_enabled"])
+        self.assertEqual(plan_review(t, p, c, [row])["state"], "blocked")
 
     def test_closed_target_blocks(self):
         t, p, c, ci = sample()
