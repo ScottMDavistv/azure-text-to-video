@@ -200,21 +200,33 @@ r11_exit_status_and_late_privacy() (
   eval "$(sed -n '/^finish_r11() {$/,/^}$/p' "$BASE/c1-session.sh")"
   local status=0 root_fixture="$STATE" variant
   ROOT="$root_fixture" REPO=fixture HARNESS_REL=fixture R11_HEAD=fixture
-  c1_port_free() { return 0; }
+  c1_port_free() {
+    if [[ "$1" == "$C1_NOVNC_PORT" ]]; then
+      case "$variant" in
+        verify-port-open) return 1 ;;
+        verify-port-unavailable) return 2 ;;
+      esac
+    fi
+    return 0
+  }
   c1_verify_harness_clean() { return 0; }
   c1_stop_privacy_monitor() { [[ "$variant" != stop-failed ]] || return 6; }
   eval "$(declare -f c1_cleanup_launcher | sed '1s/c1_cleanup_launcher/fixture_cleanup_launcher/')"
   eval "$(declare -f c1_verify_cleanup | sed '1s/c1_verify_cleanup/fixture_verify_cleanup/')"
   c1_cleanup_launcher() {
-    fixture_cleanup_launcher "$@" || return
+    fixture_cleanup_launcher "$@" || return "$?"
     [[ "$variant" != cleanup-failed ]] || return 7
+    if [[ "$variant" == verify-record-retirement ]]; then
+      rm -f -- "$ROOT/.${S##*/}.pending" && mkdir "$ROOT/.${S##*/}.pending" || return 9
+    fi
+    return 0
   }
   c1_verify_cleanup() {
-    fixture_verify_cleanup "$@" || return
+    fixture_verify_cleanup "$@" || return "$?"
     [[ "$variant" != verify-failed ]] || return 8
   }
   git() { printf 'fixture\n'; }
-  for variant in clean late startup-failed interrupted stop-failed cleanup-failed verify-failed; do
+  for variant in clean late startup-failed interrupted stop-failed cleanup-failed verify-failed verify-port-open verify-port-unavailable verify-record-retirement; do
     S=$(c1_session_new "$ROOT" "$$") || return 1
     R11_EVIDENCE="$FIXTURE/$variant.md"
     PORT_PRIVATE=verified-probe-gh
@@ -240,6 +252,7 @@ r11_exit_status_and_late_privacy() (
       clean)
         [[ "$status" == 0 ]] &&
           grep -Fxq -- '- First failure observation: none-recorded' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Post-cleanup reason: none' "$R11_EVIDENCE" &&
           grep -qx -- '- R11: PASS' "$R11_EVIDENCE" || return 1
         ;;
       late)
@@ -272,6 +285,20 @@ r11_exit_status_and_late_privacy() (
           grep -Fxq -- '- Session cleanup: FAIL (exit 7)' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Post-cleanup verification: not-run' "$R11_EVIDENCE" &&
           grep -Fxq -- '[c1] R11 session cleanup: FAIL (exit 7)' "$FIXTURE/$variant.log" || return 1
+        ;;
+      verify-port-open|verify-port-unavailable|verify-record-retirement)
+        local reason
+        case "$variant" in
+          verify-port-open) reason=desktop-listener-open ;;
+          verify-port-unavailable) reason=desktop-listener-unverified ;;
+          verify-record-retirement) reason=record-retirement-failed ;;
+        esac
+        [[ "$status" == 1 ]] &&
+          grep -Fxq -- '- Session cleanup: PASS' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Post-cleanup verification: FAIL (exit 1)' "$R11_EVIDENCE" &&
+          grep -Fxq -- "- Post-cleanup reason: $reason" "$R11_EVIDENCE" &&
+          grep -Fxq -- '- R11: FAIL' "$R11_EVIDENCE" &&
+          [[ -e "$ROOT/.${S##*/}.pending" ]] || return 1
         ;;
       verify-failed)
         [[ "$status" == 1 ]] &&
@@ -1034,6 +1061,60 @@ startup_unknown_port() (
   done
 )
 
+# Check an already-published handoff at the last startup tick and at expiry.
+# The real watchdog runs with inert time, port, and signalling boundaries.
+startup_monitor_handoff_boundary() (
+  source "$BASE/lib/c1-lib.sh"
+  local variant session tick exact polls close_count signal_count watched
+  for variant in one-tick-before at-expiry; do
+    session="$STATE/session.$variant"
+    tick=1000 polls=0 close_count=0 signal_count=0 watched=0
+    if [[ "$variant" == one-tick-before ]]; then exact=1199; else exact=1200; fi
+    mkdir "$session" || return 1
+    printf '11 31 1000\n' >"$session/startup"
+    printf '11 31\n' >"$session/supervisors"
+    printf '12 32 %s\n' "$session" >"$STATE/active"
+    c1_monitor_tick() { printf '%s\n' "$tick"; }
+    c1_owner_status() { printf 'active\n'; }
+    c1_marked_pids() { :; }
+    c1_port_free() { return 1; } # loop is exposed from tick 1000
+    c1_monitor_stopped() { return 1; }
+    c1_monitor_healthy() {
+      [[ "$*" == "$session 21 41" && -f "$session/monitor-watched" ]] || exit 1
+      watched=$((watched + 1))
+    }
+    c1_teardown_novnc() { exit 1; }
+    c1_active_matches() { [[ "$*" == "$STATE $session 12 32" ]]; }
+    c1_close_supervisor() {
+      [[ "$*" == "$session $C1_NOVNC_PORT 11 31 10" &&
+         -f "$session/monitor-required" && ! -e "$session/monitor-watched" &&
+         "$tick" == 1200 && "$C1_CLOSE_DEADLINE" == 1250 ]] || exit 1
+      close_count=$((close_count + 1))
+    }
+    c1_signal_identity() {
+      [[ "$*" == 'TERM 12 32' && "$close_count" == 1 ]] || exit 1
+      signal_count=$((signal_count + 1))
+    }
+    sleep() {
+      polls=$((polls + 1))
+      case $polls in
+        1) tick=$exact; printf '21 41 22 42\n' >"$session/monitor-required" ;;
+        2) rm -rf -- "$session"; rm -- "$STATE/active" ;;
+        *) exit 1 ;;
+      esac
+    }
+    c1_watchdog_loop "$STATE" "$session" 12 32 || return 1
+    if [[ "$variant" == one-tick-before ]]; then
+      [[ "$watched $close_count $signal_count" == '1 0 0' ]] &&
+        ! c1_privacy_failed "$session" || return 1
+    else
+      [[ "$watched $close_count $signal_count" == '0 1 1' ]] &&
+        grep -q ' startup-timeout$' "$(c1_privacy_register "$session")" || return 1
+    fi
+    printf 'handoff %s: monitor watched=%s, close requests=%s\n' "$variant" "$watched" "$close_count"
+  done
+)
+
 run_case() {
   BASE=$1 FIXTURE=$(mktemp -d "$TMP/case.XXXXXXXX")
   STATE="$FIXTURE/state"
@@ -1137,7 +1218,7 @@ if [[ "${1:-}" == --mutations ]]; then
   done
 else
   for case_name in competing_launchers overlapping_cleaners malformed_active retained_privacy_failure reused_owner watchdog_waits_for_launcher r11_exit_status_and_late_privacy launcher_crash_recovery active_publication_preserves_owner verification_is_retried \
-    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss websockify_reaping_ack monitor_probe_failure_evidence harness_head_drift guarded_delayed_startup drain_timeout_evidence monitor_stop_ack_race startup_unknown_port; do
+    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss websockify_reaping_ack monitor_probe_failure_evidence harness_head_drift guarded_delayed_startup drain_timeout_evidence monitor_stop_ack_race startup_unknown_port startup_monitor_handoff_boundary; do
     if ! run_case "$HERE" "$case_name"; then
       printf 'FAIL: %s\n' "$case_name" >&2
       for log in "$FIXTURE"/*.log; do [[ ! -f "$log" ]] || cat "$log" >&2; done

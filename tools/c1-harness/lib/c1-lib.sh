@@ -1197,14 +1197,14 @@ c1_cleanup_all() {
 # 6080/5173 provably closed and no listener inode recorded during the session
 # still listening (L-3). Unavailable listener evidence is a cleanup FAILURE.
 c1_verify_cleanup() {
-  local s=$1 ok=0 rc reg ino addr line
+  local s=$1 ok=0 rc reg ino addr line detail=''
   local -A live=()
-  [[ -z "$(c1_marked_pids "$s")" ]] || { c1_err 'harness processes still running'; ok=1; }
-  [[ ! -e "$s" ]] || { c1_err 'session directory still present'; ok=1; }
+  [[ -z "$(c1_marked_pids "$s")" ]] || { c1_err 'harness processes still running'; detail=process-remains; ok=1; }
+  [[ ! -e "$s" ]] || { c1_err 'session directory still present'; detail=${detail:-session-remains}; ok=1; }
   rc=0; c1_port_free "$C1_NOVNC_PORT" || rc=$?
-  (( rc == 0 )) || { if (( rc == 2 )); then c1_err "cannot prove port $C1_NOVNC_PORT is closed (listener evidence unavailable)"; else c1_err "port $C1_NOVNC_PORT still listening"; fi; ok=1; }
+  (( rc == 0 )) || { if (( rc == 2 )); then detail=${detail:-desktop-listener-unverified}; c1_err "cannot prove port $C1_NOVNC_PORT is closed (listener evidence unavailable)"; else detail=${detail:-desktop-listener-open}; c1_err "port $C1_NOVNC_PORT still listening"; fi; ok=1; }
   rc=0; c1_port_free "$C1_APP_PORT" || rc=$?
-  (( rc == 0 )) || { if (( rc == 2 )); then c1_err "cannot prove port $C1_APP_PORT is closed (listener evidence unavailable)"; else c1_err "port $C1_APP_PORT still listening"; fi; ok=1; }
+  (( rc == 0 )) || { if (( rc == 2 )); then detail=${detail:-app-listener-unverified}; c1_err "cannot prove port $C1_APP_PORT is closed (listener evidence unavailable)"; else detail=${detail:-app-listener-open}; c1_err "port $C1_APP_PORT still listening"; fi; ok=1; }
   local preg pid st current
   preg="$(dirname -- "$s")/.${s##*/}.pids"
   if [[ -e "$preg" || -L "$preg" ]]; then
@@ -1231,9 +1231,10 @@ c1_verify_cleanup() {
         fi
       done <"$preg"
     fi
-    if (( unresolved )); then ok=1; else rm -f -- "$preg" || ok=1; fi
+    if (( unresolved )); then detail=${detail:-pid-evidence-unresolved}; ok=1
+    else rm -f -- "$preg" || { detail=${detail:-record-retirement-failed}; ok=1; }; fi
   fi
-  c1_verify_supervisors "$s" || ok=1
+  c1_verify_supervisors "$s" || { detail=${detail:-supervisor-evidence-unresolved}; ok=1; }
   reg="$(dirname -- "$s")/.${s##*/}.inodes"
   if [[ -e "$reg" || -L "$reg" ]]; then
     # N-6: ambiguous preserved evidence cannot establish listener closure.
@@ -1259,15 +1260,18 @@ c1_verify_cleanup() {
         fi
       done <"$reg"
     fi
-    if (( inode_unresolved )); then ok=1; else rm -f -- "$reg" || ok=1; fi
+    if (( inode_unresolved )); then detail=${detail:-inode-evidence-unresolved}; ok=1
+    else rm -f -- "$reg" || { detail=${detail:-record-retirement-failed}; ok=1; }; fi
   fi
   if (( ok == 0 )); then
     local verification_record="${s%/*}/.${s##*/}.pending"
     if [[ -e "$verification_record" || -L "$verification_record" ]]; then
       [[ -f "$verification_record" && ! -L "$verification_record" ]] &&
-        rm -f -- "$verification_record" || ok=1
+        rm -f -- "$verification_record" || { detail=record-retirement-failed; ok=1; }
     fi
   fi
+  # An optional caller-local slot receives only the first fixed diagnostic.
+  if [[ ${C1_CLEANUP_DETAIL+x} ]]; then C1_CLEANUP_DETAIL=$detail; fi
   return "$ok"
 }
 

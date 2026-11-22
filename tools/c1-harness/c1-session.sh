@@ -298,6 +298,7 @@ finish_r11() {
   local r11_exit=$1 listener=unverified cleanup_result=not-needed checkout=unverified verdict=FAIL
   local listener_state='' listener_detail='' C1_FINAL_PRIVACY=pending first_failure=none-recorded
   local monitor_shutdown=not-run session_cleanup=not-run cleanup_verification=not-run monitor_probe_failure=none-recorded
+  local C1_CLEANUP_DETAIL= cleanup_detail=not-run
   trap - EXIT
   trap '' INT TERM HUP
 
@@ -326,9 +327,11 @@ finish_r11() {
       session_cleanup=PASS
       if c1_verify_cleanup "$S"; then
         cleanup_verification=PASS
+        cleanup_detail=none
         cleanup_result=PASS
       else
         cleanup_verification="FAIL (exit $?)"
+        cleanup_detail=${C1_CLEANUP_DETAIL:-unclassified}
       fi
     else
       session_cleanup="FAIL (exit $?)"
@@ -350,6 +353,7 @@ finish_r11() {
   c1_log "R11 monitor shutdown: $monitor_shutdown"
   c1_log "R11 session cleanup: $session_cleanup"
   c1_log "R11 post-cleanup verification: $cleanup_verification"
+  c1_log "R11 post-cleanup reason: $cleanup_detail"
   c1_log "R11 final privacy evidence: $C1_FINAL_PRIVACY"
 
   {
@@ -366,6 +370,7 @@ finish_r11() {
     printf -- '- Monitor shutdown: %s\n' "$monitor_shutdown"
     printf -- '- Session cleanup: %s\n' "$session_cleanup"
     printf -- '- Post-cleanup verification: %s\n' "$cleanup_verification"
+    printf -- '- Post-cleanup reason: %s\n' "$cleanup_detail"
     printf -- '- Final privacy evidence: %s\n' "$C1_FINAL_PRIVACY"
     printf -- '- Cleanup: %s\n' "$cleanup_result"
     printf -- '- Monitor coverage: startup and shutdown only; sustained monitoring not tested\n'
