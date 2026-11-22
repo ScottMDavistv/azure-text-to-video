@@ -930,6 +930,80 @@ drain_timeout_evidence() (
     grep -q ' teardown-failed$' "$register" && c1_privacy_failed "$session"
 )
 
+# Unknown port status is not positive closure evidence. Exercise the real
+# watchdog with an inert status boundary and a fake monotonic clock: no
+# processes are signalled, no service listens, and production code is unchanged.
+startup_unknown_port() (
+  source "$BASE/lib/c1-lib.sh"
+  local variant session fake_tick startup_tick expected_tick expected_deadline
+  local expected_probes port_probes teardown_requests launcher_signals
+  local observed_tick observed_deadline register
+  for variant in unknown closed-then-unknown closed-control; do
+    session="$STATE/session.$variant"
+    fake_tick=1000 startup_tick=1000
+    port_probes=0 teardown_requests=0 launcher_signals=0
+    observed_tick=0 observed_deadline=0
+    expected_tick=1200 expected_deadline=1250 expected_probes=1
+    case "$variant" in
+      closed-then-unknown)
+        # The last proven closure (1000), not the unknown observation (1025)
+        # or the older supervisor start (900), must anchor the exposure budget.
+        startup_tick=900 expected_probes=2 ;;
+      closed-control)
+        expected_tick=1500 expected_deadline=1600 expected_probes=21 ;;
+    esac
+    mkdir "$session" || return 1
+    printf '11 31 %s\n' "$startup_tick" >"$session/startup"
+    printf '11 31\n' >"$session/supervisors"
+    printf '12 32 %s\n' "$session" >"$STATE/active"
+
+    c1_monitor_tick() { printf '%s\n' "$fake_tick"; }
+    c1_owner_status() { printf 'active\n'; }
+    c1_marked_pids() { :; }
+    c1_port_free() {
+      [[ "$1" == "$C1_NOVNC_PORT" ]] || exit 1
+      port_probes=$((port_probes + 1))
+      if [[ "$variant" == closed-control ]] ||
+         [[ "$variant" == closed-then-unknown && "$port_probes" == 1 ]]; then
+        return 0
+      fi
+      # Later probes would claim closure. Once uncertainty latches exposure,
+      # the watchdog must never consult them to reset/extend that deadline.
+      (( port_probes <= expected_probes )) || return 0
+      return 2  # Synthetic status unavailable; definitely not proof of closure.
+    }
+    c1_close_supervisor() {
+      [[ "$*" == "$session $C1_NOVNC_PORT 11 31 10" ]] || exit 1
+      teardown_requests=$((teardown_requests + 1))
+      observed_tick=$fake_tick observed_deadline=$C1_CLOSE_DEADLINE
+      (( fake_tick == expected_tick && C1_CLOSE_DEADLINE == expected_deadline &&
+         fake_tick < C1_CLOSE_DEADLINE )) || exit 1
+      return 0  # Inert teardown-request observation, not a real reaping claim.
+    }
+    c1_active_matches() { [[ "$*" == "$STATE $session 12 32" ]]; }
+    c1_signal_identity() {
+      [[ "$*" == 'TERM 12 32' && "$teardown_requests" == 1 ]] || exit 1
+      launcher_signals=$((launcher_signals + 1))
+      rm -rf -- "$session"
+      rm -- "$STATE/active"
+    }
+    sleep() {
+      fake_tick=$((fake_tick + 25))
+      (( fake_tick <= 1700 )) || exit 1  # Bound a failed regression without wall-clock waits.
+    }
+
+    c1_watchdog_loop "$STATE" "$session" 12 32 || return 1
+    (( teardown_requests == 1 && launcher_signals == 1 &&
+       port_probes == expected_probes && observed_tick == expected_tick &&
+       observed_deadline == expected_deadline )) || return 1
+    register=$(c1_privacy_register "$session") || return 1
+    grep -q ' startup-timeout$' "$register" || return 1
+    [[ ! -e "$session" && ! -e "$STATE/active" ]] || return 1
+    printf 'startup %s: teardown tick=%s, deadline=%s, port probes=%s (fake centiseconds)\n' \
+      "$variant" "$observed_tick" "$observed_deadline" "$port_probes"
+  done
+)
+
 run_case() {
   BASE=$1 FIXTURE=$(mktemp -d "$TMP/case.XXXXXXXX")
   STATE="$FIXTURE/state"
@@ -1033,7 +1107,7 @@ if [[ "${1:-}" == --mutations ]]; then
   done
 else
   for case_name in competing_launchers overlapping_cleaners malformed_active retained_privacy_failure reused_owner watchdog_waits_for_launcher r11_exit_status_and_late_privacy launcher_crash_recovery active_publication_preserves_owner verification_is_retried \
-    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss websockify_reaping_ack monitor_probe_failure_evidence harness_head_drift guarded_delayed_startup drain_timeout_evidence monitor_stop_ack_race; do
+    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss websockify_reaping_ack monitor_probe_failure_evidence harness_head_drift guarded_delayed_startup drain_timeout_evidence monitor_stop_ack_race startup_unknown_port; do
     if ! run_case "$HERE" "$case_name"; then
       printf 'FAIL: %s\n' "$case_name" >&2
       for log in "$FIXTURE"/*.log; do [[ ! -f "$log" ]] || cat "$log" >&2; done
