@@ -704,26 +704,42 @@ PY3_LA=$(command -v python3)
 t 'L-A: interrupted cleanup: recovery removes the TERM-ignoring adopted child and retires all records' la_interrupted
 
 la_supervisor_lifetime() (   # the supervisor outlives every descendant through cleanup
-  local s leader child cst sup sst smp; s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER"); smp="$TMP/la-samples.$BASHPID"
+  local s leader child cst lifetime_supervisor supervisor_start saw_escalation=0
+  s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
   # shellcheck disable=SC2016
   leader=$(c1_spawn "$s" la bash -c 'env -i setsid "$2" -I -c "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open(\"$1/child\",\"w\").write(str(__import__(\"os\").getpid())); time.sleep(300)" & wait' _ "$s" "$PY3_LA")
   la_wait '[[ -s "$s/child" ]]'; child=$(cat "$s/child"); cst=$(c1_proc_start "$child")
-  sup=$(la_sup "$s"); sst=$(c1_proc_start "$sup")
+  lifetime_supervisor=$(la_sup "$s"); supervisor_start=$(c1_proc_start "$lifetime_supervisor")
   trap '[[ "$(c1_proc_start "$child")" != "$cst" ]] || kill -KILL "$child" 2>/dev/null || true' EXIT
-  kill -KILL "$leader"; la_wait '[[ $(c1_proc_stat_field "$child" 2) == "$sup" ]]'   # orphaned, adopted
-  ( while :; do   # sample "child-alive supervisor-alive" every 10 ms until both are gone
-      c=0 p=0
-      [[ "$(c1_proc_start "$child")" == "$cst" && ! "$(c1_proc_stat_field "$child" 1)" =~ ^[ZX]$ ]] && c=1
-      [[ "$(c1_proc_start "$sup")" == "$sst" && ! "$(c1_proc_stat_field "$sup" 1)" =~ ^[ZX]$ ]] && p=1
-      echo "$c $p"; (( c || p )) || break; sleep 0.01
-    done >"$smp" ) & local sampler=$!
-  c1_cleanup_session "$ROOT" "$s"; c1_verify_cleanup "$s"
-  wait "$sampler"
-  # Never a moment where the descendant lived without its supervisor; the
-  # supervisor stayed up through the TERM grace period and the KILL escalation.
-  ! grep -qx '1 0' "$smp" && [[ $(grep -cx '1 1' "$smp") -ge 50 ]] && tail -1 "$smp" | grep -qx '0 0'
+  kill -KILL "$leader"
+  la_wait '[[ $(c1_proc_stat_field "$child" 2) == "$lifetime_supervisor" ]]'
+
+  eval "$(declare -f c1_signal_owned | sed '1s/c1_signal_owned/fixture_signal_owned/')"
+  c1_signal_owned() {
+    if [[ "$1" == USR1 && "$2" == "$lifetime_supervisor" ]]; then
+      # Check at the escalation boundary, while the TERM-ignoring child is
+      # still adopted and the supervisor has yet to acknowledge its reaping.
+      [[ "$(c1_proc_start "$child")" == "$cst" &&
+        "$(c1_proc_stat_field "$child" 2)" == "$lifetime_supervisor" &&
+        "$(c1_owner_status "$lifetime_supervisor" "$supervisor_start")" == active &&
+        ! -e "$(c1_reaped_register "$s")" ]] || return 1
+      saw_escalation=1
+    fi
+    fixture_signal_owned "$@"
+  }
+  # The direct descendant signal would kill the child before the supervisor
+  # escalation. Force this fixture to exercise the supervisor's own KILL path.
+  eval "$(declare -f c1_signal_identity | sed '1s/c1_signal_identity/fixture_signal_identity/')"
+  c1_signal_identity() {
+    if [[ "$1" == KILL && "$2" == "$child" ]]; then return 0; fi
+    fixture_signal_identity "$@"
+  }
+  c1_cleanup_session "$ROOT" "$s"
+  [[ "$saw_escalation" == 1 && "$(c1_proc_start "$child")" != "$cst" ]]
+  grep -Fxq "$lifetime_supervisor $supervisor_start" "$(c1_reaped_register "$s")"
+  c1_verify_cleanup "$s"
 )
-t 'L-A: supervisor stays alive through cleanup until its last descendant is reaped (sampled)' la_supervisor_lifetime
+t 'L-A: supervisor owns its adopted child at escalation and acknowledges reaping' la_supervisor_lifetime
 
 la_pid_reuse() (   # supervisor identities whose PID now names an UNRELATED process
   local s v vst rc=0 name=session.la-reuse

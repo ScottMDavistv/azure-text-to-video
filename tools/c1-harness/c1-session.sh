@@ -335,8 +335,7 @@ finish_r11() {
     [[ "$C1_FINAL_PRIVACY" == clean ]] || PORT_PRIVATE=failed
     monitor_probe_failure=$(c1_read_monitor_probe_failure "$S") || monitor_probe_failure=none-recorded
   fi
-  if [[ "$(git -C "$REPO" rev-parse HEAD)" == "$R11_HEAD" ]] &&
-    c1_verify_harness_clean "$REPO" "$HARNESS_REL"; then
+  if c1_verify_harness_head "$REPO" "$HARNESS_REL" "$R11_HEAD"; then
     checkout=verified
   fi
   if (( r11_exit == 0 )) && [[ "$PORT_PRIVATE" == verified-* && "$listener" == verified-loopback &&
@@ -380,9 +379,10 @@ r11_session() {
   [[ "${CODESPACES:-}" == true ]] || { c1_err 'r11-only requires a GitHub Codespace'; return 1; }
   scrub_env
   c1_recover_before_start "$ROOT" || return 1
-  R11_HEAD=$(git -C "$REPO" rev-parse HEAD)
+  R11_HEAD=$(git -C "$REPO" rev-parse --verify HEAD) || return 1
   preflight || return 1
   install_desktop_deps || return 1
+  c1_verify_harness_head "$REPO" "$HARNESS_REL" "$R11_HEAD" || return 1
   mkdir -p "$EVIDENCE_DIR"
   R11_EVIDENCE=$(mktemp "$EVIDENCE_DIR/c1-r11-$(date -u +%Y%m%dT%H%M%SZ).XXXXXXXX.md")
   PORT_PRIVATE=not-started BASE='' HDR='' WS='' WSST='' REQ_GH=0

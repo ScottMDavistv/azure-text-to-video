@@ -214,7 +214,7 @@ r11_exit_status_and_late_privacy() (
     [[ "$variant" != verify-failed ]] || return 8
   }
   git() { printf 'fixture\n'; }
-  for variant in clean late interrupted stop-failed cleanup-failed verify-failed; do
+  for variant in clean late startup-failed interrupted stop-failed cleanup-failed verify-failed; do
     S=$(c1_session_new "$ROOT" "$$") || return 1
     R11_EVIDENCE="$FIXTURE/$variant.md"
     PORT_PRIVATE=verified-probe-gh
@@ -225,9 +225,14 @@ r11_exit_status_and_late_privacy() (
         return 1
       c1_record_monitor_probe_failure "$S" 'unauthenticated probe got (HTTP 200)' || return 1
     fi
+    if [[ "$variant" == startup-failed ]]; then
+      PORT_PRIVATE=failed
+      printf 'fixture unverified\n' >"$S/privacy-failed"
+    fi
     status=0
     (
       trap 'finish_r11 "$?"' EXIT
+      if [[ "$variant" == startup-failed ]]; then exit 1; fi
       if [[ "$variant" == interrupted ]]; then exit 130; fi
       exit 0
     ) >"$FIXTURE/$variant.log" 2>&1 || status=$?
@@ -238,7 +243,20 @@ r11_exit_status_and_late_privacy() (
           grep -Fxq -- '- Port privacy: failed' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Monitor probe failure: unauthenticated probe got (HTTP 200)' "$R11_EVIDENCE" || return 1
         ;;
-      interrupted) [[ "$status" == 130 ]] && grep -qx -- '- R11: FAIL' "$R11_EVIDENCE" || return 1 ;;
+      startup-failed|interrupted)
+        local expected_status=1
+        if [[ "$variant" == interrupted ]]; then expected_status=130; fi
+        [[ "$status" == "$expected_status" ]] &&
+          grep -Fxq -- '- Session cleanup: PASS' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Post-cleanup verification: PASS' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- R11: FAIL' "$R11_EVIDENCE" || return 1
+        if [[ "$variant" == startup-failed ]]; then
+          grep -Fxq -- '- Monitor shutdown: not-run' "$R11_EVIDENCE" &&
+            grep -Fxq -- '- Final privacy evidence: failed' "$R11_EVIDENCE" &&
+            [[ -s "$(c1_privacy_register "$S")" ]] || return 1
+        fi
+        [[ ! -e "$ROOT/.${S##*/}.pending" && ! -e "$ROOT/active" ]] || return 1
+        ;;
       stop-failed)
         [[ "$status" == 1 ]] &&
           grep -Fxq -- '- Monitor shutdown: FAIL (exit 6)' "$R11_EVIDENCE" &&
@@ -491,7 +509,8 @@ fi
 MONITOR_FIXTURE
 
   for variant in orderly exited stalled; do
-    timeout -k 4s 12s bash "$FIXTURE/monitor-launcher.sh" "$BASE" "$STATE" "$FIXTURE" "$variant" \
+    # This guard covers startup, heartbeat expiry and full process cleanup.
+    timeout -k 4s 30s bash "$FIXTURE/monitor-launcher.sh" "$BASE" "$STATE" "$FIXTURE" "$variant" \
       >"$FIXTURE/$variant.log" 2>&1 &
     launcher=$!
     wait_for_file "$FIXTURE/$variant.ready" || return 1
@@ -512,6 +531,27 @@ MONITOR_FIXTURE
     fi
     [[ ! -e "$session_path" ]] && ! kill -0 "$ws" 2>/dev/null && ! kill -0 "$worker" 2>/dev/null || return 1
   done
+)
+
+websockify_reaping_ack() (
+  source "$BASE/lib/c1-lib.sh"
+  local session="$STATE/session.fixture" reaped signal_count=0
+  mkdir "$session" || return 1
+  printf '11 31 12 32\n' >"$session/websockify-supervisor"
+  printf '12 32\n' >"$session/supervisors"
+  reaped=$(c1_reaped_register "$session") || return 1
+
+  c1_port_free() { return 0; }  # Give every attempt positive port closure evidence.
+  c1_signal_owned() {
+    [[ "$*" == "USR1 12 $session 32" ]] || return 1
+    signal_count=$((signal_count + 1))
+  }
+  sleep() { :; }
+  if c1_close_websockify_tree "$session" 6080 11 31 1; then return 1; fi
+  printf '12 33\n13 32\n' >"$reaped"
+  if c1_close_websockify_tree "$session" 6080 11 31 1; then return 1; fi
+  printf '12 32\n' >>"$reaped"
+  c1_close_websockify_tree "$session" 6080 11 31 1 && [[ "$signal_count" == 3 ]]
 )
 
 monitor_probe_failure_evidence() (
@@ -540,17 +580,77 @@ monitor_probe_failure_evidence() (
 )
 
 harness_head_drift() (
-  local repo="$FIXTURE/repo" pinned
-  git init -q "$repo" &&
-    mkdir "$repo/harness" &&
-    printf 'same harness\n' >"$repo/harness/file" &&
-    git -C "$repo" add harness &&
-    git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm initial || return 1
-  pinned=$(git -C "$repo" rev-parse HEAD) || return 1
-  c1_verify_harness_head "$repo" harness "$pinned" || return 1
-  git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit --allow-empty -qm drift || return 1
-  c1_verify_harness_clean "$repo" harness || return 1
-  ! c1_verify_harness_head "$repo" harness "$pinned"
+  source "$BASE/lib/c1-lib.sh"
+  eval "$(sed -n '/^clean_node() ($/,/^)/p; /^on_exit() {$/,/^}$/p; /^skip_phase() /p; /^session() {$/,/^}$/p; /^finalize_run() {$/,/^}$/p; /^main() {$/,/^}$/p' "$BASE/c1-session.sh")"
+  local HERE=$BASE ROOT=$STATE REPO="$FIXTURE/repo" HARNESS_REL=harness pinned variant status
+  local WT="$FIXTURE/approved" FE EVIDENCE_DIR S='' AUTH PW LIB="$BASE/lib/c1-lib.sh"
+  local PROD_PENDING=none
+  local -a git_fixture=(git -C "$REPO" -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false)
+  local -a CHECKS=(harness_clean auth_ancestor_and_approved_diff production_review_status_recorded
+    exact_head_clean_worktree vite_host_guard webrtc_policy_pinned localhost_loopback_only ports_free
+    clean_after_dependency_install listener_evidence_available)
+  mkdir "$REPO" &&
+    "${git_fixture[@]}" init -q &&
+    mkdir "$REPO/harness" "$REPO/frontend" &&
+    mkdir "$REPO/frontend/e2e" &&
+    touch "$REPO/frontend/e2e/run-browser-mutations.mjs" &&
+    printf 'same harness\n' >"$REPO/harness/file" &&
+    "${git_fixture[@]}" add harness frontend &&
+    "${git_fixture[@]}" commit -qm initial || return 1
+  pinned=$("${git_fixture[@]}" rev-parse HEAD) || return 1
+  AUTH=$pinned PW=$pinned
+
+  scrub_env() { :; }
+  preflight() { c1_verify_harness_clean "$REPO" "$HARNESS_REL"; }
+  install_deps() { c1_verify_clean_tree "$WT" "$PW"; }
+  c1_port_free() { return 0; }
+  c1_expected_browser() { printf '%s\n' "$C1_CHROMIUM_VERSION"; }
+  node() {
+    if [[ "$1" == -p ]]; then printf '%s\n' "$C1_PLAYWRIGHT_VERSION"
+    else command node "$@"; fi
+  }
+  eval "$(declare -f clean_node | sed '1s/clean_node/fixture_clean_node/')"
+  clean_node() {
+    if [[ "$1" == --input-type=module ]]; then printf '%s\n' "$C1_CHROMIUM_VERSION"
+    else fixture_clean_node "$@"; fi
+  }
+  run_phase() {
+    if [[ "$variant" == drift && "$1" == unconfigured ]]; then
+      "${git_fixture[@]}" commit --allow-empty -qm drift &&
+        c1_verify_harness_clean "$REPO" "$HARNESS_REL" || exit 2
+    fi
+    if [[ "$1" == static-mutation || "$1" == browser-mutation ]]; then
+      local now
+      now=$(c1_utc) || exit 2
+      printf '%s|ran|%s|%s|0\n' "$1" "$now" "$now" >>"$S/phases"
+    else
+      skip_phase "$1"
+    fi
+  }
+
+  # Use a separate approved checkout to isolate harness drift from worktree drift.
+  git clone -q --local "$REPO" "$WT" &&
+    git -C "$WT" checkout -q --detach "$PW" || return 1
+  FE="$WT/frontend"
+  for variant in clean drift; do
+    EVIDENCE_DIR="$FIXTURE/$variant"
+    status=0
+    ( main run --offline-only ) >"$FIXTURE/$variant.log" 2>&1 || status=$?
+    local evidence=("$EVIDENCE_DIR"/c1-evidence-*.md)
+    local review=("$EVIDENCE_DIR"/c1-review-package-*.md)
+    grep -Fq -- "Harness: \`tools/c1-harness/\` at \`$pinned\`" "${review[0]}" &&
+      grep -Fq -- '- PASS — desktop and test processes stopped' "${evidence[0]}" || return 1
+    if [[ "$variant" == clean ]]; then
+      [[ "$status" == 0 ]] &&
+        grep -Fq "**Harness summary: INCOMPLETE.**" "${evidence[0]}" &&
+        grep -Fq "| Harness SHA | \`$pinned\` (clean: true) |" "${evidence[0]}" || return 1
+    else
+      [[ "$status" == 1 && "$("${git_fixture[@]}" rev-parse HEAD)" != "$pinned" ]] &&
+        grep -Fq "**Harness summary: FAIL.**" "${evidence[0]}" &&
+        grep -Fq '| R1 | Clean exact-head checkout verification | **FAIL** |' "${evidence[0]}" &&
+        grep -Fq "| Harness SHA | \`$pinned\` (clean: false) |" "${evidence[0]}" || return 1
+    fi
+  done
 )
 
 run_case() {
@@ -571,7 +671,9 @@ if [[ "${1:-}" == --mutations ]]; then
     'watchdog_ambiguous_record:watchdog-record' 'watchdog_ambiguous_record:watchdog-lock' \
     'watchdog_exits_after_cleanup:watchdog-exit' \
     'run_finalization:privacy-flag' 'run_finalization:cleanup-verdict' 'run_finalization:post-hash-edit' \
-    'signal_identity_checks_start_time:signal-identity'; do
+    'signal_identity_checks_start_time:signal-identity' \
+    'r11_exit_status_and_late_privacy:trap-status' 'r11_exit_status_and_late_privacy:monitor-stop' \
+    'websockify_reaping_ack:port-only' 'harness_head_drift:harness-drift'; do
     case_name=${spec%:*} mutation=${spec#*:}
     mutant=$(mktemp -d "$TMP/mutant.XXXXXXXX")
     mkdir "$mutant/lib"
@@ -601,6 +703,10 @@ if [[ "${1:-}" == --mutations ]]; then
       cleanup-verdict) sed -i '/if (args.cleanup === .FAIL.) result.overall/d' "$mutant/lib/c1-evidence.mjs" ;;
       post-hash-edit) sed -i 's/writeFileSync(ev, evidence,/writeFileSync(ev, evidence + "\\n",/' "$mutant/lib/c1-evidence.mjs" ;;
       signal-identity) sed -i '/if fields\[19\] == start.encode():/d; /signal.pidfd_send_signal(fd/s/^        /    /' "$mutant/lib/c1-lib.sh" ;;
+      trap-status) sed -i '/rm -f -- "\$root\/active"$/{n;s/return "\$?"/return/;}' "$mutant/lib/c1-lib.sh" ;;
+      monitor-stop) sed -i '/monitor_shutdown="FAIL (exit \$?)"/{n;/PORT_PRIVATE=failed/d;}' "$mutant/c1-session.sh" ;;
+      port-only) sed -i '/^    if .*"\$reg".*c1_port_free/s/^    if .*c1_port_free/    if c1_port_free/' "$mutant/lib/c1-lib.sh" ;;
+      harness-drift) sed -i '/^  c1_verify_harness_head .*HARNESS_CLEAN=false/d' "$mutant/c1-session.sh" ;;
       watchdog)
         sed -i '/c1_signal_identity TERM "\$owner"/i\      c1_cleanup_session "$root" "$session"' "$mutant/lib/c1-lib.sh"
         ;;
@@ -613,7 +719,7 @@ if [[ "${1:-}" == --mutations ]]; then
   done
 else
   for case_name in competing_launchers overlapping_cleaners malformed_active retained_privacy_failure reused_owner watchdog_waits_for_launcher r11_exit_status_and_late_privacy launcher_crash_recovery active_publication_preserves_owner verification_is_retried \
-    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss monitor_probe_failure_evidence harness_head_drift; do
+    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss websockify_reaping_ack monitor_probe_failure_evidence harness_head_drift; do
     if ! run_case "$HERE" "$case_name"; then
       printf 'FAIL: %s\n' "$case_name" >&2
       for log in "$FIXTURE"/*.log; do [[ ! -f "$log" ]] || cat "$log" >&2; done

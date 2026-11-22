@@ -1145,8 +1145,9 @@ _c1_cleanup_session() {
       c1_err 'cleanup evidence: active record could not be verified; record left untouched'
       return 1
     fi
+    # A bare return in an EXIT trap can reuse the launcher's exit status.
     rm -f -- "$root/active"
-    return
+    return "$?"
   fi
   if [[ -e "$root/active" || -L "$root/active" ]]; then
     c1_read_active "$root" || return 1
@@ -1735,7 +1736,7 @@ c1_record_privacy_failure() {
     if printf '%s %s\n' "$(c1_utc)" "$reason" >"$temp" &&
        ln -T -- "$temp" "$register" 2>/dev/null; then
       rm -f -- "$temp"
-      return
+      return "$?"
     fi
     rm -f -- "$temp" || return 1
   fi
