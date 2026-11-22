@@ -2153,6 +2153,15 @@ c1_watchdog_loop() {
       return 0
     fi
     launcher_state=$(c1_owner_status "$owner" "$owner_start") || return 1
+    if [[ "$launcher_state" == stale && -n "$startup_pid" ]]; then
+      # The acknowledged startup supervisor owns the desktop worker tree.
+      # Drain it before taking the lifecycle lock or waiting for generic cleanup.
+      now=$(c1_monitor_tick) || return 1
+      C1_CLOSE_DEADLINE=$((10#$now + 75))
+      c1_close_supervisor "$session" "$C1_NOVNC_PORT" "$startup_pid" "$startup_start" 10 ||
+        c1_record_privacy_failure "$session" teardown-failed || true
+      startup_pid=''
+    fi
     if [[ "$launcher_state" == stale ]] && c1_lock_state "$root"; then
       c1_cleanup_session "$root" "$session" "$owner" "$owner_start" || return 1
       c1_verify_cleanup "$session"

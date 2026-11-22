@@ -462,6 +462,7 @@ META
 
 monitor_shutdown_and_loss() (
   local variant launcher status session_path ws worker monitor register started closed
+  local owner supervisor supervisor_start connection step verified
   cat >"$FIXTURE/monitor-launcher.sh" <<'MONITOR_FIXTURE'
 set -Eeuo pipefail
 source "$1/lib/c1-lib.sh"
@@ -501,8 +502,16 @@ with socket.socket() as listener:
         os.waitpid(child, 0)
     else:
         os.setsid()
-        Path(sys.argv[1]).write_text(f"{os.getpid()}\n", encoding="ascii")
-        signal.pause()
+        ready = Path(sys.argv[1])
+        if ready.name == "launcher-loss.worker":
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            ready.write_text(f"{os.getpid()}\n", encoding="ascii")
+            with listener.accept()[0] as connection:
+                connection.sendall(b"connected\n")
+                signal.pause()
+        else:
+            ready.write_text(f"{os.getpid()}\n", encoding="ascii")
+            signal.pause()
 PYTHON
 ws=$(C1_GUARD_STARTUP=1 c1_spawn_desktop "$session_path" websockify python3 -I "$fixture/worker.py" \
   "$fixture/$variant.worker" "$C1_NOVNC_PORT")
@@ -532,6 +541,11 @@ monitor=$(c1_spawn "$session_path" privacy-monitor bash -c '
 monitor_start=$(c1_proc_start "$monitor")
 while ! c1_monitor_healthy "$session_path" "$monitor" "$monitor_start"; do sleep 0.02; done
 c1_arm_privacy_monitor "$session_path" "$monitor" "$monitor_start" "$ws" "$ws_start"
+if [[ "$variant" == launcher-loss ]]; then
+  # Let the test hold the lifecycle lock while the watchdog drains the tree.
+  exec {C1_STATE_LOCK_FD}>&-
+  printf '%s %s %s\n' "$$" "$supervisor" "$supervisor_start" >"$fixture/$variant.owner"
+fi
 printf '%s %s %s\n' "$session_path" "$ws" "$monitor" >"$fixture/$variant.ready"
 if [[ "$variant" == orderly ]]; then
   c1_stop_privacy_monitor "$session_path" "$monitor" "$monitor_start"
@@ -544,7 +558,7 @@ else
 fi
 MONITOR_FIXTURE
 
-  for variant in startup orderly exited stalled ambiguous; do
+  for variant in startup orderly exited stalled ambiguous launcher-loss; do
     # This guard covers startup, heartbeat expiry and full process cleanup.
     timeout -k 4s 30s bash "$FIXTURE/monitor-launcher.sh" "$BASE" "$STATE" "$FIXTURE" "$variant" \
       >"$FIXTURE/$variant.log" 2>&1 &
@@ -561,6 +575,36 @@ MONITOR_FIXTURE
         else
           : >"$FIXTURE/$variant.fail-probe"
         fi
+        ;;
+      launcher-loss)
+        read -r owner supervisor supervisor_start <"$FIXTURE/$variant.owner" || return 1
+        exec {connection}<>"/dev/tcp/127.0.0.1/$C1_NOVNC_PORT" || return 1
+        IFS= read -r -t 2 -u "$connection" closed && [[ "$closed" == connected ]] || return 1
+        c1_lock_state "$STATE" || return 1
+        register=$(c1_reaped_register "$session_path") || return 1
+        started=$(c1_monitor_tick) || return 1
+        kill -KILL "$owner" || return 1
+        verified=0
+        for ((step=0; step<125; step++)); do
+          if grep -Fxsq -- "$supervisor $supervisor_start" "$register" &&
+             c1_port_free "$C1_NOVNC_PORT" && ! kill -0 "$worker" 2>/dev/null; then
+            verified=1
+            break
+          fi
+          sleep 0.02
+        done
+        closed=$(c1_monitor_tick) || return 1
+        exec {connection}>&-
+        exec {C1_STATE_LOCK_FD}>&-
+        wait "$launcher" || true
+        for ((step=0; step<150; step++)); do
+          [[ -e "$session_path" ]] || break
+          sleep 0.02
+        done
+        (( verified && 10#$closed >= 10#$started && 10#$closed - 10#$started <= 250 )) || return 1
+        [[ ! -e "$session_path" && ! -e "$STATE/active" ]] || return 1
+        printf 'Launcher loss to verified worker reaping and port closure: %d ms\n' "$(( (10#$closed - 10#$started) * 10 ))"
+        continue
         ;;
     esac
     status=0
@@ -726,7 +770,8 @@ if [[ "${1:-}" == --mutations ]]; then
     'run_finalization:privacy-flag' 'run_finalization:cleanup-verdict' 'run_finalization:post-hash-edit' \
     'signal_identity_checks_start_time:signal-identity' \
     'r11_exit_status_and_late_privacy:trap-status' 'r11_exit_status_and_late_privacy:monitor-stop' \
-    'websockify_reaping_ack:port-only' 'harness_head_drift:harness-drift'; do
+    'websockify_reaping_ack:port-only' 'harness_head_drift:harness-drift' \
+    'monitor_shutdown_and_loss:launcher-loss-drain'; do
     case_name=${spec%:*} mutation=${spec#*:}
     mutant=$(mktemp -d "$TMP/mutant.XXXXXXXX")
     mkdir "$mutant/lib"
@@ -760,6 +805,7 @@ if [[ "${1:-}" == --mutations ]]; then
       monitor-stop) sed -i '/monitor_shutdown="FAIL (exit \$?)"/{n;/PORT_PRIVATE=failed/d;}' "$mutant/c1-session.sh" ;;
       port-only) sed -i '/^    if .*"\$reg".*c1_port_free/s/^    if .*c1_port_free/    if c1_port_free/' "$mutant/lib/c1-lib.sh" ;;
       harness-drift) sed -i '/^  c1_verify_harness_head .*HARNESS_CLEAN=false/d' "$mutant/c1-session.sh" ;;
+      launcher-loss-drain) sed -i '/if \[\[ "\$launcher_state" == stale \&\& -n "\$startup_pid" \]\]; then/,/^    fi$/d' "$mutant/lib/c1-lib.sh" ;;
       watchdog)
         sed -i '/c1_signal_identity TERM "\$owner"/i\      c1_cleanup_session "$root" "$session"' "$mutant/lib/c1-lib.sh"
         ;;
