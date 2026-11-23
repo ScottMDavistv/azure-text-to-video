@@ -266,7 +266,7 @@ r11_exit_status_and_late_privacy() (
           grep -Fxq -- '- First failure observation: none-recorded' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Post-cleanup reason: none' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Websockify outcome: exit 37 (ordering unknown)' "$R11_EVIDENCE" &&
-          grep -Fxq -- '- Startup timing: listener-verification=unavailable monitor-start=unavailable first-probe=unavailable exposure-to-probe-result=unavailable exposure-to-watchdog-handoff=900ms' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Startup timing: listener-verification=unavailable monitor-start=unavailable first-probe=unavailable exposure-to-probe-result=unavailable exposure-to-watchdog-handoff=900ms auth-return=unavailable auth-write=unavailable auth-read=unavailable auth-read-incomplete=unavailable auth-read-budget-exhausted=unavailable' "$R11_EVIDENCE" &&
           grep -qx -- '- R11: PASS' "$R11_EVIDENCE" || return 1
         ;;
       late)
@@ -803,17 +803,24 @@ startup_timing_diagnostics() (
     c1_startup_mark "$session" monitor-start 131 &&
     c1_startup_mark "$session" probe-start 132 &&
     c1_startup_mark "$session" probe-result 194 &&
-    c1_startup_mark "$session" watchdog-handoff 199 || return 1
+    c1_startup_mark "$session" watchdog-handoff 199 &&
+    c1_startup_mark "$session" auth-return 191 &&
+    c1_startup_mark "$session" auth-write 192 &&
+    c1_startup_mark "$session" auth-read 193 || return 1
   out=$(c1_startup_timing_report "$session")
-  [[ "$out" == 'listener-verification=150ms monitor-start=60ms first-probe=620ms exposure-to-probe-result=940ms exposure-to-watchdog-handoff=990ms ' ]] || return 1
+  [[ "$out" == 'listener-verification=150ms monitor-start=60ms first-probe=620ms exposure-to-probe-result=940ms exposure-to-watchdog-handoff=990ms auth-return=590ms auth-write=600ms auth-read=610ms auth-read-incomplete=unavailable auth-read-budget-exhausted=unavailable ' ]] || return 1
   c1_startup_mark "$session" origin 123 && return 1
   rm -- "$session/startup-timing-origin"
   printf '100\n\0' >"$session/startup-timing-probe-result"
   printf '099\n' >"$session/startup-timing-monitor-start"
   rm -- "$session/startup-timing-watchdog-handoff"
   ln -s "$session/startup-timing-listener-start" "$session/startup-timing-watchdog-handoff"
+  printf '131\n' >"$session/startup-timing-auth-return"
+  rm -- "$session/startup-timing-auth-write"
+  ln -s "$session/startup-timing-listener-verified" "$session/startup-timing-auth-write"
+  printf '193\n\0' >"$session/startup-timing-auth-read"
   out=$(c1_startup_timing_report "$session")
-  [[ "$out" == 'listener-verification=150ms monitor-start=unavailable first-probe=unavailable exposure-to-probe-result=unavailable exposure-to-watchdog-handoff=unavailable ' ]] || return 1
+  [[ "$out" == 'listener-verification=150ms monitor-start=unavailable first-probe=unavailable exposure-to-probe-result=unavailable exposure-to-watchdog-handoff=unavailable auth-return=unavailable auth-write=unavailable auth-read=unavailable auth-read-incomplete=unavailable auth-read-budget-exhausted=unavailable ' ]] || return 1
 
   c1_https_probe() { printf '403'; }
   c1_monitor_tick() { printf '%s' "$simulated_tick"; }
