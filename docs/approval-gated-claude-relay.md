@@ -134,10 +134,41 @@ The applicability of CI checks must be supplied by a protected, trusted task led
 
 These checks remain an offline proposal, **not an activated GitHub required check or active collector**. The future adapter must independently authenticate GitHub metadata, policy applicability, approval provenance, workflow revision, race-safe current heads and branch creation. Independent security review and exact-head CI are still required before any development-only merge. Existing manual workflow approvals, protected-main rules, no paid FAL/overage, and no automatic agents remain unchanged.
 
+### Exact workflow evidence (offline re-review planner)
+
+A task snapshot supplies only candidate workflow names and positive Actions
+run IDs. It cannot authenticate its own evidence. The in-process offline
+planner must receive a separate trusted evidence lookup for each run and fixed
+workflow path; the JSON CLI has no authenticated adapter and returns a blocked
+review result. No such live adapter or permission to dispatch is included.
+
+The lookup must independently read the repository's Actions run and workflow
+metadata, protected-main identity, exact execution workflow source and its Git
+tree entries. Use records from the authenticated API or a separately trusted
+execution verifier, not task text, candidate-authored artifacts, archived job
+messages, trigger actors, or claimed boolean/string provenance. The planner
+requires the numeric run/workflow/repository identity and exact reviewed target
+head, and compares the exact allowlisted workflow's regular-file mode and Git
+blob ID at protected main, candidate head and actual execution revision.
+
+For pull requests, require the matching GitHub PR association, the canonical
+`refs/pull/<target>/merge` workflow ref, and independently verified merge
+parents (event-time main base and target head). The event-time main workflow
+blob must agree as well. The REST Actions run response alone does not prove
+this execution context; if it has no verified PR association or there is no
+trustworthy source/merge evidence for that run attempt, block rather than
+infer it from the trigger actor, display name, or current merge ref. Manual
+evidence requires the target branch/ref and exact head, plus a separate
+protected-ledger approval bound to repository, target, workflow and exact
+run/attempt. This only prepares a pending proposal; no workflow is started.
+
+The coding and target PR numbers must both be positive integer identifiers,
+must match the task, and must be different in both branch and review planning.
+
 
 ## Unified Approval Queue — development-only implementation (Issue #65, 2026-11-18)
 
-**Status: offline library and read-only CLI only. NOT ACTIVE.** `scripts/approval_relay_queue.py` (tests: `tests/design_management/test_approval_relay_queue.py`) adds no workflow, webhook, scheduler, GitHub write, agent launcher, network call or clock read. `ACTIVATION_ENABLED`, `DISPATCH_ENABLED` and `MERGE_ENABLED` are fixed `False`, and there is no dispatch or merge function to switch on. It reuses PR #58's inbox identities (`queue_item`, `corrective_task`, now with `implementation` and `post_merge_reconciliation` kinds) and the policy's exact-head CI rules (extracted unchanged into `verify_exact_head_ci`, now also failing closed on unhashable inputs).
+**Status: offline library and read-only CLI only. NOT ACTIVE.** `scripts/approval_relay_queue.py` (tests: `tests/design_management/test_approval_relay_queue.py`) adds no workflow, webhook, scheduler, GitHub write, agent launcher, network call or clock read. `ACTIVATION_ENABLED`, `DISPATCH_ENABLED` and `MERGE_ENABLED` are fixed `False`, and there is no dispatch or merge function to switch on. It reuses PR #58's inbox identities (`queue_item`, `corrective_task`, now with `implementation` and `post_merge_reconciliation` kinds) and the hardened policy's exact-head CI verifier shared with review preparation. A separate trusted target and workflow lookup are mandatory; the older caller-supplied `trusted_workflow` fields cannot establish provenance. The target and event-time PR base must be `main`; an old run against a stacked base cannot be reused.
 
 | Component | Behavior |
 |---|---|
@@ -145,9 +176,9 @@ These checks remain an offline proposal, **not an activated GitHub required chec
 | Durable ledger | Append-only JSONL, hash-chained from a zero genesis, contiguous sequence, monotonic time, strict parsing (duplicate keys, NaN, floats, blank lines, missing final newline rejected). Each event type has an allowlisted source; GitHub comments, agents and models are not sources, and source labels are never authentication. Replay re-verifies every owner approval **and every certification attestation**. `append` requires `trusted_now` and stamps the event time from it; replay with `trusted_now` rejects future-dated events. Malformed or unhashable fields fail closed with `ValueError`. Truncation is detectable only against an externally retained head hash (`anchor_hash`). |
 | Owner approval | `verify_attestation` checks a structured attestation bound to record ID, payload digest, repository, kind, PR and head SHA; numeric owner ID allowlist; `issued_at ≤ now < expires_at`, TTL ≤ 24h; single-use nonce across the ledger; constant-time MAC check. Approval yields `approved_not_dispatched`; a merge decision never sets `merge_enabled`. The module cannot sign. |
 | Read-only reconciliation | `reconcile` consumes a trusted snapshot and returns proposals only (`applied: false`): invalidate stale SHA / closed PRs, complete an approved merge decision only at the approved head, raise an owner-visible `security_alert` hold (`SECURITY HOLD: PR merged at an unapproved exact head`) when a `security_merge` decision's PR merged without an approval at that exact head, hold when a PR is absent, report a merged branch-correction target as superseded, and prepare a read-only `post_merge_reconciliation` record after a merge. `normalize_pull` drops GitHub's test merge commit on open PRs. The reconciler may enqueue only post-merge reconciliation records. |
-| Prioritization | P0→P3, then security remediation → branch correction → implementation → review → merge → post-merge; deterministic tiebreak by PR and ID. Unknown, invalidated/withdrawn, incomplete and cyclic dependencies block. |
+| Prioritization | P0→P3, then security remediation → branch correction → implementation → review → merge → post-merge; deterministic tiebreak by PR and ID. Unknown, invalidated/withdrawn, incomplete and cyclic dependencies block. A security-merge review dependency must be certified for the same repository, PR and exact head; a plain completion cannot substitute. An exact match still awaits the separate owner decision. |
 | Capacity | At most two `active` sessions across Claude/Copilot/Codex/other; an expired lease never recorded as ended still counts. Admission is advisory, requires prior verified approval and a kind-matching role, rejects session-ID reuse and owner-only merge records, reserves the last slot for unstaffed agent-executable P0 work (owner-only merge decisions never reserve it), and never pre-empts or ends a session. |
-| Certification | `certify` validates the record itself (identity, digest, approved state), treats the review report as untrusted data with an exact key set (injected instruction fields rejected), and requires full-diff scope at the current exact head, a reviewer session admitted for that record, a trusted `reviewed_range` (`trusted-git-range-adapter`) ending at the exact head that lists every PR in the stack and every agent session that authored a commit in `base..head`, a reviewer that is neither a contributor nor an implementer of any stacked PR, PASS verdict, no unresolved critical/high/medium findings, and PR #58 exact-head CI rules. The result pins `report_sha256`, `ci_evidence_sha256`, `session_ledger_sha256` and `reviewed_range_sha256`. A ledger `certify` event is accepted only with an owner certification attestation (separate scheme and `certify` decision, single-use nonce shared with approvals) over `sha256(certification)`. Result is never merge authorization. |
+| Certification | `certify` validates the record itself (identity, digest, approved state), treats the review report as untrusted data with an exact key set (injected instruction fields rejected), and requires full-diff scope at the current exact head, a reviewer session admitted for that record, a trusted `reviewed_range` (`trusted-git-range-adapter`) ending at the exact head that lists every PR in the stack and every agent session that authored a commit in `base..head`, a reviewer that is neither a contributor nor an implementer of any stacked PR, PASS verdict, no unresolved critical/high/medium findings, and PR #58 exact-head CI rules on independently sourced packets for the same repository, PR and exact head. The CI digest binds the verified packets and target, not caller-supplied run descriptions. The result pins `report_sha256`, `ci_evidence_sha256`, `session_ledger_sha256` and `reviewed_range_sha256`. A ledger `certify` event is accepted only with an owner certification attestation (separate scheme and `certify` decision, single-use nonce shared with approvals) over `sha256(certification)`. Result is never merge authorization. |
 
 ### Remaining activation gates (each a separate owner decision)
 1. Replace the offline HMAC reference scheme with asymmetric owner signatures (signing key held only on an owner-controlled device; agents and adapters hold verification keys only) and independently review it.

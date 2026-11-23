@@ -17,7 +17,7 @@ from pathlib import Path
 
 from scripts import approval_relay_queue as q
 from scripts.approval_relay_inbox import consolidate, corrective_task, queue_item
-from scripts.approval_relay_policy import REQUIRED, prepare_review
+from scripts.approval_relay_policy import REQUIRED, REPO_ID, WORKFLOWS, prepare_review
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "scripts" / "approval_relay_queue.py"
@@ -101,12 +101,41 @@ def session(sid, role="implementer", pr=58, record_id=None, state="active",
             "source": "owner-attested-session-ledger"}
 
 
-def ci_runs(head):
-    return [{"name": n, "head_sha": head, "status": "completed", "conclusion": "success",
-             "event": "pull_request", "actor": "owner", "trusted_workflow": True,
-             "provenance": "verified-github-workflow-api",
-             "workflow_path": ".github/workflows/x.yml",
-             "workflow_ref": "refs/heads/main@" + M} for n in sorted(REQUIRED)]
+def ci_runs():
+    return [{"id": 100 + i, "name": name} for i, name in enumerate(sorted(REQUIRED))]
+
+
+def ci_target(record):
+    return {"repository": q.REPO, "number": record["pr_number"], "head_sha": record["head_sha"],
+            "head_branch": "feature/offline-review", "base_branch": "main",
+            "state": "open", "draft": True}
+
+
+def trusted_fixture(target, mutate=None):
+    """Simulated independent adapter; never reads the candidate's claim dict."""
+    names = {r["id"]: r["name"] for r in ci_runs()}
+    def lookup(ident, path):
+        name = names[ident]
+        assert path == ".github/workflows/" + WORKFLOWS[name]
+        repo, sha, pr = {"id": REPO_ID, "full_name": q.REPO}, target["head_sha"], target["number"]
+        test_merge = "e" * 40
+        files = {r: {"mode": "100644", "blob_sha": C} for r in (M, sha, test_merge)}
+        packet = {
+            "protected_main_sha": M, "workflow_files": files,
+            "workflow": {"id": ident + 100, "path": path},
+            "run": {"id": ident, "name": name, "status": "completed", "conclusion": "success",
+                    "event": "pull_request", "run_attempt": 1, "workflow_id": ident + 100,
+                    "path": path, "head_sha": sha, "repository": dict(repo), "head_repository": dict(repo),
+                    "pull_requests": [{"number": pr,
+                                       "head": {"sha": sha, "ref": target["head_branch"], "repo": dict(repo)},
+                                       "base": {"sha": M, "ref": "main", "repo": dict(repo)}}]},
+            "execution": {"run_id": ident, "run_attempt": 1, "workflow_sha": test_merge,
+                          "workflow_ref": f"{q.REPO}/{path}@refs/pull/{pr}/merge",
+                          "merge_parents": [M, sha]}}
+        if mutate is not None:
+            mutate(packet)
+        return packet
+    return lookup
 
 
 def pull(number, head, state="open", merged=False, merge=None, base="main"):
@@ -628,13 +657,17 @@ class Certification(unittest.TestCase):
                        "provenance": "trusted-report-import"}
 
     def run_cert(self, report=None, record=None, head=A, sessions=None, ci=None,
-                 source="trusted-protected-task-ledger", applicable=None, rng=None):
-        return q.certify(record or self.record, report or self.report, current_head_sha=head,
+                 source="trusted-protected-task-ledger", applicable=None, rng=None,
+                 target=None, lookup=True):
+        record = record or self.record
+        target = ci_target(record) if target is None else target
+        return q.certify(record, report or self.report, current_head_sha=head,
                          sessions=self.sessions if sessions is None else sessions,
                          ci_policy_source=source,
                          applicable_workflows=applicable or ["Security Checks", "Backend Python Tests"],
-                         ci=ci_runs(A) if ci is None else ci,
-                         reviewed_range=reviewed_range() if rng is None else rng)
+                         ci=ci_runs() if ci is None else ci,
+                         reviewed_range=reviewed_range() if rng is None else rng, ci_target=target,
+                         lookup_workflow_evidence=trusted_fixture(target) if lookup is True else lookup)
 
     def test_valid_certification_is_not_merge_authorization(self):
         out = self.run_cert()
@@ -691,18 +724,53 @@ class Certification(unittest.TestCase):
         self.assertIn("independent review", self.run_cert(record=impl())["reason"])
 
     def test_ci_rules_reused_from_pr58_policy(self):
-        old = ci_runs(B)
-        failed = ci_runs(A)
-        failed[0]["conclusion"] = "failure"
-        unattested = ci_runs(A)
-        for run in unattested:
-            run["provenance"] = "actor:ScottMDavistv"
-        for name, kwargs in (("stale", {"ci": old}), ("failed", {"ci": failed}),
-                             ("unattested", {"ci": unattested}), ("empty", {"ci": []}),
-                             ("untrusted applicability", {"source": "pr-description"}),
-                             ("unhashable applicability", {"applicable": [["Security Checks"]]})):
+        target = ci_target(self.record)
+        def change_run(**fields):
+            return trusted_fixture(target, lambda p: p["run"].update(fields))
+        claims = [dict(run, trusted_workflow=True, provenance="verified-github-workflow-api")
+                  for run in ci_runs()]
+        for name, kwargs in (
+            ("stale", {"lookup": change_run(head_sha=B)}),
+            ("failed", {"lookup": change_run(conclusion="failure")}),
+            ("missing association", {"lookup": change_run(pull_requests=[])}),
+            ("malformed evidence", {"lookup": lambda *_: {}}),
+            ("wrong workflow identity", {"lookup": change_run(workflow_id=42)}),
+            ("unattested legacy claim", {"ci": claims, "lookup": None}),
+            ("empty", {"ci": []}),
+            ("untrusted applicability", {"source": "pr-description"}),
+            ("unhashable applicability", {"applicable": [["Security Checks"]]}),
+        ):
             with self.subTest(name=name):
                 self.assertEqual(self.run_cert(**kwargs)["result"], "not_certified")
+
+    def test_same_pr_branch_and_main_binding(self):
+        target = ci_target(self.record)
+        for field, bad in (("number", 79), ("repository", "other/repo"),
+                           ("head_sha", B), ("base_branch", "stack-base")):
+            with self.subTest(field=field):
+                modified = dict(target, **{field: bad})
+                self.assertEqual(self.run_cert(target=modified)["result"], "not_certified")
+        self.assertEqual(self.run_cert(report=dict(self.report, base_ref="stack"))["result"],
+                         "not_certified")
+        trusted = trusted_fixture(target)
+        self.assertEqual(self.run_cert(target=dict(target, head_branch="different"),
+                                       lookup=trusted)["result"], "not_certified")
+        def stacked(packet):
+            packet["run"]["pull_requests"][0]["base"]["ref"] = "stack-base"
+        self.assertEqual(self.run_cert(lookup=trusted_fixture(target, stacked))["result"],
+                         "not_certified")
+
+    def test_digest_binds_verified_packets_not_candidate_metadata(self):
+        target = ci_target(self.record)
+        baseline = self.run_cert()
+        extra_claims = [dict(run, trusted_workflow=False, status="failed") for run in ci_runs()]
+        self.assertEqual(self.run_cert(ci=extra_claims), baseline)
+        def new_attempt(packet):
+            for field in ("run", "execution"):
+                packet[field]["run_attempt"] = 2
+        later = self.run_cert(lookup=trusted_fixture(target, new_attempt))
+        self.assertEqual(later["result"], "exact_head_certified")
+        self.assertNotEqual(later["ci_evidence_sha256"], baseline["ci_evidence_sha256"])
 
 
 class LedgerCertificationM1(unittest.TestCase):
@@ -723,8 +791,9 @@ class LedgerCertificationM1(unittest.TestCase):
                   "provenance": "trusted-report-import"}
         self.cert = q.certify(self.record, report, current_head_sha=A, sessions=self.sessions,
                               ci_policy_source="trusted-protected-task-ledger",
-                              applicable_workflows=["Security Checks"], ci=ci_runs(A),
-                              reviewed_range=reviewed_range())
+                              applicable_workflows=["Security Checks"], ci=ci_runs(),
+                              reviewed_range=reviewed_range(), ci_target=ci_target(self.record),
+                              lookup_workflow_evidence=trusted_fixture(ci_target(self.record)))
         self.assertEqual(self.cert["result"], "exact_head_certified")
 
     def certify_event(self, data, events=None, source="owner-attestation", at=T0 + 20, **kw):
@@ -855,6 +924,38 @@ class LedgerCertificationM1(unittest.TestCase):
         self.assertEqual(entry["status"], "approved_awaiting_manual_start")
         self.assertFalse(records[merge["id"]]["merge_enabled"])
 
+    def test_merge_review_dependency_requires_certified_exact_identity(self):
+        exact = q.build_record("security_merge", 58, A, "P0", "Merge", "Owner only",
+                               depends_on=[self.rec["id"]])
+        stale = q.build_record("security_merge", 58, B, "P0", "Merge", "Owner only",
+                               depends_on=[self.rec["id"]])
+        other_pr = q.build_record("security_merge", 79, A, "P0", "Merge", "Owner only",
+                                  depends_on=[self.rec["id"]])
+        def certified_records(entry):
+            events = enqueue(self.events, entry, at=T0 + 11)
+            events = self.certify_event(self.good(), events=events)
+            result = q.replay(events, **TRUST)["records"]
+            self.assertEqual(result[self.rec["id"]]["state"], "certified")
+            return result
+
+        records = certified_records(exact)
+        order = {e["id"]: e for e in q.plan(records, [], T0)["order"]}
+        self.assertEqual(order[exact["id"]]["status"], "awaiting_owner_decision")
+        for entry in (stale, other_pr):
+            with self.subTest(pr=entry["pr_number"], head=entry["head_sha"]):
+                order = {e["id"]: e for e in q.plan(certified_records(entry), [], T0)["order"]}
+                self.assertEqual(order[entry["id"]]["status"], "blocked")
+
+        # Planner boundary checks: a plain completed review and mismatched
+        # repository must be rejected even in an in-memory snapshot. Replay
+        # itself permits only the configured repository.
+        for altered in ({"state": "completed"}, {"repository": "example/other"}):
+            with self.subTest(altered=altered):
+                other = dict(records, **{self.rec["id"]: dict(records[self.rec["id"]], **altered)})
+                by_id = {e["id"]: e for e in q.plan(other, [], T0)["order"]}
+                self.assertEqual(by_id[exact["id"]]["status"], "blocked")
+
+
 
 class CertifyInputsL1L2(unittest.TestCase):
     def setUp(self):
@@ -903,8 +1004,9 @@ class CertifyInputsL1L2(unittest.TestCase):
             with self.subTest(name=name):
                 out = q.certify(record, report, current_head_sha=A, sessions=sessions,
                                 ci_policy_source="trusted-protected-task-ledger",
-                                applicable_workflows=["Security Checks"], ci=ci_runs(A),
-                                reviewed_range=rng)
+                                applicable_workflows=["Security Checks"], ci=ci_runs(),
+                                reviewed_range=rng, ci_target=ci_target(record),
+                                lookup_workflow_evidence=trusted_fixture(ci_target(record)))
                 self.assertEqual(out["result"], "not_certified", name)
 
     def test_stack_implementer_session_excluded_across_prs(self):
@@ -933,9 +1035,8 @@ class CertifyInputsL1L2(unittest.TestCase):
         self.assertEqual(out["reason"], "reviewer session not admitted for this record")
 
     def test_non_canonical_evidence_fails_closed(self):
-        ci = ci_runs(A)
-        ci[0]["duration"] = 1.5
-        out = self.base.run_cert(ci=ci)
+        target = ci_target(self.base.record)
+        out = self.base.run_cert(lookup=trusted_fixture(target, lambda p: p.update(duration=1.5)))
         self.assertEqual(out["result"], "not_certified")
 
 
@@ -1124,11 +1225,14 @@ class SharedPolicyRegression(unittest.TestCase):
                   "integrated_coding_head_sha": B, "integration_target_pr": 46,
                   "integrated_in_target": True, "integration_provenance": "verified-git-ancestry",
                   "integrated_head_sha": A}
-        self.assertEqual(prepare_review(task, target, coding, ci_runs(A))["state"], "blocked")
+        lookup = trusted_fixture(target)
+        self.assertEqual(prepare_review(task, target, coding, ci_runs(),
+                                        lookup_workflow_evidence=lookup)["state"], "blocked")
         task["applicable_required_workflows"] = ["Security Checks"]
-        runs = ci_runs(A)
+        runs = ci_runs()
         runs[0]["name"] = ["Security Checks"]
-        self.assertEqual(prepare_review(task, target, coding, runs)["state"], "blocked")
+        self.assertEqual(prepare_review(task, target, coding, runs,
+                                        lookup_workflow_evidence=lookup)["state"], "blocked")
 
 
 class NoSideEffects(unittest.TestCase):

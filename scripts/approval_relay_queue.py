@@ -788,6 +788,17 @@ def plan(records, sessions, now):
                     reason = "unknown dependency " + dep
                 elif records[dep]["state"] in ("invalidated", "withdrawn"):
                     reason = "dependency %s is %s" % (dep, records[dep]["state"])
+                elif (r["action_kind"] == "security_merge" and
+                      records[dep]["action_kind"] == "claude_review"):
+                    review = records[dep]
+                    if review["state"] != "certified":
+                        reason = "dependency %s is not a certified review" % dep
+                    elif (review["repository"] != REPO or r["repository"] != REPO or
+                          type(review["pr_number"]) is not int or
+                          type(r["pr_number"]) is not int or
+                          review["pr_number"] != r["pr_number"] or
+                          review["head_sha"] != r["head_sha"]):
+                        reason = "dependency certified for a different repository, PR or head"
                 elif records[dep]["state"] not in DONE_STATES:
                     reason = "dependency %s not complete" % dep
                 if reason:
@@ -835,7 +846,8 @@ def _validate_range(reviewed_range, record):
 
 
 def certify(record, report, *, current_head_sha, sessions, ci_policy_source,
-            applicable_workflows, ci, reviewed_range):
+            applicable_workflows, ci, reviewed_range, ci_target=None,
+            lookup_workflow_evidence=None):
     """Evaluate an imported review report (untrusted data) for exact-head
     certification. A certification is never merge authorization, and on its
     own it cannot change ledger state: replay additionally requires an owner
@@ -863,7 +875,7 @@ def certify(record, report, *, current_head_sha, sessions, ci_policy_source,
     if (not isinstance(current_head_sha, str) or not SHA.fullmatch(current_head_sha) or
             report["head_sha"] != record["head_sha"] or current_head_sha != record["head_sha"]):
         return no("stale or mismatched exact head")
-    if report["scope"] != "full-diff-exact-head" or not isinstance(report["base_ref"], str):
+    if report["scope"] != "full-diff-exact-head" or report["base_ref"] != "main":
         return no("review scope is not full diff at exact head")
     if not isinstance(report["reviewer_session_id"], str):
         return no("reviewer session not admitted for this record")
@@ -894,8 +906,18 @@ def certify(record, report, *, current_head_sha, sessions, ci_policy_source,
             return no("malformed finding")
         if f["severity"] in BLOCKING and f["status"] != "resolved":
             return no("unresolved blocking finding " + f["id"])
-    ci_reason = verify_exact_head_ci(ci_policy_source, applicable_workflows, ci,
-                                     record["head_sha"])
+    # ci_target comes from a separate trusted GitHub read, not the report
+    # or CI claims; the shared verifier authenticates each supplied run ID.
+    if (not isinstance(ci_target, dict) or ci_target.get("repository") != REPO
+            or type(ci_target.get("number")) is not int
+            or ci_target["number"] != record["pr_number"]
+            or ci_target.get("head_sha") != record["head_sha"]
+            or ci_target.get("base_branch") != "main"
+            or ci_target.get("state") != "open" or ci_target.get("draft") is not True):
+        return no("trusted exact protected-main target unavailable or mismatched")
+    ci_reason, verified_packets = verify_exact_head_ci(
+        ci_policy_source, applicable_workflows, ci, ci_target,
+        lookup_workflow_evidence=lookup_workflow_evidence)
     if ci_reason is not None:
         return no(ci_reason)
     try:
@@ -903,10 +925,11 @@ def certify(record, report, *, current_head_sha, sessions, ci_policy_source,
             "report_sha256": sha256_hex(report),
             "ci_evidence_sha256": sha256_hex({"ci_policy_source": ci_policy_source,
                                               "applicable_workflows": applicable_workflows,
-                                              "runs": ci}),
+                                              "target": ci_target,
+                                              "verified_runs": list(verified_packets)}),
             "session_ledger_sha256": sha256_hex(sessions),
             "reviewed_range_sha256": sha256_hex(reviewed_range)}
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return no("certification evidence is not canonical")
     return dict(digests, result="exact_head_certified", record_id=record["id"],
                 pr_number=record["pr_number"], head_sha=record["head_sha"],
