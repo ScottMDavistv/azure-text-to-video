@@ -19,7 +19,10 @@ class SlotError(ValueError):
 
 
 class Slots:
-    def __init__(self, path):
+    def __init__(self, path, *, clock=None):
+        if clock is not None and not callable(clock):
+            raise SlotError("invalid trusted clock")
+        self._clock = clock if clock is not None else lambda: int(time.time())
         self.path = str(path)
         if self.path == ":memory:":
             raise SlotError("memory database not durable")
@@ -50,23 +53,21 @@ class Slots:
         if not isinstance(value, str) or not IDENT.fullmatch(value):
             raise SlotError("invalid identifier")
 
-    @staticmethod
-    def _time(value):
-        if value is None:
-            return int(time.time())
-        if type(value) is not int or value < 0:
-            raise SlotError("invalid time")
-        return value
+    def _time(self):
+        now = self._clock()
+        if type(now) is not int or not 0 <= now < 2**63 - 3600:
+            raise SlotError("invalid clock value")
+        return now
 
-    def acquire(self, job_id, provider, role, *, now=None, ttl=300):
+    def acquire(self, job_id, provider, role, *, ttl=300):
         for name in (job_id, provider):
             self._id(name)
         if role not in ("coder", "reviewer") or type(ttl) is not int or not 10 <= ttl <= 3600:
             raise SlotError("invalid lease")
-        now = self._time(now)
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
+            now = self._time()
             old = db.execute("SELECT state,generation FROM leases WHERE job_id=?",
                              (job_id,)).fetchone()
             if old and old[0] != "released":
@@ -96,18 +97,20 @@ class Slots:
         finally:
             db.close()
 
-    def _transition(self, lease, action, *, now=None, ttl=None, termination_verified=False):
-        now = self._time(now)
+    def _transition(self, lease, action, *, ttl=None, termination_verified=False):
         if not isinstance(lease, dict) or not {"job_id","token","generation"} <= set(lease):
             raise SlotError("invalid lease token")
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT token,generation,state,expires_at FROM leases WHERE job_id=?",
+            now = self._time()
+            row = db.execute("SELECT token,generation,state,expires_at,heartbeat FROM leases WHERE job_id=?",
                              (lease["job_id"],)).fetchone()
             if not row or row[0] != lease["token"] or row[1] != lease["generation"]:
                 raise SlotError("stale lease fence")
             state, expiry = row[2], row[3]
+            if now < row[4]:
+                raise SlotError("trusted clock moved backwards")
             if action == "heartbeat":
                 if state not in ("reserved","running") or now > expiry:
                     raise SlotError("expired or inactive lease")
@@ -136,14 +139,14 @@ class Slots:
         finally:
             db.close()
 
-    def heartbeat(self, lease, *, now=None, ttl=300):
-        return self._transition(lease, "heartbeat", now=now, ttl=ttl)
+    def heartbeat(self, lease, *, ttl=300):
+        return self._transition(lease, "heartbeat", ttl=ttl)
 
-    def quarantine_expired(self, lease, *, now=None):
-        return self._transition(lease, "quarantine", now=now)
+    def quarantine_expired(self, lease):
+        return self._transition(lease, "quarantine")
 
-    def release(self, lease, *, termination_verified=False, now=None):
-        return self._transition(lease, "release", now=now,
+    def release(self, lease, *, termination_verified=False):
+        return self._transition(lease, "release",
                                 termination_verified=termination_verified)
 
     def snapshot(self):

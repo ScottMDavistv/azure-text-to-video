@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from typing import Any
 
 REPOSITORY = "ScottMDavistv/azure-text-to-video"
@@ -29,10 +30,9 @@ def _plain_object(value: Any) -> bool:
 def _text(value: Any, limit: int = MAX_SAFE_TEXT) -> bool:
     if type(value) is not str or not value or len(value) > limit:
         return False
-    # Reject ASCII controls, bidi overrides/isolates and Unicode line separators.
-    return not any(ord(c) < 32 or ord(c) == 127 or
-                   0x202A <= ord(c) <= 0x202E or 0x2066 <= ord(c) <= 0x2069 or
-                   ord(c) in (0x2028, 0x2029) for c in value)
+    # Include Unicode format/bidi controls, unpaired surrogates and line separators.
+    return not any(unicodedata.category(c) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+                   for c in value)
 
 
 def parse_json(raw: str) -> dict:

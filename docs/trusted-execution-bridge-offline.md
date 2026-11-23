@@ -2,7 +2,7 @@
 
 **Issue:** #80. **Status:** development-only. **DO NOT ACTIVATE**.
 
-This PR implements an **offline queue contract and policy prototype**, not a live dispatcher. The entrypoint `dispatch()` always raises. It neither contains GitHub network adapters nor Claude/Copilot provider calls, workflow definitions, secrets, GitHub writes, merges or paid usage.
+This PR implements an **offline queue contract and policy prototype**, not a live dispatcher. The entrypoint `dispatch()` always raises. The staged files contain read-only GitHub transport helpers, but no deployed trusted adapter, provider launch calls, workflow definitions, secrets, GitHub writes, merges or paid usage.
 
 ## Trust model
 

@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from urllib.request import Request, urlopen
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 from urllib.error import HTTPError, URLError
 
 REPO = "ScottMDavistv/azure-text-to-video"
@@ -115,16 +115,27 @@ class GitHubReadOnly:
             raise EvidenceError("invalid response")
         return strict_json(raw), headers
 
-    def pages(self, path: str):
-        seen, items = set(), []
+    def pages(self, path: str, *, collection=None):
+        seen, items, total = set(), [], None
+        origin = urlsplit(path)
+        filters = sorted(parse_qsl(origin.query, keep_blank_values=True))
         for _ in range(MAX_PAGES):
             if path in seen:
                 raise EvidenceError("pagination cycle")
             seen.add(path)
             obj, headers = self.get(path)
+            if collection is not None:
+                if (not isinstance(obj, dict) or type(obj.get("total_count")) is not int
+                        or obj["total_count"] < 0
+                        or (total is not None and total != obj["total_count"])):
+                    raise EvidenceError("invalid or changed collection count")
+                total = obj["total_count"]
+                obj = obj.get(collection)
             if not isinstance(obj, list):
                 raise EvidenceError("invalid paginated evidence")
             items.extend(obj)
+            if total is not None and len(items) > total:
+                raise EvidenceError("collection exceeds declared count")
             following = []
             for part in headers.get("link", "").split(","):
                 if 'rel="next"' in part:
@@ -133,12 +144,21 @@ class GitHubReadOnly:
                         raise EvidenceError("invalid next link")
                     following.append(match.group(1))
             if not following:
+                if total is not None and len(items) != total:
+                    raise EvidenceError("pagination incomplete")
                 return items
             if len(following) != 1:
                 raise EvidenceError("ambiguous pagination")
             parsed = urlsplit(following[0])
             if parsed.scheme != "https" or parsed.netloc != "api.github.com":
                 raise EvidenceError("cross-origin pagination")
+            if collection is not None:
+                params = parse_qsl(parsed.query, keep_blank_values=True)
+                pages = [value for key, value in params if key == "page"]
+                if (parsed.path != origin.path or parsed.fragment
+                        or sorted((key, value) for key, value in params if key != "page") != filters
+                        or len(pages) != 1 or pages[0] != str(len(seen) + 1)):
+                    raise EvidenceError("pagination changed collection scope")
             path = parsed.path + ("?" + parsed.query if parsed.query else "")
         raise EvidenceError("pagination incomplete")
 
@@ -170,42 +190,89 @@ def verify_pr_snapshot(api, pr_number: int, expected_head: str, expected_main: s
             "pr_number": pr_number, "head_sha": expected_head, "main_sha": expected_main}
 
 
+def _positive(value):
+    return type(value) is int and value > 0
+
+
+def _same_repository(value):
+    # Stable GitHub repository ID plus its canonical owner/name.
+    return (isinstance(value, dict) and type(value.get("id")) is int
+            and value["id"] == 1457187422 and value.get("full_name") == REPO)
+
+
 def verify_workflow_provenance(api, pr_number, expected_head, expected_main, rules):
-    """Bind checks to a fixed path and trusted exact workflow blob, not just name."""
+    """Evaluate exact-head read-only evidence, not approval or launch authority."""
     verify_pr_snapshot(api, pr_number, expected_head, expected_main)
-    if (not isinstance(rules, list) or not rules or
-            any(not isinstance(r, WorkflowRule) for r in rules) or
-            len({r.path for r in rules}) != len(rules)):
+    if (not isinstance(rules, list) or not rules
+            or any(not isinstance(r, WorkflowRule) for r in rules)
+            or len({r.path for r in rules}) != len(rules)
+            or len({r.name for r in rules}) != len(rules)):
         raise EvidenceError("invalid workflow policy")
-    runs = api.pages(f"/repos/{REPO}/actions/runs?event=pull_request&per_page=100")
+    runs = api.pages(f"/repos/{REPO}/actions/runs?event=pull_request"
+                     f"&head_sha={expected_head}&per_page=100", collection="workflow_runs")
     result = {}
     for rule in rules:
         path = safe_path(rule.path)
         main_file, _ = api.get(f"/repos/{REPO}/contents/{path}?ref={expected_main}")
         head_file, _ = api.get(f"/repos/{REPO}/contents/{path}?ref={expected_head}")
-        if (not isinstance(main_file, dict) or not isinstance(head_file, dict) or
-                main_file.get("sha") != rule.trusted_blob_sha or
-                head_file.get("sha") != rule.trusted_blob_sha or
-                main_file.get("type") != "file" or head_file.get("type") != "file"):
+        if (not isinstance(main_file, dict) or not isinstance(head_file, dict)
+                or main_file.get("sha") != rule.trusted_blob_sha
+                or head_file.get("sha") != rule.trusted_blob_sha
+                or main_file.get("type") != "file" or head_file.get("type") != "file"):
             raise EvidenceError("workflow changed or unverified")
-        matched = []
+        matched, identifiers, numbers = [], {}, {}
+        seen = set()
+        workflow_id = None
         for run in runs:
-            if not isinstance(run, dict) or not isinstance(run.get("pull_requests"), list):
+            if not isinstance(run, dict) or not isinstance(run.get("name"), str) or not isinstance(run.get("path"), str):
+                raise EvidenceError("invalid workflow run evidence")
+            if run["name"] != rule.name and run["path"] != path:
+                continue
+            if (run["name"] != rule.name or run["path"] != path
+                    or run.get("event") != "pull_request" or run.get("head_sha") != expected_head
+                    or not _same_repository(run.get("repository"))
+                    or not _same_repository(run.get("head_repository"))
+                    or not all(_positive(run.get(key))
+                               for key in ("id", "workflow_id", "run_number", "run_attempt"))
+                    or not isinstance(run.get("status"), str) or "conclusion" not in run
+                    or (run["conclusion"] is not None and not isinstance(run["conclusion"], str))):
+                raise EvidenceError("invalid exact workflow run provenance")
+            linked = run.get("pull_requests")
+            if not isinstance(linked, list):
                 raise EvidenceError("CI association missing")
-            linked = any(isinstance(p, dict) and p.get("number") == pr_number and
-                         isinstance(p.get("head"), dict) and
-                         p["head"].get("sha") == expected_head
-                         for p in run["pull_requests"])
-            if (run.get("name") == rule.name and run.get("path") == path and
-                    run.get("event") == "pull_request" and linked and
-                    run.get("status") == "completed" and run.get("conclusion") == "success"):
-                matched.append(run)
-        ids = sorted({x["id"] for x in matched if type(x.get("id")) is int})
-        if not ids:
+            exact = [p for p in linked if isinstance(p, dict)
+                     and type(p.get("number")) is int and p["number"] == pr_number]
+            if (len(exact) != 1 or not isinstance(exact[0].get("head"), dict)
+                    or exact[0]["head"].get("sha") != expected_head):
+                raise EvidenceError("CI association mismatch")
+            ident, ordinal, attempt = run["id"], run["run_number"], run["run_attempt"]
+            if ((workflow_id is not None and workflow_id != run["workflow_id"])
+                    or identifiers.setdefault(ident, ordinal) != ordinal
+                    or numbers.setdefault(ordinal, ident) != ident
+                    or (ident, attempt) in seen):
+                raise EvidenceError("ambiguous workflow recency")
+            workflow_id = run["workflow_id"]
+            identifiers[ident] = ordinal
+            numbers[ordinal] = ident
+            seen.add((ident, attempt))
+            matched.append(run)
+        if not matched:
             raise EvidenceError("trusted exact-head CI missing")
+        definition, _ = api.get(f"/repos/{REPO}/actions/workflows/{workflow_id}")
+        if (not isinstance(definition, dict) or not _positive(definition.get("id"))
+                or definition["id"] != workflow_id or definition.get("path") != path
+                or definition.get("name") != rule.name):
+            raise EvidenceError("workflow definition provenance mismatch")
+        # GitHub increments run_number for new runs of a workflow and
+        # run_attempt for reruns of that same run. API response order is not evidence.
+        current = max(matched, key=lambda run: (run["run_number"], run["run_attempt"]))
+        if current["status"] != "completed" or current["conclusion"] != "success":
+            raise EvidenceError("latest exact workflow run did not succeed")
         result[rule.name] = {"path": path, "trusted_blob_sha": rule.trusted_blob_sha,
-                             "run_ids": ids}
-    return {"state": "ci_provenance_verified", "head_sha": expected_head, "checks": result}
+                             "run_ids": [current["id"]], "run_attempt": current["run_attempt"]}
+    verify_pr_snapshot(api, pr_number, expected_head, expected_main)
+    return {"state": "ci_provenance_verified", "head_sha": expected_head,
+            "checks": result, "execution_authority": False}
 
 
 def dispatch(*args, **kwargs):

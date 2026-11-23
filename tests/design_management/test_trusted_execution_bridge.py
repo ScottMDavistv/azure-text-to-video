@@ -92,6 +92,11 @@ class BridgePolicyTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_request(request(instructions=text))
 
+    def test_invisible_format_and_surrogates_rejected(self):
+        for text in ("x\u200by", "x\u200fy", "x\ud800y", "x\u0085y"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                validate_request(request(scope=text))
+
     def test_duplicate_json_keys_rejected(self):
         with self.assertRaises(ValueError):
             parse_json('{"head_sha":"one","head_sha":"two"}')

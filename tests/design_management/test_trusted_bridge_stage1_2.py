@@ -19,6 +19,19 @@ REPO = "ScottMDavistv/azure-text-to-video"
 FILE = ".github/workflows/security.yml"
 
 
+REPO_EVIDENCE = {"id": 1457187422, "full_name": REPO}
+
+
+def ci_run(**changes):
+    run = {"id": 42, "name": "Security Checks", "path": FILE,
+           "event": "pull_request", "status": "completed", "conclusion": "success",
+           "head_sha": HEAD, "repository": REPO_EVIDENCE,
+           "head_repository": REPO_EVIDENCE, "workflow_id": 8,
+           "run_number": 10, "run_attempt": 1,
+           "pull_requests": [{"number": 81, "head": {"sha": HEAD}}]}
+    return dict(run, **changes)
+
+
 class FakeAPI:
     def __init__(self, changed=False, spoofed=False, truncated=False):
         self.changed, self.spoofed, self.truncated = changed, spoofed, truncated
@@ -35,16 +48,14 @@ class FakeAPI:
             is_head = "ref=" + HEAD in path
             return ({"sha": "d" * 40 if is_head and self.changed else BLOB,
                      "type": "file"}, {})
+        if path.endswith("/actions/workflows/8"):
+            return {"id": 8, "name": "Security Checks", "path": FILE}, {}
         raise AssertionError(path)
 
-    def pages(self, path):
+    def pages(self, path, *, collection=None):
         if self.truncated:
             raise EvidenceError("pagination incomplete")
-        return [{"id": 42, "name": "Security Checks",
-                 "path": ".github/workflows/other.yml" if self.spoofed else FILE,
-                 "event": "pull_request", "status": "completed",
-                 "conclusion": "success",
-                 "pull_requests": [{"number": 81, "head": {"sha": HEAD}}]}]
+        return [ci_run(path=".github/workflows/other.yml" if self.spoofed else FILE)]
 
 
 class EvidenceTests(unittest.TestCase):
@@ -90,6 +101,56 @@ class EvidenceTests(unittest.TestCase):
             FakeAPI(), 81, HEAD, MAIN, [WorkflowRule("Security Checks", FILE, BLOB)])
         self.assertEqual(result["state"], "ci_provenance_verified")
 
+
+    def test_exact_ci_result_never_uses_foreign_or_older_success(self):
+        class Runs(FakeAPI):
+            def pages(self, _path, *, collection=None):
+                self.assert_collection = collection
+                return self.rows
+
+        api = Runs()
+        rule = [WorkflowRule("Security Checks", FILE, BLOB)]
+        success = ci_run()
+        failed = ci_run(id=43, run_number=11, conclusion="failure")
+        retry = ci_run(run_attempt=2, status="in_progress", conclusion=None)
+        for rows in (
+            [ci_run(head_sha="e" * 40)],
+            [ci_run(repository={"id": 8, "full_name": REPO})],
+            [ci_run(head_repository={"id": 1457187422, "full_name": "foreign/repo"})],
+            [ci_run(pull_requests=[])],
+            [ci_run(run_attempt=True)],
+            [failed, success],
+            [success, retry],
+            [success, success],
+            [success, ci_run(workflow_id=9, id=44, run_number=9)],
+        ):
+            with self.subTest(rows=rows), self.assertRaises(EvidenceError):
+                api.rows = rows
+                verify_workflow_provenance(api, 81, HEAD, MAIN, rule)
+        api.rows = [ci_run(id=43, run_number=11, run_attempt=2), failed, success]
+        result = verify_workflow_provenance(api, 81, HEAD, MAIN, rule)
+        self.assertEqual(result["checks"]["Security Checks"]["run_ids"], [43])
+        self.assertEqual(result["checks"]["Security Checks"]["run_attempt"], 2)
+        self.assertIs(result["execution_authority"], False)
+
+    def test_actions_wrapped_pagination_is_bound_and_complete(self):
+        class Local(GitHubReadOnly):
+            def get(self, path):
+                page = path.endswith("&page=2")
+                return ({"total_count": 2, "workflow_runs": [2] if page else [1]},
+                        {} if page else self.headers)
+
+        api = Local("inert-test-token-only-no-network")
+        path = f"/repos/{REPO}/actions/runs?event=pull_request&head_sha={HEAD}&per_page=100"
+        link = f'<https://api.github.com{path}&page=2>; rel="next"'
+        api.headers = {"link": link}
+        self.assertEqual(api.pages(path, collection="workflow_runs"), [1, 2])
+        for headers in ({}, {"link": link.replace(HEAD, MAIN)},
+                        {"link": link.replace("page=2", "page=3")}):
+            with self.subTest(headers=headers), self.assertRaises(EvidenceError):
+                api.headers = headers
+                api.pages(path, collection="workflow_runs")
+
     def test_spoofed_name(self):
         with self.assertRaises(EvidenceError):
             verify_workflow_provenance(FakeAPI(spoofed=True), 81, HEAD, MAIN,
@@ -118,25 +179,41 @@ class EvidenceTests(unittest.TestCase):
 
 
 class SlotTests(unittest.TestCase):
+    def at(self, tick, operation, *args, **kwargs):
+        self.tick = tick
+        return operation(*args, **kwargs)
+
+    def clock(self):
+        return self.tick
+
     def setUp(self):
+        self.tick = 100
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.path = str(Path(folder.name) / "leases.db")
-        self.slots = Slots(self.path)
+        self.slots = Slots(self.path, clock=self.clock)
+
+    def test_operation_cannot_forge_lease_time(self):
+        lease = self.at(100, self.slots.acquire, "job-1", "claude", "coder", ttl=10)
+        self.tick = 111
+        with self.assertRaises(TypeError):
+            self.slots.heartbeat(lease, now=100)
+        with self.assertRaises(SlotError):
+            self.slots.heartbeat(lease)
 
     def test_memory_is_not_durable(self):
         with self.assertRaises(SlotError):
             Slots(":memory:")
 
     def test_two_slots_include_reviewer(self):
-        self.slots.acquire("job-1", "claude", "coder", now=100)
-        self.slots.acquire("job-2", "claude", "reviewer", now=100)
+        self.at(100, self.slots.acquire, 'job-1', 'claude', 'coder')
+        self.at(100, self.slots.acquire, 'job-2', 'claude', 'reviewer')
         with self.assertRaises(SlotError):
-            self.slots.acquire("job-3", "copilot", "coder", now=100)
+            self.at(100, self.slots.acquire, 'job-3', 'copilot', 'coder')
 
     def test_survives_separate_instances(self):
-        self.slots.acquire("job-1", "claude", "coder", now=100)
-        self.assertEqual(len(Slots(self.path).snapshot()), 1)
+        self.at(100, self.slots.acquire, 'job-1', 'claude', 'coder')
+        self.assertEqual(len(Slots(self.path, clock=self.clock).snapshot()), 1)
 
     def test_three_threads_compete_atomically(self):
         barrier, lock = threading.Barrier(3), threading.Lock()
@@ -144,7 +221,7 @@ class SlotTests(unittest.TestCase):
         def work(i):
             barrier.wait()
             try:
-                lease = Slots(self.path).acquire(f"job-{i}", "claude", "coder", now=100)
+                lease = self.at(100, Slots(self.path, clock=self.clock).acquire, f'job-{i}', 'claude', 'coder')
                 with lock:
                     passed.append(lease)
             except SlotError:
@@ -158,31 +235,31 @@ class SlotTests(unittest.TestCase):
         self.assertEqual((len(passed), len(rejected)), (2, 1))
 
     def test_expired_agent_does_not_release_capacity(self):
-        one = self.slots.acquire("job-1", "claude", "coder", now=100, ttl=10)
-        self.slots.acquire("job-2", "claude", "reviewer", now=100, ttl=10)
-        self.slots.quarantine_expired(one, now=111)
+        one = self.at(100, self.slots.acquire, 'job-1', 'claude', 'coder', ttl=10)
+        self.at(100, self.slots.acquire, 'job-2', 'claude', 'reviewer', ttl=10)
+        self.at(111, self.slots.quarantine_expired, one)
         with self.assertRaises(SlotError):
-            self.slots.acquire("job-3", "claude", "coder", now=500)
+            self.at(500, self.slots.acquire, 'job-3', 'claude', 'coder')
 
     def test_released_slot_has_new_fencing_token(self):
-        one = self.slots.acquire("job-1", "claude", "coder", now=100)
+        one = self.at(100, self.slots.acquire, 'job-1', 'claude', 'coder')
         with self.assertRaises(SlotError):
-            self.slots.release(one, now=110)
-        self.slots.release(one, termination_verified=True, now=110)
-        two = self.slots.acquire("job-1", "claude", "coder", now=120)
+            self.at(110, self.slots.release, one)
+        self.at(110, self.slots.release, one, termination_verified=True)
+        two = self.at(120, self.slots.acquire, 'job-1', 'claude', 'coder')
         self.assertEqual(two["generation"], 2)
         with self.assertRaises(SlotError):
-            self.slots.heartbeat(one, now=121)
+            self.at(121, self.slots.heartbeat, one)
         self.assertGreaterEqual(len(self.slots.audit()), 3)
 
     def test_duplicate_active_job_rejected(self):
-        self.slots.acquire("same", "claude", "coder", now=100)
+        self.at(100, self.slots.acquire, 'same', 'claude', 'coder')
         with self.assertRaises(SlotError):
-            self.slots.acquire("same", "claude", "coder", now=101)
+            self.at(101, self.slots.acquire, 'same', 'claude', 'coder')
 
     def test_rejects_unknown_agent_role(self):
         with self.assertRaises(SlotError):
-            self.slots.acquire("job", "claude", "untrusted", now=100)
+            self.at(100, self.slots.acquire, 'job', 'claude', 'untrusted')
 
 
 if __name__ == "__main__":

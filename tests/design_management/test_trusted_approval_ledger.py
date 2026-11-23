@@ -57,20 +57,64 @@ class Response:
 
 
 class LedgerTests(unittest.TestCase):
+    def at(self, tick, operation, *args, **kwargs):
+        self.tick = tick
+        return operation(*args, **kwargs)
+
+    def clock(self):
+        return self.tick
+
     def setUp(self):
+        self.tick = 100
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.path = str(Path(temp.name) / "approvals.db")
         self.heads = Head()
         self.ledger = ApprovalLedger(self.path, authorized_owner_id=OWNER,
                                      identity_provider=Identity(),
-                                     head_verifier=self.heads)
+                                     head_verifier=self.heads, clock=self.clock)
 
     def approve(self, proposal, **changes):
         params = dict(job_id=proposal["job_id"], payload_digest=proposal["payload_digest"],
-                      challenge=proposal["challenge"], user_access_token=TOKEN, now=200)
+                      challenge=proposal["challenge"], user_access_token=TOKEN)
+        tick = changes.pop("now", 200)
         params.update(changes)
-        return self.ledger.approve(**params)
+        return self.at(tick, self.ledger.approve, **params)
+
+    def test_operation_cannot_forge_time_or_finish_after_expiry(self):
+        proposal = self.at(100, self.ledger.propose, request(), ttl=60)
+        params = dict(job_id=proposal["job_id"], payload_digest=proposal["payload_digest"],
+                      challenge=proposal["challenge"], user_access_token=TOKEN)
+        self.tick = 160
+        with self.assertRaises(TypeError):
+            self.ledger.approve(**params, now=0)
+        with self.assertRaises(ApprovalError):
+            self.ledger.approve(**params)
+        self.tick = 159
+        self.heads.assert_current = lambda *_: setattr(self, "tick", 160)
+        with self.assertRaises(ApprovalError):
+            self.ledger.approve(**params)
+        self.assertEqual(self.ledger.status(proposal["job_id"])["state"], "expired_hold")
+
+    def test_repeated_body_is_flagged_without_execution_authority(self):
+        body = b'{"event":"pull_request"}'
+        secret = b"k" * 32
+        signature = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
+        args = dict(body=body, signature=signature, secret=secret)
+        first = self.ledger.record_verified_webhook(**args, delivery_id=DELIVERY)
+        second = self.ledger.record_verified_webhook(**args, delivery_id="02345678-1234-1234-1234-123456789abc")
+        self.assertIs(first["body_seen_before"], False)
+        self.assertIs(second["body_seen_before"], True)
+        self.assertIs(second["execution_authority"], False)
+        self.assertIs(second["owner_approved"], False)
+        with self.assertRaises(ApprovalError):
+            self.ledger.record_verified_webhook(**args, delivery_id=DELIVERY)
+
+    def test_ambiguous_user_id_response_rejected(self):
+        response = Response({"id": OWNER})
+        response.raw = ('{"id":1,"id":%d}' % OWNER).encode()
+        with self.assertRaises(ApprovalError):
+            GitHubUserIdentity(opener=lambda req, timeout: response).owner_id(TOKEN)
 
     def test_auth_user_numeric_id_from_verified_endpoint(self):
         def opener(req, timeout):
@@ -114,7 +158,7 @@ class LedgerTests(unittest.TestCase):
             ApprovalLedger(self.path, authorized_owner_id=OWNER)
 
     def test_valid_owner_approval_is_not_dispatch(self):
-        p = self.ledger.propose(request(), now=100)
+        p = self.at(100, self.ledger.propose, request())
         self.assertFalse(p["dispatch_enabled"])
         approved = self.approve(p)
         self.assertEqual(approved["state"], "approved_not_dispatched")
@@ -123,71 +167,70 @@ class LedgerTests(unittest.TestCase):
             dispatch(approved)
 
     def test_wrong_authenticated_user_rejected(self):
-        p = self.ledger.propose(request(), now=100)
+        p = self.at(100, self.ledger.propose, request())
         other = ApprovalLedger(self.path, authorized_owner_id=OWNER,
-                               identity_provider=Identity(999), head_verifier=Head())
+                               identity_provider=Identity(999), head_verifier=Head(), clock=self.clock)
         with self.assertRaises(ApprovalError):
-            other.approve(job_id=p["job_id"], payload_digest=p["payload_digest"],
-                          challenge=p["challenge"], user_access_token=TOKEN, now=200)
+            self.at(200, other.approve, job_id=p['job_id'], payload_digest=p['payload_digest'], challenge=p['challenge'], user_access_token=TOKEN)
 
     def test_unverified_token_rejected(self):
-        p = self.ledger.propose(request(), now=100)
+        p = self.at(100, self.ledger.propose, request())
         with self.assertRaises(ApprovalError):
             self.approve(p, user_access_token="forged")
 
     def test_stale_head_rejected(self):
-        p = self.ledger.propose(request(), now=100)
+        p = self.at(100, self.ledger.propose, request())
         self.heads.sha = "b"*40
         with self.assertRaises(ApprovalError):
             self.approve(p)
 
     def test_nonce_single_use(self):
-        p = self.ledger.propose(request(), now=100)
+        p = self.at(100, self.ledger.propose, request())
         self.approve(p)
         with self.assertRaises(ApprovalError):
             self.approve(p)
 
     def test_modified_payload_rejected(self):
-        p = self.ledger.propose(request(), now=100)
+        p = self.at(100, self.ledger.propose, request())
         with self.assertRaises(ApprovalError):
             self.approve(p, payload_digest="f"*64)
 
     def test_wrong_nonce_rejected(self):
-        p = self.ledger.propose(request(), now=100)
+        p = self.at(100, self.ledger.propose, request())
         with self.assertRaises(ApprovalError):
             self.approve(p, challenge="n"*50)
 
     def test_ttl_limits_and_expiration(self):
         for ttl in (True, 0, 59, 3601):
             with self.subTest(ttl=ttl), self.assertRaises(ApprovalError):
-                self.ledger.propose(request(), now=100, ttl=ttl)
-        p = self.ledger.propose(request(), now=100, ttl=60)
+                self.at(100, self.ledger.propose, request(), ttl=ttl)
+        p = self.at(100, self.ledger.propose, request(), ttl=60)
         with self.assertRaises(ApprovalError):
             self.approve(p, now=160)
 
     def test_no_silent_reissue_same_payload(self):
-        self.ledger.propose(request(), now=100)
+        self.at(100, self.ledger.propose, request())
         with self.assertRaises(ApprovalError):
-            self.ledger.propose(request(), now=200)
+            self.at(200, self.ledger.propose, request())
 
     def test_approved_record_survives_reopen_and_expires(self):
-        p = self.ledger.propose(request(), now=100)
+        p = self.at(100, self.ledger.propose, request())
         self.approve(p)
         reopened = ApprovalLedger(self.path, authorized_owner_id=OWNER,
-                                  identity_provider=Identity(), head_verifier=Head())
-        self.assertEqual(reopened.status(p["job_id"], now=200)["state"], "approved")
-        self.assertEqual(reopened.status(p["job_id"], now=700)["state"], "expired_hold")
+                                  identity_provider=Identity(), head_verifier=Head(), clock=self.clock)
+        self.assertEqual(self.at(200, reopened.status, p['job_id'])["state"], "approved")
+        self.assertEqual(self.at(700, reopened.status, p['job_id'])["state"], "expired_hold")
 
     def test_owner_revocation(self):
-        p = self.ledger.propose(request(), now=100)
+        p = self.at(100, self.ledger.propose, request())
         with self.assertRaises(ApprovalError):
             self.ledger.revoke(p["job_id"], user_access_token="bad")
-        self.ledger.revoke(p["job_id"], user_access_token=TOKEN, now=150)
+        self.at(150, self.ledger.revoke, p['job_id'], user_access_token=TOKEN)
         with self.assertRaises(ApprovalError):
             self.approve(p)
 
     def test_append_only_audit(self):
-        p = self.ledger.propose(request(), now=100)
+        p = self.at(100, self.ledger.propose, request())
         self.approve(p)
         self.assertEqual(len(self.ledger.audit_events()), 2)
         with sqlite3.connect(self.path) as db:
@@ -199,24 +242,20 @@ class LedgerTests(unittest.TestCase):
     def test_signed_webhook_single_delivery(self):
         body, secret = b'{"action":"opened"}', b"s"*32
         sig = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
-        result = self.ledger.record_verified_webhook(body=body, signature=sig,
-                    secret=secret, delivery_id=DELIVERY, now=100)
+        result = self.at(100, self.ledger.record_verified_webhook, body=body, signature=sig, secret=secret, delivery_id=DELIVERY)
         self.assertFalse(result["owner_approved"])
         with self.assertRaises(ApprovalError):
-            self.ledger.record_verified_webhook(body=body, signature=sig,
-                    secret=secret, delivery_id=DELIVERY, now=101)
+            self.at(101, self.ledger.record_verified_webhook, body=body, signature=sig, secret=secret, delivery_id=DELIVERY)
 
     def test_webhook_forgery_does_not_poison_delivery(self):
         body, secret = b"payload", b"s"*32
         with self.assertRaises(ApprovalError):
-            self.ledger.record_verified_webhook(body=body, signature="sha256="+"0"*64,
-                secret=secret, delivery_id=DELIVERY, now=100)
+            self.at(100, self.ledger.record_verified_webhook, body=body, signature='sha256=' + '0' * 64, secret=secret, delivery_id=DELIVERY)
         sig = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
-        self.ledger.record_verified_webhook(body=body, signature=sig,
-            secret=secret, delivery_id=DELIVERY, now=100)
+        self.at(100, self.ledger.record_verified_webhook, body=body, signature=sig, secret=secret, delivery_id=DELIVERY)
 
     def test_two_concurrent_approvals_only_one_wins(self):
-        p = self.ledger.propose(request(), now=100)
+        p = self.at(100, self.ledger.propose, request())
         barrier, result, lock = threading.Barrier(2), [], threading.Lock()
         def worker():
             barrier.wait()

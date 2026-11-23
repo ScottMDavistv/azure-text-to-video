@@ -7,7 +7,6 @@ head assertions never authorize approval. Does not install or launch an app.
 from __future__ import annotations
 import hashlib
 import hmac
-import json
 import re
 import secrets
 import sqlite3
@@ -15,7 +14,7 @@ import time
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from scripts.trusted_execution_bridge import identity, validate_request
-from scripts.trusted_github_evidence import GitHubReadOnly, verify_webhook, EvidenceError
+from scripts.trusted_github_evidence import GitHubReadOnly, verify_webhook, EvidenceError, strict_json
 
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 HEAD = re.compile(r"[0-9a-f]{40}\Z")
@@ -44,7 +43,7 @@ class GitHubUserIdentity:
                 raw = response.read(65537)
                 if response.status != 200 or len(raw) > 65536:
                     raise ApprovalError("authenticated identity unavailable")
-            user = json.loads(raw)
+            user = strict_json(raw)
         except (HTTPError, URLError, OSError, ValueError, UnicodeDecodeError) as exc:
             raise ApprovalError("authenticated identity unavailable") from exc
         if type(user) is not dict or type(user.get("id")) is not int or user["id"] < 1:
@@ -85,7 +84,7 @@ class GitHubHeadVerifier:
 class ApprovalLedger:
     """Single-host transactional SQLite approval ledger, NOT an agent runner."""
     def __init__(self, path, *, authorized_owner_id, identity_provider=None,
-                 head_verifier=None):
+                 head_verifier=None, clock=None):
         self.path = str(path)
         if not self.path or self.path == ":memory:" or self.path.startswith("file:"):
             raise ApprovalError("durable local database required")
@@ -93,6 +92,9 @@ class ApprovalLedger:
             raise ApprovalError("invalid trusted owner ID")
         if head_verifier is None or not callable(getattr(head_verifier, "assert_current", None)):
             raise ApprovalError("trusted GitHub head verifier required")
+        if clock is not None and not callable(clock):
+            raise ApprovalError("invalid trusted clock")
+        self._clock = clock if clock is not None else lambda: int(time.time())
         self._owner = authorized_owner_id
         self._identity = identity_provider if identity_provider is not None else GitHubUserIdentity()
         self._heads = head_verifier
@@ -110,6 +112,7 @@ class ApprovalLedger:
             db.execute("""CREATE TABLE IF NOT EXISTS deliveries (
                 delivery_id TEXT PRIMARY KEY, body_hash TEXT NOT NULL,
                 received_at INTEGER NOT NULL)""")
+            db.execute("CREATE INDEX IF NOT EXISTS deliveries_body_hash ON deliveries(body_hash)")
             db.execute("""CREATE TABLE IF NOT EXISTS audit (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, event TEXT NOT NULL,
                 job_id TEXT NOT NULL, actor_id INTEGER,
@@ -128,12 +131,10 @@ class ApprovalLedger:
         db.execute("PRAGMA journal_mode=WAL")
         return db
 
-    @staticmethod
-    def _time(now):
-        if now is None:
-            return int(time.time())
-        if type(now) is not int or now < 0:
-            raise ApprovalError("invalid time")
+    def _time(self):
+        now = self._clock()
+        if type(now) is not int or not 0 <= now < 2**63 - 3600:
+            raise ApprovalError("invalid clock value")
         return now
 
     @staticmethod
@@ -147,9 +148,8 @@ class ApprovalLedger:
         db.execute("INSERT INTO audit(event,job_id,actor_id,occurred_at,detail_hash) VALUES(?,?,?,?,?)",
                    (event, job, actor, at, hashlib.sha256(detail.encode()).hexdigest()))
 
-    def propose(self, request, *, now=None, ttl=600):
+    def propose(self, request, *, ttl=600):
         """Freeze owner-visible payload, return nonce once, persist its hash."""
-        now = self._time(now)
         if type(ttl) is not int or not 60 <= ttl <= 3600:
             raise ApprovalError("unbounded expiration")
         data = validate_request(request)
@@ -159,6 +159,7 @@ class ApprovalLedger:
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
+            now = self._time()
             db.execute("""INSERT INTO approvals(job_id,payload_digest,repository,
                 pr_number,head_sha,challenge_hash,expires_at,state)
                 VALUES(?,?,?,?,?,?,?,'pending')""",
@@ -178,10 +179,8 @@ class ApprovalLedger:
                 "expires_at": now + ttl, "state": "pending_owner_approval",
                 "dispatch_enabled": False}
 
-    def approve(self, *, job_id, payload_digest, challenge, user_access_token,
-                now=None):
+    def approve(self, *, job_id, payload_digest, challenge, user_access_token):
         """Authenticated one-use owner approval; no dispatch or launch."""
-        now = self._time(now)
         self._digest(job_id)
         self._digest(payload_digest)
         if not isinstance(challenge, str) or not 32 <= len(challenge) <= 256:
@@ -193,6 +192,7 @@ class ApprovalLedger:
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
+            now = self._time()
             row = db.execute("""SELECT payload_digest,challenge_hash,head_sha,
                 expires_at,state,pr_number FROM approvals WHERE job_id=?""",
                 (job_id,)).fetchone()
@@ -201,6 +201,10 @@ class ApprovalLedger:
                     not hmac.compare_digest(row[1], challenge_hash)):
                 raise ApprovalError("expired, replayed or modified approval")
             self._heads.assert_current(row[5], row[2])
+            checked_at = self._time()
+            if checked_at < now or checked_at >= row[3]:
+                raise ApprovalError("approval time no longer valid")
+            now = checked_at
             cur = db.execute("""UPDATE approvals SET state='approved',
                 actor_id=?,approved_at=?,challenge_hash=?
                 WHERE job_id=? AND state='pending'""",
@@ -215,10 +219,10 @@ class ApprovalLedger:
         finally:
             db.close()
         return {"job_id": job_id, "state": "approved_not_dispatched",
-                "approved_by_user_id": owner, "dispatch_enabled": False}
+                "approved_by_user_id": owner, "dispatch_enabled": False,
+                "identity_assurance": "not_app_bound", "execution_authority": False}
 
-    def revoke(self, job_id, *, user_access_token, now=None):
-        now = self._time(now)
+    def revoke(self, job_id, *, user_access_token):
         self._digest(job_id)
         owner = self._identity.owner_id(user_access_token)
         if type(owner) is not int or owner != self._owner:
@@ -226,6 +230,7 @@ class ApprovalLedger:
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
+            now = self._time()
             cur = db.execute("""UPDATE approvals SET state='revoked',actor_id=?,
                 approved_at=NULL WHERE job_id=? AND state!='revoked'""", (owner, job_id))
             if cur.rowcount != 1:
@@ -239,9 +244,8 @@ class ApprovalLedger:
             db.close()
         return {"state": "revoked", "dispatch_enabled": False}
 
-    def record_verified_webhook(self, *, body, signature, secret, delivery_id, now=None):
+    def record_verified_webhook(self, *, body, signature, secret, delivery_id):
         """HMAC authentication precedes atomic durable delivery deduplication."""
-        now = self._time(now)
         try:
             delivery = verify_webhook(body, signature, secret, delivery_id)
         except EvidenceError as exc:
@@ -252,6 +256,9 @@ class ApprovalLedger:
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
+            now = self._time()
+            body_seen = db.execute("SELECT 1 FROM deliveries WHERE body_hash=? LIMIT 1",
+                                   (digest,)).fetchone() is not None
             db.execute("INSERT INTO deliveries VALUES(?,?,?)", (delivery, digest, now))
             self._event(db, "webhook_recorded", delivery, None, now, digest)
             db.commit()
@@ -264,10 +271,11 @@ class ApprovalLedger:
         finally:
             db.close()
         return {"delivery_id": delivery, "state": "recorded_untrusted_event",
-                "owner_approved": False, "dispatch_enabled": False}
+                "owner_approved": False, "dispatch_enabled": False,
+                "body_seen_before": body_seen, "execution_authority": False}
 
-    def status(self, job_id, *, now=None):
-        now = self._time(now)
+    def status(self, job_id):
+        now = self._time()
         self._digest(job_id)
         db = self._connect()
         try:
@@ -278,7 +286,7 @@ class ApprovalLedger:
             state = "expired_hold" if now >= row[2] and row[0] != "revoked" else row[0]
             return {"state": state, "head_sha": row[1], "expires_at": row[2],
                     "approved_by_user_id": row[3], "approved_at": row[4],
-                    "dispatch_enabled": False}
+                    "dispatch_enabled": False, "execution_authority": False}
         finally:
             db.close()
 
