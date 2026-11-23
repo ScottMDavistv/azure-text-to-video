@@ -665,8 +665,65 @@ t 'L-A mutation: supervisor without PR_SET_CHILD_SUBREAPER (orphan before scan) 
   la_mutant 's/libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0/False/' orphan-before-scan
 t 'L-A mutation: supervisor without PR_SET_CHILD_SUBREAPER (intermediate exit) is caught' \
   la_mutant 's/libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0/False/' intermediate
-t 'L-A mutation: supervisor that stops when its own child exits (before ECHILD) is caught' \
-  la_mutant 's/^\(            rc = 128 - rc if rc < 0 else rc\)$/\1\n            break/' orphan-before-scan
+# Use the real unmodified supervisor in both cases. The child deliberately
+# waits for a fixture release so adoption cannot be inferred from absence.
+la_reaping_evidence() (
+  local mode=$1 s leader child cst sup sst proof archived withheld
+  local C1_CLEANUP_DETAIL=
+  s=$(c1_session_new "$ROOT" "$C1_TEST_OWNER")
+  leader=$(c1_spawn "$s" la python3 -I -c '
+from pathlib import Path
+import os, sys, time
+p = Path(sys.argv[1])
+pid = os.fork()
+if pid == 0:
+    (p / "child").write_text(str(os.getpid()))
+    release = p / "release-child"
+else:
+    release = p / "release-leader"
+for _ in range(300):
+    if release.is_file():
+        os._exit(0)
+    time.sleep(0.05)
+os._exit(71)
+' "$s")
+  la_wait '[[ -s "$s/child" ]]'
+  child=$(cat "$s/child")
+  cst=$(c1_proc_start "$child")
+  sup=$(la_sup "$s")
+  sst=$(c1_proc_start "$sup")
+  [[ -n "$cst" && -n "$sst" && "$child" != "$leader" && "$sup" != "$leader" ]]
+  proof=$(c1_reaped_register "$s")
+  archived="$ROOT/.${s##*/}.supervisors"
+  withheld="$TMP/withheld.$BASHPID"
+
+  : >"$s/release-leader"
+  la_wait '[[ $(c1_proc_start "$child" || true) == "$cst" &&
+    $(c1_proc_stat_field "$child" 2) == "$sup" ]]'
+  [[ ! -e "$proof" && ! -L "$proof" ]]
+  : >"$s/release-child"
+  la_wait 'grep -Fxq -- "$sup $sst" "$proof" 2>/dev/null'
+  [[ $(c1_proc_start "$child" || true) != "$cst" ]]
+  c1_cleanup_session "$ROOT" "$s"
+  [[ ! -e "$s" ]]
+  grep -Fxq -- "$sup $sst" "$archived"
+  if [[ "$mode" == missing ]]; then
+    mv -- "$proof" "$withheld"
+    [[ ! -e "$proof" && ! -L "$proof" ]]
+    if c1_verify_cleanup "$s"; then
+      echo 'verification accepted missing reaping proof' >&2
+      return 1
+    fi
+    [[ "$C1_CLEANUP_DETAIL" == supervisor-evidence-unresolved ]]
+    grep -Fxq -- "$sup $sst" "$archived"
+    mv -- "$withheld" "$proof"
+  fi
+  c1_verify_cleanup "$s"
+  [[ ! -e "$archived" && ! -e "$proof" ]]
+)
+t 'L-A: real supervisor reaps an adopted child before verified cleanup passes' la_reaping_evidence present
+t 'L-A: real cleanup verifier rejects missing reaping proof' la_reaping_evidence missing
+
 la_mutant_no_proof_check() (
   c1_verify_supervisors() { rm -f -- "$(dirname -- "$1")/.${1##*/}.supervisors"; return 0; }
   local out rc=0; out=$(la_case supervisor-killed 2>&1) || rc=$?
