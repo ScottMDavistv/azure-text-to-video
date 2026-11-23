@@ -73,6 +73,44 @@ def fingerprint(repo, number, path, body, *, location=None):
     return prefix + hashlib.sha256(source.encode()).hexdigest()[:24]
 
 
+def _dismissal_independent(attested, item, repo, number, coder, authors, sessions, reviewer_login,
+                           reviewer_id, review_session):
+    """Require one separately attested dismissal at this exact review identity."""
+    records = attested.get("independent_dismissals")
+    record = records.get(str(item["id"])) if isinstance(records, dict) else None
+    actor_ids = attested.get("commit_actor_ids")
+    coder_id = attested.get("coding_actor_id")
+    review_actor = item.get("user")
+    if (not isinstance(record, dict) or record.get("verified") is not True
+            or record.get("repository") != repo or not _positive_int(record.get("pr_number"))
+            or record["pr_number"] != number or not _positive_int(record.get("review_id"))
+            or record["review_id"] != item["id"]
+            or not isinstance(item.get("commit_id"), str) or not SHA.fullmatch(item["commit_id"])
+            or record.get("review_commit_sha") != item["commit_id"]
+            or not _positive_int(coder_id) or not isinstance(actor_ids, list)
+            or not actor_ids or not all(_positive_int(i) for i in actor_ids)
+            or not isinstance(review_actor, dict) or not _positive_int(review_actor.get("id"))):
+        return False
+    actor = record.get("dismissed_by")
+    if not isinstance(actor, dict) or not _positive_int(actor.get("id")):
+        return False
+    login, review_login = actor.get("login"), review_actor.get("login")
+    session, dismissed_session = actor.get("session_id"), record.get("dismissed_reviewer_session_id")
+    login_pattern = r"[a-zA-Z0-9-]+(?:\[bot\])?"
+    session_pattern = r"[a-zA-Z0-9_.:-]{1,200}"
+    if (not all(isinstance(value, str) and re.fullmatch(login_pattern, value)
+                for value in (login, review_login))
+            or not all(isinstance(value, str) and re.fullmatch(session_pattern, value)
+                       for value in (session, dismissed_session))
+            or record.get("dismissed_reviewer_id") != review_actor["id"]
+            or not _positive_int(record.get("dismissed_reviewer_id"))):
+        return False
+    excluded_logins = {name.casefold() for name in (coder, reviewer_login, review_login, *authors)}
+    return (login.casefold() not in excluded_logins
+            and actor["id"] not in {coder_id, reviewer_id, review_actor["id"], *actor_ids}
+            and session not in {*sessions, review_session, dismissed_session})
+
+
 def plan(pr, reviews, existing_issues, *, reviewer_login=None, reviewer_type=None,
          verified_evidence=None, verify_evidence=None, reviews_complete=False,
          comments_complete=False, issues_complete=False,
@@ -181,10 +219,22 @@ def plan(pr, reviews, existing_issues, *, reviewer_login=None, reviewer_type=Non
     if not isinstance(trusted_ids, list) or not all(_positive_int(i) for i in trusted_ids):
         return hold("Authenticated remediation-issue inventory incomplete")
     trusted_ids = set(trusted_ids)
-    matched_issue_ids, issue_states = set(), {}
+    scopes = attested.get("trusted_remediation_issue_scopes", {})
+    if not isinstance(scopes, dict):
+        return hold("Authenticated remediation-issue scope incomplete")
+    scoped_ids = set()
+    for issue_id in trusted_ids:
+        scope = scopes.get(str(issue_id))
+        if (not isinstance(scope, dict) or not isinstance(scope.get("repository"), str)
+                or not REPOSITORY.fullmatch(scope["repository"])
+                or not _positive_int(scope.get("pr_number"))):
+            return hold("Authenticated remediation-issue scope incomplete")
+        if scope["repository"] == repo and scope["pr_number"] == number:
+            scoped_ids.add(issue_id)
+    matched_issue_ids, issue_states, open_issue_ids = set(), {}, set()
     for issue in existing_issues:
         issue_id = issue.get("id")
-        if not _positive_int(issue_id) or issue_id not in trusted_ids:
+        if not _positive_int(issue_id) or issue_id not in scoped_ids:
             continue
         marker = issue.get("marker")
         issue_state = issue.get("state")
@@ -196,8 +246,10 @@ def plan(pr, reviews, existing_issues, *, reviewer_login=None, reviewer_type=Non
                 or issue_state not in ("open", "closed")):
             return hold("Malformed authenticated remediation issue")
         matched_issue_ids.add(issue_id)
+        if issue_state == "open":
+            open_issue_ids.add(issue_id)
         issue_states.setdefault(marker, set()).add(issue_state)
-    if matched_issue_ids != trusted_ids:
+    if matched_issue_ids != scoped_ids:
         return hold("Authenticated remediation-issue inventory incomplete")
 
     tasks, findings, eligible, seen, seen_reviews = [], [], 0, {}, {}
@@ -212,8 +264,9 @@ def plan(pr, reviews, existing_issues, *, reviewer_login=None, reviewer_type=Non
         seen_reviews[review_id] = item
         state, commit = item.get("state"), item.get("commit_id")
         if state == "DISMISSED":
-            # Only authenticated native dismissal, not a later clean review,
-            # removes a change request. Status history belongs to the collector.
+            if not _dismissal_independent(attested, item, repo, number, coder, authors, sessions,
+                                          reviewer_login, reviewer_id, review_session):
+                return hold("Dismissal independence unverified")
             continue
         if state == "PENDING":
             return hold("Review not complete")
@@ -298,9 +351,10 @@ def plan(pr, reviews, existing_issues, *, reviewer_login=None, reviewer_type=Non
     statuses = {entry["status"] for entry in findings}
     state = ("recurrence-needs-attention" if "recurrence" in statuses else
              "review-findings" if tasks else
-             "existing-active-findings" if findings else "no-new-findings")
+             "existing-active-findings" if findings or open_issue_ids else "no-new-findings")
     return {"state": state, "reason": "Dry-run only; no certification, approval or agent dispatch",
-            "advisory_only": True, "findings": findings, "tasks": tasks}
+            "advisory_only": True, "findings": findings,
+            "open_remediation_issue_ids": sorted(open_issue_ids), "tasks": tasks}
 
 
 def can_dispatch_coder(*, active_agents, reviewer_active, isolated_secrets,

@@ -32,8 +32,9 @@ CHANGED = [{"filename": "scripts/security_review_remediation.py", "status": "add
 ATTESTATION = {"verified": True, "head_sha": HEAD, "reviewer_login": BOT,
                "reviewer_id": BOT_ID, "repository": REPO, "pr_number": 55,
                "review_comment_bindings_verified": True, "review_status_history_verified": True,
-               "coding_actor_login": "implementation-agent",
+               "coding_actor_login": "implementation-agent", "coding_actor_id": 101,
                "commit_actor_logins": ["owner", "implementation-agent"],
+               "commit_actor_ids": [101, 102],
                "coding_session_ids": ["coder-session-1"],
                "reviewer_session_id": "review-session-2",
                "all_commit_actors_verified": True,
@@ -58,6 +59,22 @@ def assess(*, pr=None, reviews=None, issues=None, changed=None, attestation=None
                     changed_files=deepcopy(CHANGED if changed is None else changed),
                     **dict(dict(reviews_complete=True, comments_complete=True,
                                 issues_complete=True, changed_files_complete=True), **options))
+
+
+def issue_attestation(issue_id, *, pr_number=55, repository=REPO):
+    return {**ATTESTATION, "trusted_remediation_issue_ids": [issue_id],
+            "trusted_remediation_issue_scopes": {
+                str(issue_id): {"pr_number": pr_number, "repository": repository}}}
+
+
+def dismissal_attestation(review):
+    return {**ATTESTATION, "independent_dismissals": {str(review["id"]): {
+        "verified": True, "repository": REPO, "pr_number": 55, "review_id": review["id"],
+        "review_commit_sha": review["commit_id"], "dismissed_reviewer_id": review["user"]["id"],
+        "dismissed_reviewer_session_id": "other-review-session",
+        "dismissed_by": {"id": 201, "login": "independent-maintainer",
+                         "session_id": "independent-dismissal-session"},
+    }}}
 
 
 class SecurityRemediationTests(unittest.TestCase):
@@ -126,7 +143,7 @@ class SecurityRemediationTests(unittest.TestCase):
                    "author_assurance": "trusted-controller"}
         self.assertEqual(len(assess(issues=[trusted])["tasks"]), 1)
         existing = assess(issues=[{**trusted, "id": 123}],
-                          attestation={**ATTESTATION, "trusted_remediation_issue_ids": [123]})
+                          attestation=issue_attestation(123))
         self.assertEqual(existing["state"], "existing-active-findings")
         self.assertEqual(existing["findings"][0]["status"], "active")
         self.assertEqual(existing["tasks"], [])
@@ -166,7 +183,7 @@ class SecurityRemediationTests(unittest.TestCase):
         marker = assess()["tasks"][0]["marker"]
         issue = {"id": 42, "trusted_remediation": True, "author_assurance": "trusted-controller",
                  "repository": REPO, "marker": marker, "state": "closed"}
-        attested = {**ATTESTATION, "trusted_remediation_issue_ids": [42]}
+        attested = issue_attestation(42)
         recurring = assess(issues=[issue], attestation=attested)
         self.assertEqual(recurring["state"], "recurrence-needs-attention")
         self.assertEqual(recurring["findings"][0]["status"], "recurrence")
@@ -191,12 +208,15 @@ class SecurityRemediationTests(unittest.TestCase):
                     with self.subTest(actor=request["user"]["login"], commit=commit):
                         self.assertEqual(assess(reviews=ordered)["state"], "hold")
         dismissed = {**human, "state": "DISMISSED"}
-        self.assertEqual(assess(reviews=[dismissed, clean])["state"], "no-new-findings")
+        self.assertEqual(assess(reviews=[dismissed, clean])["reason"], "Dismissal independence unverified")
+        self.assertEqual(assess(reviews=[dismissed, clean],
+                         attestation=dismissal_attestation(dismissed))["state"], "no-new-findings")
         self.assertEqual(assess(reviews=[dismissed, clean],
             attestation={**ATTESTATION, "review_status_history_verified": "yes"})["state"], "hold")
         self.assertEqual(assess(reviews=[clean, human, dismissed])["reason"],
                          "Unrepresented changes-requested review")
-        self.assertEqual(assess(reviews=[dismissed, clean, human])["reason"],
+        self.assertEqual(assess(reviews=[dismissed, clean, human],
+                         attestation=dismissal_attestation(dismissed))["reason"],
                          "Conflicting review identity or status")
         commented = {**human, "state": "COMMENTED", "comments": [COMMENT]}
         self.assertEqual(assess(reviews=[clean, commented])["state"], "hold")
@@ -204,6 +224,59 @@ class SecurityRemediationTests(unittest.TestCase):
                          "Earlier review findings require independent disposition")
         empty = {**human, "state": "APPROVED"}
         self.assertEqual(assess(reviews=[empty, clean])["state"], "no-new-findings")
+
+    def test_r1_clean_rereview_does_not_erase_scoped_open_remediation(self):
+        marker = assess()["tasks"][0]["marker"]
+        issue = {"id": 42, "trusted_remediation": True, "author_assurance": "trusted-controller",
+                 "repository": REPO, "marker": marker, "state": "open"}
+        clean = {**REVIEW, "comments": [], "state": "APPROVED"}
+        result = assess(reviews=[clean], issues=[issue], attestation=issue_attestation(42))
+        self.assertEqual(result["state"], "existing-active-findings")
+        self.assertEqual(result["open_remediation_issue_ids"], [42])
+        self.assertEqual(result["tasks"], [])
+        closed = assess(reviews=[clean], issues=[{**issue, "state": "closed"}],
+                        attestation=issue_attestation(42))
+        self.assertEqual(closed["state"], "no-new-findings")
+        self.assertEqual(closed["open_remediation_issue_ids"], [])
+        for unrelated in (issue_attestation(42, pr_number=56),
+                          issue_attestation(42, repository="elsewhere/repo")):
+            result = assess(reviews=[clean], issues=[issue], attestation=unrelated)
+            self.assertEqual(result["state"], "no-new-findings")
+            self.assertEqual(result["open_remediation_issue_ids"], [])
+            self.assertEqual(assess(issues=[issue], attestation=unrelated)["state"], "review-findings")
+        ambiguous = {**ATTESTATION, "trusted_remediation_issue_ids": [42]}
+        self.assertEqual(assess(reviews=[clean], issues=[issue], attestation=ambiguous)["state"], "hold")
+
+    def test_r2_dismissal_requires_exact_independent_actor_and_session(self):
+        clean = {**REVIEW, "comments": [], "state": "APPROVED"}
+        dismissed = {**REVIEW, "id": 8000, "state": "DISMISSED",
+                     "user": {"login": "human-reviewer", "id": 7, "type": "User"}}
+        def check(attested):
+            return assess(reviews=[dismissed, clean], attestation=attested)
+        self.assertEqual(check(ATTESTATION)["reason"], "Dismissal independence unverified")
+        self.assertEqual(check(dismissal_attestation(dismissed))["state"], "no-new-findings")
+        for fields in (
+            {"login": "Implementation-Agent"}, {"login": "owner"}, {"login": BOT},
+            {"login": "human-reviewer"}, {"id": 101}, {"id": 102}, {"id": BOT_ID}, {"id": 7},
+            {"session_id": "coder-session-1"}, {"session_id": "review-session-2"},
+            {"session_id": "other-review-session"}, {"session_id": ""}, {"id": True},
+        ):
+            attested = dismissal_attestation(dismissed)
+            attested["independent_dismissals"]["8000"]["dismissed_by"].update(fields)
+            with self.subTest(actor=fields):
+                self.assertEqual(check(attested)["reason"], "Dismissal independence unverified")
+        for fields in (
+            {"verified": 1}, {"pr_number": 56}, {"repository": "elsewhere/repo"},
+            {"review_id": 8001}, {"review_commit_sha": "b" * 40}, {"dismissed_reviewer_id": 8},
+            {"dismissed_reviewer_session_id": None}, {"dismissed_by": ["malformed"]},
+        ):
+            attested = dismissal_attestation(dismissed)
+            attested["independent_dismissals"]["8000"].update(fields)
+            with self.subTest(binding=fields):
+                self.assertEqual(check(attested)["reason"], "Dismissal independence unverified")
+        attested = dismissal_attestation(dismissed)
+        del attested["commit_actor_ids"]
+        self.assertEqual(check(attested)["reason"], "Dismissal independence unverified")
 
     def test_new3_summary_requires_literal_true(self):
         reviews = [{**REVIEW, "body": "Review summary", "comments": []}]
