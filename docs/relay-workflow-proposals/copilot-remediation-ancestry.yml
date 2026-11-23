@@ -1,0 +1,36 @@
+# PROPOSAL ONLY — NOT AN ACTIVE .github/workflows FILE.
+# Activation is prohibited until independently reviewed trusted GitHub snapshot
+# adapter, protected origin attestation ledger, cost settings and required-check
+# integration are verified. This document is deliberately outside .github/workflows.
+#
+# Intended behavior after separate approval:
+name: Copilot Remediation - Exact Head Origin Gate
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  exact-head-ancestry:
+    # Only approved Copilot remediation PRs. Guard must not trust user-supplied
+    # labels/text for classification. Future adapter validates trusted ledger.
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout trusted base source, not PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Build provenance snapshot from protected owner-approved task ledger
+        # MISSING: deliberate fail-closed placeholder. Implement verified adapter
+        # as part of a separately approved activation change.
+        run: |
+          echo 'BLOCKED: trusted origin attestation adapter not activated'
+          exit 1
+      - name: Verify exact head and ancestry
+        if: success()
+        run: python scripts/approval_relay_ci_gate.py "$RUNNER_TEMP/verified-snapshot.json"
+# Do not make a check required in rulesets until the final trusted job name,
+# test coverage and non-metered billing behavior are independently verified.
