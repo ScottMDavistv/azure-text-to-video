@@ -2070,8 +2070,14 @@ c1_privacy_monitor_loop() {
   # The launcher verified gh "private" immediately before starting the monitor.
   gh_ok=$now gh_next=$(( now + C1_MON_GH_INTERVAL_MS ))
   (( req_gh )) && C1_GH_CACHED_PRIVATE=1
+  # The tracked launcher starts this only after the real loopback listener
+  # has been verified. Remove its initial idle interval, not any part of the
+  # first private sweep or the cadence of later sweeps.
+  local wait_before_sweep=1
+  if (( track )); then wait_before_sweep=0; fi
   while c1_owned_pid "$ws" "$s" "$wsst"; do
-    sleep "$iv"
+    if (( wait_before_sweep )); then sleep "$iv"; fi
+    wait_before_sweep=1
     sweep_tick=$(c1_monitor_tick) || return 2
     C1_CLOSE_DEADLINE=$((10#$sweep_tick + 250))
     reason=''

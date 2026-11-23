@@ -689,6 +689,56 @@ websockify_reaping_ack() (
   c1_close_websockify_tree "$session" 6080 11 31 1 && [[ "$signal_count" == 3 ]]
 )
 
+
+monitor_initial_sweep_cadence() (
+  local session case_name trace expected rc=0 checks=0
+  c1_proc_start() { printf '31\n'; }
+  c1_monitor_tick() { printf '100\n'; }
+  c1_owned_pid() {
+    [[ "$*" == "11 $session 31" && "$case_name" != unowned && "$checks" -lt 3 ]]
+  }
+  sleep() { trace+=" sleep:$1"; }
+  c1_privacy_check() {
+    checks=$((checks + 1))
+    trace+=" sweep"
+    if (( checks == 1 )); then
+      [[ ! -e "$session/monitor-beat" ]] || return 2
+    else
+      [[ -f "$session/monitor-beat" ]] || return 2
+    fi
+    if [[ "$case_name" == failure ]]; then
+      C1_PRIVACY_STATE=unverified
+      C1_PRIVACY_DETAIL='authenticated probe transport failure (curl-exit-28)'
+      return 1
+    fi
+    return 0
+  }
+  c1_teardown_novnc() {
+    [[ "$5" == unverified && ! -e "$session/monitor-beat" ]] || return 1
+    trace+=" drain"
+  }
+  for case_name in cadence failure unowned; do
+    session="$STATE/$case_name"
+    mkdir -m 700 "$session" || return 1
+    checks=0 trace='' rc=0
+    # First sweep succeeds in cadence, extending the heartbeat. Deliberately
+    # stop on a later ownership poll to end the real loop without networking.
+    case "$case_name" in
+      cadence) expected=' sweep sleep:0.2 sweep sleep:0.2 sweep' ;;
+      failure) expected=' sweep drain' ;;
+      unowned) expected='' ;;
+    esac
+    C1_MONITOR_TRACK=1 c1_privacy_monitor_loop "$session" unused unused 11 31 '' 0.2 || rc=$?
+    [[ "$trace" == "$expected" ]] || { printf '%s: got [%s], expected [%s]\n' "$case_name" "$trace" "$expected"; return 1; }
+    case "$case_name" in
+      cadence) [[ "$rc" == 1 && -f "$session/monitor-beat" && ! -e "$session/monitor-required" ]] || return 1 ;;
+      failure) [[ "$rc" == 0 && ! -e "$session/monitor-beat" &&
+        "$(c1_read_first_failure "$session")" == 'monitor-startup private-sweep-failed' ]] || return 1 ;;
+      unowned) [[ "$rc" == 1 && ! -e "$session/monitor-beat" ]] || return 1 ;;
+    esac
+  done
+)
+
 monitor_probe_failure_evidence() (
   local session record expected seq=0
   c1_owned_pid() { return 0; }
@@ -1218,7 +1268,7 @@ if [[ "${1:-}" == --mutations ]]; then
   done
 else
   for case_name in competing_launchers overlapping_cleaners malformed_active retained_privacy_failure reused_owner watchdog_waits_for_launcher r11_exit_status_and_late_privacy launcher_crash_recovery active_publication_preserves_owner verification_is_retried \
-    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss websockify_reaping_ack monitor_probe_failure_evidence harness_head_drift guarded_delayed_startup drain_timeout_evidence monitor_stop_ack_race startup_unknown_port startup_monitor_handoff_boundary; do
+    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss websockify_reaping_ack monitor_initial_sweep_cadence monitor_probe_failure_evidence harness_head_drift guarded_delayed_startup drain_timeout_evidence monitor_stop_ack_race startup_unknown_port startup_monitor_handoff_boundary; do
     if ! run_case "$HERE" "$case_name"; then
       printf 'FAIL: %s\n' "$case_name" >&2
       for log in "$FIXTURE"/*.log; do [[ ! -f "$log" ]] || cat "$log" >&2; done
