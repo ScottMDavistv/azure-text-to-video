@@ -707,16 +707,17 @@ websockify_reaping_ack() (
 
 
 monitor_initial_sweep_cadence() (
-  local session case_name trace expected rc=0 checks=0
+  # Use a fixture-specific accumulator: Bash callbacks see caller locals.
+  local session case_name cadence_events expected rc=0 checks=0
   c1_proc_start() { printf '31\n'; }
   c1_monitor_tick() { printf '100\n'; }
   c1_owned_pid() {
     [[ "$*" == "11 $session 31" && "$case_name" != unowned && "$checks" -lt 3 ]]
   }
-  sleep() { trace+=" sleep:$1"; }
+  sleep() { cadence_events+=" sleep:$1"; }
   c1_privacy_check() {
     checks=$((checks + 1))
-    trace+=" sweep"
+    cadence_events+=" sweep"
     if (( checks == 1 )); then
       [[ ! -e "$session/monitor-beat" ]] || return 2
     else
@@ -731,12 +732,12 @@ monitor_initial_sweep_cadence() (
   }
   c1_teardown_novnc() {
     [[ "$5" == unverified && ! -e "$session/monitor-beat" ]] || return 1
-    trace+=" drain"
+    cadence_events+=" drain"
   }
   for case_name in cadence failure unowned; do
     session="$STATE/$case_name"
     mkdir -m 700 "$session" || return 1
-    checks=0 trace='' rc=0
+    checks=0 cadence_events='' rc=0
     # First sweep succeeds in cadence, extending the heartbeat. Deliberately
     # stop on a later ownership poll to end the real loop without networking.
     case "$case_name" in
@@ -745,7 +746,7 @@ monitor_initial_sweep_cadence() (
       unowned) expected='' ;;
     esac
     C1_MONITOR_TRACK=1 c1_privacy_monitor_loop "$session" unused unused 11 31 '' 0.2 || rc=$?
-    [[ "$trace" == "$expected" ]] || { printf '%s: got [%s], expected [%s]\n' "$case_name" "$trace" "$expected"; return 1; }
+    [[ "$cadence_events" == "$expected" ]] || { printf '%s: got [%s], expected [%s]\n' "$case_name" "$cadence_events" "$expected"; return 1; }
     case "$case_name" in
       cadence) [[ "$rc" == 1 && -f "$session/monitor-beat" && ! -e "$session/monitor-required" ]] || return 1 ;;
       failure) [[ "$rc" == 0 && ! -e "$session/monitor-beat" &&
