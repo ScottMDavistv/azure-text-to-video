@@ -1604,7 +1604,7 @@ c1_write_header_file() { ( umask 077; printf '%s: %s\n' "$2" "$3" >"$1" ); }
 # HTTPS only, no redirects followed, no proxy, minimal environment (no
 # inherited CURL_CA_BUNDLE/HTTPS_PROXY).
 c1_https_probe() {
-  local url=$1 out=$2 hdr=${3:-} ca=${4:-} result rc timing
+  local url=$1 out=$2 hdr=${3:-} ca=${4:-} trace=${5:-} result rc=0 timing
   local elapsed='[0-9]+[.][0-9]+'
   local -a a=(--silent --max-time "$C1_PROBE_MAX_TIME" --proto '=https' --noproxy '*' -o "$out"
     -w '%{http_code} %{redirect_url}\n%{time_namelookup},%{time_connect},%{time_appconnect},%{time_starttransfer},%{time_total}')
@@ -1613,10 +1613,11 @@ c1_https_probe() {
   : >"$out"
   # --disable must be curl's first argument. Curl can discover a config
   # through the account record even when no HOME is exported.
-  if result=$(env -i PATH="$PATH" curl --disable "${a[@]}" -- "$url" 2>/dev/null); then
+  result=$(env -i PATH="$PATH" curl --disable "${a[@]}" -- "$url" 2>/dev/null) || rc=$?
+  [[ -z "$trace" ]] || c1_startup_mark "$trace" auth-return || true
+  if (( rc == 0 )); then
     printf '%s' "${result%%$'\n'*}"
   else
-    rc=$?
     printf '000 curl-exit-%d' "$rc"
     timing=${result#*$'\n'}
     if [[ "$result" == *$'\n'* && "$timing" =~ ^$elapsed(,$elapsed){4}$ ]]; then
@@ -1656,7 +1657,7 @@ c1_codespaces_pf_signin_redirect() {
 # (and C1_PRIVACY_DETAIL to a short, token-free reason). Private requires BOTH a
 # positive unauthenticated denial AND an authenticated 200 carrying the marker.
 c1_privacy_check() {
-  local base=$1 path=$2 marker=$3 hdr=$4 ca=${5:-} probes auth_fd= auth_started= result rc=0
+  local base=$1 path=$2 marker=$3 hdr=$4 ca=${5:-} trace=${6:-} probes auth_fd= auth_started= result rc=0
   C1_PRIVACY_STATE=unverified C1_PRIVACY_DETAIL='bad arguments'
   C1_PRIVACY_GH_PRIVATE=0
   [[ -n "$base" && -n "$marker" && -s "$hdr" ]] || return 1
@@ -1672,17 +1673,19 @@ c1_privacy_check() {
     # require anonymous denial and a matching marker before accepting privacy.
     auth_started=$(c1_monitor_tick) || { rm -rf -- "$probes"; return 1; }
     exec {auth_fd}< <(result=$(C1_PROBE_MAX_TIME=$C1_MONITOR_AUTH_TIMEOUT \
-      c1_https_probe "$base$path" "$probes/auth" "$hdr" "$ca")
-      printf '%s\n' "$result") || { rm -rf -- "$probes"; return 1; }
+      c1_https_probe "$base$path" "$probes/auth" "$hdr" "$ca" "$trace")
+      if printf '%s\n' "$result"; then
+        [[ -z "$trace" ]] || c1_startup_mark "$trace" auth-write || true
+      fi) || { rm -rf -- "$probes"; return 1; }
   fi
-  c1_classify_privacy_sweep "$base" "$path" "$marker" "$hdr" "$ca" "$probes" "$auth_fd" "$auth_started" || rc=$?
+  c1_classify_privacy_sweep "$base" "$path" "$marker" "$hdr" "$ca" "$probes" "$auth_fd" "$auth_started" "$trace" || rc=$?
   if [[ -n "$auth_fd" ]]; then exec {auth_fd}<&-; fi
   rm -rf -- "$probes"
   return "$rc"
 }
 
 c1_classify_privacy_sweep() {
-  local base=$1 path=$2 marker=$3 hdr=$4 ca=$5 probes=$6 auth_fd=$7 auth_started=$8 code loc now remaining wait_time
+  local base=$1 path=$2 marker=$3 hdr=$4 ca=$5 probes=$6 auth_fd=$7 auth_started=$8 trace=${9:-} code loc now remaining wait_time
   local transport='^curl-exit-[0-9]{1,3}( timing=[0-9]+[.][0-9]+(,[0-9]+[.][0-9]+){4})?$'
   read -r code loc <<<"$(c1_https_probe "$base$path" "$probes/anon" "" "$ca")" || true
   code=${code:-000}
@@ -1727,10 +1730,13 @@ c1_classify_privacy_sweep() {
     if (( remaining > 0 && remaining <= 100 )); then
       printf -v wait_time '%d.%02d' "$((remaining / 100))" "$((remaining % 100))"
       if ! read -r -t "$wait_time" -u "$auth_fd" code loc; then
+        [[ -z "$trace" ]] || c1_startup_mark "$trace" auth-read-incomplete || true
         C1_PRIVACY_DETAIL='authenticated probe result deadline (no complete result)'
         return 1
       fi
+      [[ -z "$trace" ]] || c1_startup_mark "$trace" auth-read || true
     else
+      [[ -z "$trace" ]] || c1_startup_mark "$trace" auth-read-budget "$now" || true
       C1_PRIVACY_DETAIL='authenticated probe result deadline (no complete result)'
       return 1
     fi
@@ -1982,7 +1988,7 @@ c1_monitor_tick() {
 # phase. Never reuse a record, follow a link, or make a timing mark a gate.
 c1_startup_mark() {
   local path flag=0 stamp=${3:-} rest rc=0
-  case "$2" in origin|listener-start|listener-verified|monitor-start|probe-start|probe-result|watchdog-handoff) ;; *) return 1 ;; esac
+  case "$2" in origin|listener-start|listener-verified|monitor-start|probe-start|probe-result|watchdog-handoff|auth-return|auth-write|auth-read|auth-read-incomplete|auth-read-budget) ;; *) return 1 ;; esac
   if [[ -z "$stamp" ]]; then
     read -r stamp rest </proc/uptime || return 1
     [[ "$stamp" =~ ^[0-9]+[.][0-9]{2}$ ]] || return 1
@@ -2011,6 +2017,7 @@ c1_startup_mark_read() {
 c1_startup_timing_report() {
   local origin='' listener_start='' listener_verified='' monitor_start=''
   local probe_start='' probe_result='' watchdog_handoff='' timing_text=''
+  local auth_return='' auth_write='' auth_read='' auth_read_incomplete='' auth_read_budget=''
   c1_startup_mark_read "$1" origin origin || true
   c1_startup_mark_read "$1" listener-start listener_start || true
   c1_startup_mark_read "$1" listener-verified listener_verified || true
@@ -2023,6 +2030,18 @@ c1_startup_timing_report() {
   c1_startup_delta first-probe "$probe_start" "$probe_result"
   c1_startup_delta exposure-to-probe-result "$origin" "$probe_result"
   c1_startup_delta exposure-to-watchdog-handoff "$origin" "$watchdog_handoff"
+  # Independent observations relative to probe-start, not a proof of causation
+  # or of record publication order between the writer and reader processes.
+  c1_startup_mark_read "$1" auth-return auth_return || true
+  c1_startup_mark_read "$1" auth-write auth_write || true
+  c1_startup_mark_read "$1" auth-read auth_read || true
+  c1_startup_mark_read "$1" auth-read-incomplete auth_read_incomplete || true
+  c1_startup_mark_read "$1" auth-read-budget auth_read_budget || true
+  c1_startup_delta auth-return "$probe_start" "$auth_return"
+  c1_startup_delta auth-write "$probe_start" "$auth_write"
+  c1_startup_delta auth-read "$probe_start" "$auth_read"
+  c1_startup_delta auth-read-incomplete "$probe_start" "$auth_read_incomplete"
+  c1_startup_delta auth-read-budget-exhausted "$probe_start" "$auth_read_budget"
   if [[ -n ${2:-} ]]; then printf -v "$2" '%s' "${timing_text% }"
   else printf '%s' "$timing_text"; fi
 }
@@ -2160,7 +2179,7 @@ c1_privacy_monitor_loop() {
   # The tracked launcher starts this only after the real loopback listener
   # has been verified. Remove its initial idle interval, not any part of the
   # first private sweep or the cadence of later sweeps.
-  local wait_before_sweep=1 first_sweep=1 probe_result_tick= uptime_rest
+  local wait_before_sweep=1 first_sweep=1 probe_result_tick= uptime_rest trace=''
   if (( track )); then wait_before_sweep=0; fi
   while c1_owned_pid "$ws" "$s" "$wsst"; do
     if (( wait_before_sweep )); then sleep "$iv"; fi
@@ -2197,8 +2216,12 @@ c1_privacy_monitor_loop() {
       fi
     fi
     if [[ -z "$reason" ]]; then
-      if (( track && first_sweep )); then c1_startup_mark "$s" probe-start || true; fi
-      if c1_privacy_check "$base" '/vnc.html' "$C1_NOVNC_SIGNATURE" "$hdr" "$ca"; then
+      trace=''
+      if (( track && first_sweep )); then
+        c1_startup_mark "$s" probe-start || true
+        trace=$s
+      fi
+      if c1_privacy_check "$base" '/vnc.html' "$C1_NOVNC_SIGNATURE" "$hdr" "$ca" "$trace"; then
         if (( ! track )); then continue; fi
         if tick=$(c1_monitor_tick) && printf '%s\n' "$tick" >"$s/monitor-beat.tmp" &&
            mv -T -- "$s/monitor-beat.tmp" "$s/monitor-beat"; then
