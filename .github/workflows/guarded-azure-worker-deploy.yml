@@ -29,7 +29,6 @@ on:
         type: string
 permissions:
   contents: read
-  id-token: write
 concurrency:
   group: azure-dev-worker-deployment
   cancel-in-progress: false
@@ -69,9 +68,12 @@ jobs:
           MAIN_PROTECTED: ${{ vars.PROTECTED_MAIN_VERIFIED }}
   preview:
     needs: validate
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && (inputs.operation == 'preview' || inputs.operation == 'whatif' || inputs.operation == 'deploy') && github.actor == 'ScottMDavistv'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
     environment: dev-deployment
     steps:
       - uses: actions/checkout@v4
@@ -100,6 +102,9 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && (inputs.operation == 'whatif' || inputs.operation == 'deploy') && github.actor == 'ScottMDavistv' && vars.PROTECTED_MAIN_VERIFIED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
     environment: dev-deployment-apply
     steps:
       - uses: actions/checkout@v4
@@ -131,6 +136,9 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy' && github.actor == 'ScottMDavistv' && inputs.approved_sha == github.sha && inputs.confirmation == 'DEPLOY-DEV-WORKER' && vars.AZURE_DEV_DEPLOY_ENABLED == 'true' && vars.PROTECTED_MAIN_VERIFIED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
     environment: dev-deployment-apply
     steps:
       - uses: actions/checkout@v4

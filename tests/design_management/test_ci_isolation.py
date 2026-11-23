@@ -117,16 +117,61 @@ class IsolationTests(unittest.TestCase):
             obj["jobs"]["checks"]["if"] = expr
             self.assertTrue(self.evaluate(obj), expr)
 
-    def test_complex_main_guard_cannot_be_bypassed_by_or(self):
-        good = ("github.ref == 'refs/heads/main' && "
-                "github.event_name == 'workflow_dispatch' && "
-                "(inputs.operation == 'whatif' || inputs.operation == 'deploy')")
-        self.assertTrue(checker.main_only(good))
-        self.assertFalse(checker.main_only(good + " || true"))
-        self.assertFalse(checker.main_only("true || " + good))
-        self.assertFalse(checker.main_only("github.ref != 'refs/heads/main' && " + good))
-        self.assertFalse(checker.main_only("github.ref == 'refs/heads/main' && (true || false) || true"))
-        self.assertFalse(checker.main_only("github.ref == 'refs/heads/main' && (true || false"))
+    def test_compound_operation_guard_not_part_of_generic_grammar(self):
+        guard = ("github.ref == 'refs/heads/main' && "
+                 "github.event_name == 'workflow_dispatch' && "
+                 "(inputs.operation == 'whatif' || inputs.operation == 'deploy')")
+        self.assertFalse(checker.main_only(guard))
+        self.assertFalse(checker.excludes_pr(guard))
+
+    def test_guarded_azure_automatic_jobs_have_no_oidc_or_login(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("pinned PyYAML provided by policy gate")
+        path = checker.GUARDED_AZURE
+        doc = checker.strict_load(yaml, (ROOT / path).read_text())
+        self.assertEqual(checker.examine(path, doc), [])
+        self.assertEqual(doc["permissions"], {"contents": "read"})
+        self.assertTrue({"push", "schedule", "workflow_dispatch"} <= checker.events(doc))
+        self.assertNotIn("environment", doc["jobs"]["validate"])
+        self.assertNotIn("permissions", doc["jobs"]["validate"])
+        self.assertFalse(any(step.get("uses", "").startswith("azure/login@")
+                             for step in doc["jobs"]["validate"]["steps"]))
+        for name in ("preview", "whatif", "deploy"):
+            with self.subTest(job=name):
+                job = doc["jobs"][name]
+                self.assertEqual(job["permissions"], {"contents": "read", "id-token": "write"})
+                self.assertIn("github.event_name == 'workflow_dispatch'", job["if"])
+                self.assertIn("github.actor == 'ScottMDavistv'", job["if"])
+        self.assertIn("inputs.approved_sha == github.sha", doc["jobs"]["deploy"]["if"])
+        self.assertIn("inputs.confirmation == 'DEPLOY-DEV-WORKER'", doc["jobs"]["deploy"]["if"])
+
+    def test_guarded_azure_permission_and_gate_regressions_denied(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("pinned PyYAML provided by policy gate")
+        path = checker.GUARDED_AZURE
+        original = checker.strict_load(yaml, (ROOT / path).read_text())
+        mutations = (
+            ("workflow OIDC inheritance", lambda d: d["permissions"].update({"id-token": "write"})),
+            ("validate OIDC", lambda d: d["jobs"]["validate"].update(
+                permissions={"contents": "read", "id-token": "write"})),
+            ("daily login missing manual guard", lambda d: d["jobs"]["preview"].update(
+                {"if": "github.ref == 'refs/heads/main'"})),
+            ("incorrect environment", lambda d: d["jobs"]["preview"].update(
+                environment="another-preview")),
+            ("unexpected guard operand", lambda d: d["jobs"]["preview"].update(
+                {"if": d["jobs"]["preview"]["if"] + " && inputs.extra_review"})),
+            ("unrelated workflow event", lambda d: d["on"].update({"workflow_call": {}})),
+        )
+        for name, mutate in mutations:
+            with self.subTest(regression=name):
+                doc = copy.deepcopy(original)
+                mutate(doc)
+                self.assertTrue(checker.examine(path, doc))
+        self.assertTrue(checker.examine(".github/workflows/another.yml", original))
 
     def test_untrusted_feature_push_rejects_write_secrets_and_checkout_credentials(self):
         obj = copy.deepcopy(BASE)
