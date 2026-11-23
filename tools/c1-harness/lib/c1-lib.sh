@@ -1486,7 +1486,12 @@ c1_start_websockify() {
   [[ "$st" =~ ^[1-9][0-9]*$ ]] || return 2
   for _ in $(seq 1 50); do c1_port_free "$port" || break; sleep 0.1; done
   if c1_port_free "$port"; then c1_err 'noVNC/websockify failed to listen'
-  elif c1_assert_desktop_listeners "$s" "$port"; then printf '%s' "$pid"; return 0
+  else
+    if [[ ${C1_GUARD_STARTUP:-0} == 1 ]]; then c1_startup_mark "$s" listener-start || true; fi
+    if c1_assert_desktop_listeners "$s" "$port"; then
+      if [[ ${C1_GUARD_STARTUP:-0} == 1 ]]; then c1_startup_mark "$s" listener-verified || true; fi
+      printf '%s' "$pid"; return 0
+    fi
   fi
   c1_teardown_novnc "$s" "$port" "$pid" "$st" websockify-start || return 2
   return 1
@@ -1700,8 +1705,12 @@ c1_classify_privacy_sweep() {
     if (( remaining > 0 && remaining <= 100 )); then
       printf -v wait_time '%d.%02d' "$((remaining / 100))" "$((remaining % 100))"
       if ! read -r -t "$wait_time" -u "$auth_fd" code loc; then
-        code=000 loc='curl-exit-28'
+        C1_PRIVACY_DETAIL='authenticated probe result deadline (no complete result)'
+        return 1
       fi
+    else
+      C1_PRIVACY_DETAIL='authenticated probe result deadline (no complete result)'
+      return 1
     fi
   else
     read -r code loc <<<"$(c1_https_probe "$base$path" "$probes/auth" "$hdr" "$ca")" || true
@@ -1824,7 +1833,7 @@ c1_monitor_probe_detail_valid() {
   local http='^(unauthenticated probe (received the marker|got|was not positively denied)|authenticated probe did not reach the marker) [(]HTTP [0-9]{3}[)]$'
   local transport='^(unauthenticated|authenticated) probe transport failure [(]curl-exit-[0-9]{1,3}( timing=[0-9]+[.][0-9]+(,[0-9]+[.][0-9]+){4})?[)]$'
   case "$detail" in
-    'bad arguments'|'untrusted forwarding origin'|\
+    'bad arguments'|'untrusted forwarding origin'|'authenticated probe result deadline (no complete result)'|\
     'github.dev sign-in redirect for unexpected forwarding origin'|\
     'github.dev sign-in redirect without fresh private port visibility'|\
     'github.dev sign-in redirect without confirmed private port visibility') return 0 ;;
@@ -1944,6 +1953,62 @@ c1_monitor_tick() {
   read -r uptime rest </proc/uptime || return 1
   [[ "$uptime" =~ ^[0-9]+[.][0-9]{2}$ ]] || return 1
   printf '%s\n' "${uptime/./}"
+}
+
+
+# Best-effort, session-local timing only. No commands are spawned to mark a
+# phase. Never reuse a record, follow a link, or make a timing mark a gate.
+c1_startup_mark() {
+  local path flag=0 stamp=${3:-} rest rc=0
+  case "$2" in origin|listener-start|listener-verified|monitor-start|probe-start|probe-result|watchdog-handoff) ;; *) return 1 ;; esac
+  if [[ -z "$stamp" ]]; then
+    read -r stamp rest </proc/uptime || return 1
+    [[ "$stamp" =~ ^[0-9]+[.][0-9]{2}$ ]] || return 1
+    stamp=${stamp/./}
+  fi
+  [[ "$stamp" =~ ^[0-9]{1,12}$ ]] || return 1
+  path="$1/startup-timing-$2"
+  [[ ! -e "$path" && ! -L "$path" ]] || return 1
+  if [[ $- != *C* ]]; then set -C; flag=1; fi
+  { printf '%s\n' "$stamp" >"$path"; } 2>/dev/null || rc=1
+  if (( flag )); then set +C; fi
+  return "$rc"
+}
+
+c1_startup_mark_read() {
+  local path="$1/startup-timing-$2" stamp=''
+  [[ -f "$path" && ! -L "$path" && -O "$path" && -r "$path" ]] || return 1
+  # Bound the read and reject NUL, overlong, partial, or extra-line records.
+  if LC_ALL=C IFS= read -r -d '' -n 15 stamp <"$path"; then return 1; fi
+  [[ "$stamp" == *$'\n' ]] || return 1
+  stamp=${stamp%$'\n'}
+  [[ "$stamp" =~ ^[0-9]{1,12}$ ]] || return 1
+  printf -v "$3" '%s' "$stamp"
+}
+
+c1_startup_timing_report() {
+  local origin='' listener_start='' listener_verified='' monitor_start=''
+  local probe_start='' probe_result='' watchdog_handoff='' timing_text=''
+  c1_startup_mark_read "$1" origin origin || true
+  c1_startup_mark_read "$1" listener-start listener_start || true
+  c1_startup_mark_read "$1" listener-verified listener_verified || true
+  c1_startup_mark_read "$1" monitor-start monitor_start || true
+  c1_startup_mark_read "$1" probe-start probe_start || true
+  c1_startup_mark_read "$1" probe-result probe_result || true
+  c1_startup_mark_read "$1" watchdog-handoff watchdog_handoff || true
+  c1_startup_delta listener-verification "$listener_start" "$listener_verified"
+  c1_startup_delta monitor-start "$listener_verified" "$monitor_start"
+  c1_startup_delta first-probe "$probe_start" "$probe_result"
+  c1_startup_delta exposure-to-probe-result "$origin" "$probe_result"
+  c1_startup_delta exposure-to-watchdog-handoff "$origin" "$watchdog_handoff"
+  if [[ -n ${2:-} ]]; then printf -v "$2" '%s' "${timing_text% }"
+  else printf '%s' "$timing_text"; fi
+}
+
+c1_startup_delta() {
+  local delta=unavailable
+  if [[ -n "$2" && -n "$3" ]] && (( 10#$3 >= 10#$2 )); then delta="$(( (10#$3 - 10#$2) * 10 ))ms"; fi
+  timing_text+="$1=$delta "
 }
 
 c1_monitor_healthy() {
@@ -2073,13 +2138,16 @@ c1_privacy_monitor_loop() {
   # The tracked launcher starts this only after the real loopback listener
   # has been verified. Remove its initial idle interval, not any part of the
   # first private sweep or the cadence of later sweeps.
-  local wait_before_sweep=1
+  local wait_before_sweep=1 first_sweep=1 probe_result_tick= uptime_rest
   if (( track )); then wait_before_sweep=0; fi
   while c1_owned_pid "$ws" "$s" "$wsst"; do
     if (( wait_before_sweep )); then sleep "$iv"; fi
     wait_before_sweep=1
     sweep_tick=$(c1_monitor_tick) || return 2
     C1_CLOSE_DEADLINE=$((10#$sweep_tick + 250))
+    if (( track && first_sweep )); then
+      c1_startup_mark "$s" monitor-start "$sweep_tick" || true
+    fi
     reason=''
     c1_now_ms now
     if (( req_gh )); then
@@ -2107,10 +2175,15 @@ c1_privacy_monitor_loop() {
       fi
     fi
     if [[ -z "$reason" ]]; then
+      if (( track && first_sweep )); then c1_startup_mark "$s" probe-start || true; fi
       if c1_privacy_check "$base" '/vnc.html' "$C1_NOVNC_SIGNATURE" "$hdr" "$ca"; then
         if (( ! track )); then continue; fi
         if tick=$(c1_monitor_tick) && printf '%s\n' "$tick" >"$s/monitor-beat.tmp" &&
            mv -T -- "$s/monitor-beat.tmp" "$s/monitor-beat"; then
+          if (( first_sweep )); then
+            c1_startup_mark "$s" probe-result "$tick" || true
+            first_sweep=0
+          fi
           if [[ ! -f "$s/monitor-stop" || -L "$s/monitor-stop" ]]; then continue; fi
           if c1_close_novnc "$s" "$port" "$ws" "$wsst"; then
             c1_monitor_gh_stop
@@ -2132,10 +2205,16 @@ c1_privacy_monitor_loop() {
       c1_record_monitor_probe_failure "$s" "$C1_PRIVACY_DETAIL" ||
         c1_err 'could not preserve the sanitized monitor probe failure'
     fi
+    if (( track && first_sweep )); then
+      read -r probe_result_tick uptime_rest </proc/uptime || probe_result_tick=''
+    fi
     # A stalled/ambiguous edge is not a positive privacy proof: fail closed on
     # its first observation. L-9: an unverifiable teardown propagates rc 2.
     teardown_rc=0
     c1_teardown_novnc "$s" "$port" "$ws" "$wsst" "$reason" || teardown_rc=2
+    if [[ "$probe_result_tick" =~ ^[0-9]+[.][0-9]{2}$ ]]; then
+      c1_startup_mark "$s" probe-result "${probe_result_tick/./}" || true
+    fi
     c1_monitor_gh_stop
     return "$teardown_rc"
   done
@@ -2232,6 +2311,7 @@ c1_watchdog_loop() {
           startup_last_closed=$now
         else
           startup_exposure=${startup_last_closed:-$startup_tick}
+          c1_startup_mark "$session" origin "$startup_exposure" || true
         fi
       fi
       if [[ -n "$startup_exposure" ]]; then
@@ -2264,6 +2344,7 @@ c1_watchdog_loop() {
       [[ "$monitor" =~ ^[1-9][0-9]*$ && "$monitor_start" =~ ^[1-9][0-9]*$ &&
          "$websockify" =~ ^[1-9][0-9]*$ && "$websockify_start" =~ ^[1-9][0-9]*$ && -z "$extra" ]] || return 1
       (set -o noclobber; : >"$session/monitor-watched") || return 1
+      c1_startup_mark "$session" watchdog-handoff || true
     fi
     if [[ "$launcher_state" == active && "$sent" == 0 && -n "$monitor" && -d "$session" ]] &&
        ! c1_monitor_stopped "$session" "$monitor" "$monitor_start" &&

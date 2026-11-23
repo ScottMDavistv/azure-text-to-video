@@ -231,6 +231,10 @@ r11_exit_status_and_late_privacy() (
     R11_EVIDENCE="$FIXTURE/$variant.md"
     PORT_PRIVATE=verified-probe-gh
     printf 'verified\n127.0.0.1:6080 pid=11 comm=websockify ino=31\n' >"$S/listener-state"
+    if [[ "$variant" == clean ]]; then
+      c1_startup_mark "$S" origin 100 &&
+        c1_startup_mark "$S" watchdog-handoff 190 || return 1
+    fi
     if [[ "$variant" == late ]]; then
       c1_record_privacy_failure "$S" public || return 1
       c1_record_monitor_probe_failure "$S" 'unauthenticated probe got HTTP 200' 2>/dev/null &&
@@ -253,6 +257,7 @@ r11_exit_status_and_late_privacy() (
         [[ "$status" == 0 ]] &&
           grep -Fxq -- '- First failure observation: none-recorded' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Post-cleanup reason: none' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Startup timing: listener-verification=unavailable monitor-start=unavailable first-probe=unavailable exposure-to-probe-result=unavailable exposure-to-watchdog-handoff=900ms' "$R11_EVIDENCE" &&
           grep -qx -- '- R11: PASS' "$R11_EVIDENCE" || return 1
         ;;
       late)
@@ -736,6 +741,55 @@ monitor_initial_sweep_cadence() (
         "$(c1_read_first_failure "$session")" == 'monitor-startup private-sweep-failed' ]] || return 1 ;;
       unowned) [[ "$rc" == 1 && ! -e "$session/monitor-beat" ]] || return 1 ;;
     esac
+  done
+)
+
+startup_timing_diagnostics() (
+  local session="$STATE/session" out scenario simulated_tick
+  mkdir -m 700 "$session" || return 1
+  c1_startup_mark "$session" origin 100 &&
+    c1_startup_mark "$session" listener-start 110 &&
+    c1_startup_mark "$session" listener-verified 125 &&
+    c1_startup_mark "$session" monitor-start 131 &&
+    c1_startup_mark "$session" probe-start 132 &&
+    c1_startup_mark "$session" probe-result 194 &&
+    c1_startup_mark "$session" watchdog-handoff 199 || return 1
+  out=$(c1_startup_timing_report "$session")
+  [[ "$out" == 'listener-verification=150ms monitor-start=60ms first-probe=620ms exposure-to-probe-result=940ms exposure-to-watchdog-handoff=990ms ' ]] || return 1
+  c1_startup_mark "$session" origin 123 && return 1
+  rm -- "$session/startup-timing-origin"
+  printf '100\n\0' >"$session/startup-timing-probe-result"
+  printf '099\n' >"$session/startup-timing-monitor-start"
+  rm -- "$session/startup-timing-watchdog-handoff"
+  ln -s "$session/startup-timing-listener-start" "$session/startup-timing-watchdog-handoff"
+  out=$(c1_startup_timing_report "$session")
+  [[ "$out" == 'listener-verification=150ms monitor-start=unavailable first-probe=unavailable exposure-to-probe-result=unavailable exposure-to-watchdog-handoff=unavailable ' ]] || return 1
+
+  c1_https_probe() { printf '403'; }
+  c1_monitor_tick() { printf '%s' "$simulated_tick"; }
+  grep() { return 1; }
+  read() {
+    if [[ ${2:-} != -t ]]; then builtin read "$@"; return; fi
+    [[ "$3" == 0.60 ]] || return 1
+    if [[ "$scenario" == delivered ]]; then
+      printf -v "${@: -2:1}" 000
+      printf -v "${@: -1}" 'curl-exit-28 timing=0.010,0.020,0.030,0.000,1.000'
+    else
+      return 1
+    fi
+  }
+  for scenario in delivered missing expired; do
+    simulated_tick=140
+    [[ "$scenario" != expired ]] || simulated_tick=200
+    C1_PRIVACY_STATE=unverified
+    if c1_classify_privacy_sweep https://inert /vnc.html marker hdr '' "$session" 9 100; then return 1; fi
+    [[ "$C1_PRIVACY_STATE" == unverified ]] || return 1
+    if [[ "$scenario" == delivered ]]; then
+      [[ "$C1_PRIVACY_DETAIL" == 'authenticated probe transport failure (curl-exit-28 timing=0.010,0.020,0.030,0.000,1.000)' ]] || return 1
+    else
+      [[ "$C1_PRIVACY_DETAIL" == 'authenticated probe result deadline (no complete result)' ]] || return 1
+    fi
+    c1_monitor_probe_detail_valid "$C1_PRIVACY_DETAIL" || return 1
   done
 )
 
@@ -1268,7 +1322,7 @@ if [[ "${1:-}" == --mutations ]]; then
   done
 else
   for case_name in competing_launchers overlapping_cleaners malformed_active retained_privacy_failure reused_owner watchdog_waits_for_launcher r11_exit_status_and_late_privacy launcher_crash_recovery active_publication_preserves_owner verification_is_retried \
-    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss websockify_reaping_ack monitor_initial_sweep_cadence monitor_probe_failure_evidence harness_head_drift guarded_delayed_startup drain_timeout_evidence monitor_stop_ack_race startup_unknown_port startup_monitor_handoff_boundary; do
+    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss websockify_reaping_ack monitor_initial_sweep_cadence startup_timing_diagnostics monitor_probe_failure_evidence harness_head_drift guarded_delayed_startup drain_timeout_evidence monitor_stop_ack_race startup_unknown_port startup_monitor_handoff_boundary; do
     if ! run_case "$HERE" "$case_name"; then
       printf 'FAIL: %s\n' "$case_name" >&2
       for log in "$FIXTURE"/*.log; do [[ ! -f "$log" ]] || cat "$log" >&2; done

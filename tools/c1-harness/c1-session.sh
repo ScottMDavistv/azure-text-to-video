@@ -298,7 +298,7 @@ finish_r11() {
   local r11_exit=$1 listener=unverified cleanup_result=not-needed checkout=unverified verdict=FAIL
   local listener_state='' listener_detail='' C1_FINAL_PRIVACY=pending first_failure=none-recorded
   local monitor_shutdown=not-run session_cleanup=not-run cleanup_verification=not-run monitor_probe_failure=none-recorded
-  local C1_CLEANUP_DETAIL= cleanup_detail=not-run
+  local C1_CLEANUP_DETAIL= cleanup_detail=not-run startup_timing=unavailable
   trap - EXIT
   trap '' INT TERM HUP
 
@@ -322,6 +322,7 @@ finish_r11() {
       c1_record_first_failure "$S" launcher-exit before-cleanup || true
     fi
     first_failure=$(c1_read_first_failure "$S") || first_failure=none-recorded
+    c1_startup_timing_report "$S" startup_timing || startup_timing=unavailable
     cleanup_result=FAIL
     if c1_cleanup_launcher "$ROOT" "$S"; then
       session_cleanup=PASS
@@ -367,6 +368,7 @@ finish_r11() {
     printf -- '- Desktop listener: %s\n' "$listener"
     printf -- '- First failure observation: %s\n' "$first_failure"
     printf -- '- Monitor probe failure: %s\n' "$monitor_probe_failure"
+    printf -- '- Startup timing: %s\n' "$startup_timing"
     printf -- '- Monitor shutdown: %s\n' "$monitor_shutdown"
     printf -- '- Session cleanup: %s\n' "$session_cleanup"
     printf -- '- Post-cleanup verification: %s\n' "$cleanup_verification"
