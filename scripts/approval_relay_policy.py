@@ -7,6 +7,7 @@ An independently reviewed future adapter must check GitHub identities, source
 provenance and branch creation attestation before honoring a suggested action.
 """
 import argparse
+from copy import deepcopy
 import json
 import re
 from pathlib import Path
@@ -56,7 +57,7 @@ def _verified_run(run_id, name, target, lookup):
     The CLI intentionally cannot supply such a callback.
     """
     path = ".github/workflows/" + WORKFLOWS[name]
-    packet = lookup(run_id, path)
+    packet = deepcopy(lookup(run_id, path))
     run, workflow, execution = packet["run"], packet["workflow"], packet["execution"]
     head, main = target["head_sha"], packet["protected_main_sha"]
     event = run.get("event")
@@ -124,7 +125,7 @@ def _verified_run(run_id, name, target, lookup):
         if entry.get("mode") not in ("100644", "100755") or not _sha(entry.get("blob_sha")):
             return False
         blobs.append((entry["mode"], entry["blob_sha"]))
-    return len(set(blobs)) == 1
+    return packet if len(set(blobs)) == 1 else False
 
 
 def check_coding_pr(task, target, coding):
@@ -157,6 +158,55 @@ def check_coding_pr(task, target, coding):
     return {"action": "block", "reason": "unexpected base branch"}
 
 
+def verify_exact_head_ci(policy_source, applicable, ci, target, *, lookup_workflow_evidence=None):
+    """Return (reason, packets), using only independently looked-up evidence.
+
+    The caller supplies the exact target and policy from a trusted read path.
+    The callback is an offline dependency, not authentication or activation.
+    On success the returned packets are the same snapshots that were verified,
+    so the queue can bind owner certification to evidence rather than claims.
+    """
+    if (not isinstance(target, dict) or target.get("repository") != REPO
+            or not _positive_int(target.get("number"))
+            or not _sha(target.get("head_sha"))
+            or not isinstance(target.get("head_branch"), str) or not target["head_branch"]
+            or target.get("base_branch") != "main"):
+        return "invalid protected-main target identity/head", ()
+    # Applicability must be attested by a protected, trusted adapter. The
+    # request's author cannot select a smaller required-check set.
+    required = applicable
+    if (policy_source != "trusted-protected-task-ledger" or
+            not isinstance(required, list) or not required or
+            not all(isinstance(name, str) for name in required) or
+            len(required) != len(set(required)) or
+            not set(required).issubset(REQUIRED)):
+        return "required CI applicability unverified", ()
+    if not isinstance(ci, list) or not ci:
+        return "no CI evidence", ()
+    if not callable(lookup_workflow_evidence):
+        return "trusted workflow evidence adapter unavailable", ()
+    observed, run_ids, packets = set(), set(), []
+    for claim in ci:
+        if not isinstance(claim, dict):
+            return "malformed CI evidence", ()
+        run_id, name = claim.get("id"), claim.get("name")
+        if (not _positive_int(run_id) or not isinstance(name, str)
+                or name not in REQUIRED or run_id in run_ids):
+            return "invalid workflow claim", ()
+        try:
+            verified = _verified_run(run_id, name, target, lookup_workflow_evidence)
+        except Exception:
+            verified = False
+        if not verified:
+            return "CI missing/stale/failed or untrusted", ()
+        packets.append(verified)
+        observed.add(name)
+        run_ids.add(run_id)
+    if not set(required).issubset(observed):
+        return "applicable required CI not verified", ()
+    return None, tuple(packets)
+
+
 def prepare_review(task, target, coding, ci, *, lookup_workflow_evidence=None):
     """Produce only a PENDING owner-approval review draft after exact-head CI.
 
@@ -185,37 +235,11 @@ def prepare_review(task, target, coding, ci, *, lookup_workflow_evidence=None):
     previous = task.get("previous_review_head_sha")
     if not _sha(previous) or previous == target["head_sha"]:
         return {"state": "blocked", "reason": "no new target head since previous review"}
-    # Applicability must be attested by a protected, trusted adapter. The
-    # request's author cannot select a smaller required-check set.
-    required = task.get("applicable_required_workflows")
-    if (task.get("ci_policy_source") != "trusted-protected-task-ledger" or
-            not isinstance(required, list) or not required or
-            not all(isinstance(name, str) for name in required) or
-            len(required) != len(set(required)) or
-            not set(required).issubset(REQUIRED)):
-        return {"state": "blocked", "reason": "required CI applicability unverified"}
-    if not isinstance(ci, list) or not ci:
-        return {"state": "blocked", "reason": "no CI evidence"}
-    if not callable(lookup_workflow_evidence):
-        return {"state": "blocked", "reason": "trusted workflow evidence adapter unavailable"}
-    observed, run_ids = set(), set()
-    for claim in ci:
-        if not isinstance(claim, dict):
-            return {"state": "blocked", "reason": "malformed CI evidence"}
-        run_id, name = claim.get("id"), claim.get("name")
-        if (not _positive_int(run_id) or not isinstance(name, str)
-                or name not in REQUIRED or run_id in run_ids):
-            return {"state": "blocked", "reason": "invalid workflow claim"}
-        try:
-            verified = _verified_run(run_id, name, target, lookup_workflow_evidence)
-        except Exception:
-            verified = False
-        if not verified:
-            return {"state": "blocked", "reason": "CI missing/stale/failed or untrusted"}
-        observed.add(name)
-        run_ids.add(run_id)
-    if not set(required).issubset(observed):
-        return {"state": "blocked", "reason": "applicable required CI not verified"}
+    ci_reason, _ = verify_exact_head_ci(task.get("ci_policy_source"),
+                                       task.get("applicable_required_workflows"), ci, target,
+                                       lookup_workflow_evidence=lookup_workflow_evidence)
+    if ci_reason is not None:
+        return {"state": "blocked", "reason": ci_reason}
     return {"state": "pending_owner_approval",
             "target_agent": "claude", "target_pr": target["number"],
             "head_sha": target["head_sha"], "base_ref": target.get("base_branch"),

@@ -8,7 +8,10 @@ import hashlib
 import json
 
 REPO = "ScottMDavistv/azure-text-to-video"
-KINDS = {"claude_review", "remediation", "security_merge", "branch_correction"}
+# implementation / post_merge_reconciliation are unified-queue decision kinds;
+# like every kind here they are pending owner decisions, never dispatches.
+KINDS = {"claude_review", "remediation", "security_merge", "branch_correction",
+         "implementation", "post_merge_reconciliation"}
 SHA = __import__("re").compile(r"[0-9a-f]{40}\Z")
 
 
@@ -70,5 +73,6 @@ def consolidate(items):
         if item["id"] in keyed and keyed[item["id"]] != item:
             raise ValueError("conflicting duplicate")
         keyed[item["id"]] = item
-    priority = {"branch_correction": 0, "remediation": 1, "claude_review": 2, "security_merge": 3}
+    priority = {"branch_correction": 0, "remediation": 1, "claude_review": 2, "security_merge": 3,
+                "implementation": 4, "post_merge_reconciliation": 5}
     return sorted(keyed.values(), key=lambda v: (priority[v["kind"]], v["pr_number"], v["id"]))
