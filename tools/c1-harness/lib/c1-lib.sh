@@ -1143,6 +1143,9 @@ _c1_cleanup_session() {
       (set -o noclobber; : >"$verification_record") || return 1
     fi
     [[ -f "$verification_record" && ! -L "$verification_record" ]] || return 1
+    if [[ ${C1_WEBSOCKIFY_OUTCOME:-} == unavailable ]]; then
+      c1_read_websockify_status "$s" C1_WEBSOCKIFY_OUTCOME || true
+    fi
     c1_safe_rm "$s" "$root" || return 1
   fi
   if [[ -n "$owner" ]]; then
@@ -1347,6 +1350,25 @@ c1_cmd_xvfb()   { printf '%s\n' Xvfb "$1" -screen 0 1600x1000x24 -nolisten tcp -
 # given (`-no6`/`-noipv6` alone were verified insufficient). Both are passed.
 c1_cmd_x11vnc() { printf '%s\n' x11vnc -display "$1" -auth "$2/Xauthority" -rfbport 0 -rfbportv6 0 -no6 -unixsock "$2/vnc.sock" \
                     -passwdfile "rm:$2/vncpass" -forever -noxdamage -nolookup -norc -nossl -quiet -o "$2/log/x11vnc.log"; }
+# Bounded reads from the private session. Missing, truncated or ambiguous
+# launch identity or wait status means unavailable, never a teardown decision.
+c1_read_websockify_status() {
+  local status='' identity='' kind number
+  local pattern='([1-9][0-9]{0,19} ){3}[1-9][0-9]{0,19}'
+  local record="$1/websockify-status" launch="$1/websockify-supervisor"
+  [[ -f "$record" && ! -L "$record" && -O "$record" && -r "$record" &&
+     -f "$launch" && ! -L "$launch" && -O "$launch" && -r "$launch" ]] || return 1
+  if LC_ALL=C IFS= read -r -d '' -n 96 status <"$record"; then return 1; fi
+  if LC_ALL=C IFS= read -r -d '' -n 86 identity <"$launch"; then return 1; fi
+  [[ "$status" =~ ^($pattern)' '(exit|signal)' '(0|[1-9][0-9]{0,2})$'\n'$ ]] || return 1
+  [[ "$identity" == "${BASH_REMATCH[1]}"$'\n' ]] || return 1
+  kind=${BASH_REMATCH[3]}
+  number=${BASH_REMATCH[4]}
+  if [[ "$kind" == exit ]]; then (( number <= 255 )) || return 1
+  else (( number >= 1 && number <= 64 )) || return 1; fi
+  printf -v "$2" '%s %s (ordering unknown)' "$kind" "$number"
+}
+
 c1_cmd_websockify() { printf '%s\n' websockify --web "$C1_NOVNC_WEB" --unix-target="$2/vnc.sock" "127.0.0.1:$1"; }
 
 # c1_close_inherited_fds -> close every fd above 2 in the CURRENT shell (L-1).

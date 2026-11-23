@@ -232,6 +232,8 @@ r11_exit_status_and_late_privacy() (
     PORT_PRIVATE=verified-probe-gh
     printf 'verified\n127.0.0.1:6080 pid=11 comm=websockify ino=31\n' >"$S/listener-state"
     if [[ "$variant" == clean ]]; then
+      printf '11 31 12 32\n' >"$S/websockify-supervisor"
+      printf '11 31 12 32 exit 37\n' >"$S/websockify-status"
       c1_startup_mark "$S" origin 100 &&
         c1_startup_mark "$S" watchdog-handoff 190 || return 1
     fi
@@ -244,6 +246,12 @@ r11_exit_status_and_late_privacy() (
     if [[ "$variant" == startup-failed ]]; then
       PORT_PRIVATE=failed
       printf 'fixture unverified\n' >"$S/privacy-failed"
+      printf '11 31 12 32\n' >"$S/websockify-supervisor"
+      printf '11 31 12 32 signal 15\n\0raw log' >"$S/websockify-status"
+    fi
+    if [[ "$variant" == interrupted ]]; then
+      printf '11 31 12 32\n' >"$S/websockify-supervisor"
+      printf '11 31 12 33 exit 37\n' >"$S/websockify-status"
     fi
     status=0
     (
@@ -257,6 +265,7 @@ r11_exit_status_and_late_privacy() (
         [[ "$status" == 0 ]] &&
           grep -Fxq -- '- First failure observation: none-recorded' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Post-cleanup reason: none' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Websockify outcome: exit 37 (ordering unknown)' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Startup timing: listener-verification=unavailable monitor-start=unavailable first-probe=unavailable exposure-to-probe-result=unavailable exposure-to-watchdog-handoff=900ms' "$R11_EVIDENCE" &&
           grep -qx -- '- R11: PASS' "$R11_EVIDENCE" || return 1
         ;;
@@ -269,6 +278,8 @@ r11_exit_status_and_late_privacy() (
         local expected_status=1
         if [[ "$variant" == interrupted ]]; then expected_status=130; fi
         [[ "$status" == "$expected_status" ]] &&
+          grep -Fxq -- '- Websockify outcome: unavailable' "$R11_EVIDENCE" &&
+          ! grep -Fq -- 'raw log' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Session cleanup: PASS' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Post-cleanup verification: PASS' "$R11_EVIDENCE" &&
           grep -Fxq -- '- R11: FAIL' "$R11_EVIDENCE" || return 1
@@ -741,6 +752,45 @@ monitor_initial_sweep_cadence() (
         "$(c1_read_first_failure "$session")" == 'monitor-startup private-sweep-failed' ]] || return 1 ;;
       unowned) [[ "$rc" == 1 && ! -e "$session/monitor-beat" ]] || return 1 ;;
     esac
+  done
+)
+
+websockify_status_only() (
+  local session owner_start pid variant expected
+  local C1_WEBSOCKIFY_OUTCOME
+  owner_start=$(c1_proc_start "$$") || return 1
+  for variant in child-first-term signal natural; do
+    session=$(c1_session_new "$STATE" "$$") || return 1
+    pid=$(c1_spawn "$session" websockify python3 -I -c '
+from pathlib import Path
+import signal, sys, time
+ready, release, variant = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+if variant == "child-first-term":
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(42))
+ready.touch()
+for _ in range(500):
+    if release.is_file():
+        sys.exit(37)
+    time.sleep(0.01)
+sys.exit(71)
+' "$session/ready" "$session/release" "$variant") || return 1
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] && wait_for_file "$session/ready" || return 1
+    case "$variant" in
+      child-first-term) expected='exit 42 (ordering unknown)' ;;
+      signal) expected='signal 15 (ordering unknown)' ;;
+      natural)
+        expected='exit 37 (ordering unknown)'
+        : >"$session/release"
+        wait_for_file "$session/websockify-status" || return 1 ;;
+    esac
+    C1_WEBSOCKIFY_OUTCOME=unavailable
+    # Exact generic cleanup signals the tracked direct child before it sends
+    # TERM to its supervisor. Nothing in the status describes startup timing.
+    c1_cleanup_session "$STATE" "$session" "$$" "$owner_start" || return 1
+    [[ "$C1_WEBSOCKIFY_OUTCOME" == "$expected" && ! -e "$session" ]] || {
+      printf '%s: got [%s], expected [%s]\n' "$variant" "$C1_WEBSOCKIFY_OUTCOME" "$expected"
+      return 1
+    }
   done
 )
 
@@ -1322,7 +1372,7 @@ if [[ "${1:-}" == --mutations ]]; then
   done
 else
   for case_name in competing_launchers overlapping_cleaners malformed_active retained_privacy_failure reused_owner watchdog_waits_for_launcher r11_exit_status_and_late_privacy launcher_crash_recovery active_publication_preserves_owner verification_is_retried \
-    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss websockify_reaping_ack monitor_initial_sweep_cadence startup_timing_diagnostics monitor_probe_failure_evidence harness_head_drift guarded_delayed_startup drain_timeout_evidence monitor_stop_ack_race startup_unknown_port startup_monitor_handoff_boundary; do
+    launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss websockify_reaping_ack monitor_initial_sweep_cadence startup_timing_diagnostics websockify_status_only monitor_probe_failure_evidence harness_head_drift guarded_delayed_startup drain_timeout_evidence monitor_stop_ack_race startup_unknown_port startup_monitor_handoff_boundary; do
     if ! run_case "$HERE" "$case_name"; then
       printf 'FAIL: %s\n' "$case_name" >&2
       for log in "$FIXTURE"/*.log; do [[ ! -f "$log" ]] || cat "$log" >&2; done

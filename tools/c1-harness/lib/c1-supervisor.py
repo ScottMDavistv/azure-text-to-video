@@ -98,6 +98,22 @@ def signal_tree(sig):
 STATE = {"kill": False}
 
 
+def record_websockify_status(session, child, child_start, supervisor, supervisor_start, rc):
+    """Best-effort waitpid telemetry; makes no claim about timing or cause."""
+    key = "exit" if rc >= 0 else "signal"
+    line = f"{child} {child_start} {supervisor} {supervisor_start} {key} {abs(rc)}\n"
+    try:
+        fd = os.open(os.path.join(session, "websockify-status"),
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW |
+                     os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+        try:
+            os.write(fd, line.encode("ascii"))
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
 def on_term(_signum, _frame):
     signal_tree(signal.SIGTERM)
 
@@ -164,6 +180,7 @@ def main(argv):
             finally:
                 os._exit(127)
     rc = 0
+    child_start = child_status = None
     try:
         child_start = start_time(child)       # readable even if the child is already a zombie
         tmp = os.path.join(session, "tmp", f".spawn.{me}.tmp")
@@ -187,8 +204,8 @@ def main(argv):
         except InterruptedError:
             continue
         if pid == child:
-            rc = os.waitstatus_to_exitcode(status)
-            rc = 128 - rc if rc < 0 else rc
+            child_status = os.waitstatus_to_exitcode(status)
+            rc = 128 - child_status if child_status < 0 else child_status
         if pid == 0:
             signal_tree(signal.SIGKILL)
             time.sleep(0.05)
@@ -197,6 +214,9 @@ def main(argv):
     except OSError as exc:
         print(f"c1-supervisor: cannot record reaping proof: {exc}", file=sys.stderr)
         return 125
+    # Publish only after existing reaping proof, outside the signal paths.
+    if argv[3] == "websockify" and child_start is not None and child_status is not None:
+        record_websockify_status(session, child, child_start, me, my_start, child_status)
     return rc
 
 

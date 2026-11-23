@@ -298,7 +298,7 @@ finish_r11() {
   local r11_exit=$1 listener=unverified cleanup_result=not-needed checkout=unverified verdict=FAIL
   local listener_state='' listener_detail='' C1_FINAL_PRIVACY=pending first_failure=none-recorded
   local monitor_shutdown=not-run session_cleanup=not-run cleanup_verification=not-run monitor_probe_failure=none-recorded
-  local C1_CLEANUP_DETAIL= cleanup_detail=not-run startup_timing=unavailable
+  local C1_CLEANUP_DETAIL= cleanup_detail=not-run startup_timing=unavailable C1_WEBSOCKIFY_OUTCOME=unavailable
   trap - EXIT
   trap '' INT TERM HUP
 
@@ -369,6 +369,7 @@ finish_r11() {
     printf -- '- First failure observation: %s\n' "$first_failure"
     printf -- '- Monitor probe failure: %s\n' "$monitor_probe_failure"
     printf -- '- Startup timing: %s\n' "$startup_timing"
+    printf -- '- Websockify outcome: %s\n' "$C1_WEBSOCKIFY_OUTCOME"
     printf -- '- Monitor shutdown: %s\n' "$monitor_shutdown"
     printf -- '- Session cleanup: %s\n' "$session_cleanup"
     printf -- '- Post-cleanup verification: %s\n' "$cleanup_verification"
