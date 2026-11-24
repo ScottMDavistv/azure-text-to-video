@@ -68,12 +68,15 @@ def get_context(project_id, authorization, action):
     return table, actor
 
 def response_job(job):
-    return {
+    response = {
         "job_id": job["RowKey"],
         "status": job["status"],
         "prompt": job["prompt"],
         "created_at": job["createdAt"],
     }
+    if job["status"] == "failed":
+        response["error_type"] = job.get("errorType", "RenderFailed")
+    return response
 
 @router.post("/{project_id}/jobs", status_code=201)
 def create_project_job(project_id: UUID, request: PromptRequest,
@@ -144,8 +147,13 @@ def queue_project_job(project_id: UUID, job_id: UUID,
             raise HTTPException(409, "Synthetic queue ownership marker required")
         if not synthetic_dispatch_enabled():
             raise HTTPException(503, "Synthetic dispatch is disabled")
-        transition_job(str(job_id), "queued", dispatchState="pending")
-        result = dispatch_queued_job(str(job_id), send=enqueue_synthetic_job)
+        if job["status"] == "created":
+            transition_job(str(job_id), "queued", dispatchState="pending")
+        elif job["status"] == "queued" and job.get("dispatchState") == "sent":
+            # An acknowledged send is not a recovery request, even after the
+            # generic redispatch window expires.
+            return {"job_id": str(job_id), "status": "queued", "dispatched": False}
+        result = dispatch_queued_job(str(job_id), table=table, send=enqueue_synthetic_job)
         return {"job_id": str(job_id), "status": "queued",
                 "dispatched": result["dispatched"]}
     except (DispatchConflict, ValueError) as exc:
