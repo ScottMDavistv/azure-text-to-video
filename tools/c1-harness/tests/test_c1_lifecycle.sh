@@ -24,6 +24,40 @@ base=$1 ROOT=$2 fixture=$3; shift 3
 source "$base/lib/c1-lib.sh"
 eval "$(sed -n '/^main() {$/,/^}$/p' "$base/c1-session.sh")"
 c1_port_free() { return 0; }  # socket verification has its own integration tests
+if [[ "${1:-}" == r11-only && -f "$fixture/interrupt-variant" ]]; then
+  for fn in r11_session start_private_desktop r11_interrupt finish_r11; do
+    eval "$(sed -n "/^${fn}() {$/,/^}$/p" "$base/c1-session.sh")"
+  done
+  variant=$(<"$fixture/interrupt-variant")
+  export CODESPACES=true CODESPACE_NAME=fixture-do-not-report GITHUB_TOKEN=fixture-secret-do-not-report
+  export GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN=app.github.dev
+  LIB="$base/lib/c1-lib.sh" S='' EVIDENCE_DIR="$fixture/evidence"
+  REPO=fixture HARNESS_REL=fixture
+  git() { printf 'fixture\n'; }
+  scrub_env() { :; }
+  preflight() { :; }
+  install_desktop_deps() { :; }
+  c1_verify_harness_clean() { :; }
+  c1_start_display_vnc() { :; }
+  c1_verify_private_with_decoy() {
+    c1_spawn "$S" victim sleep 30 >/dev/null || return 1
+    case "$variant" in
+      INT|TERM|HUP) kill -s "$variant" "$BASHPID" ;;
+      no-signal-130) exit 130 ;;
+    esac
+    return 1
+  }
+  if [[ "$variant" == TERM ]]; then
+    eval "$(declare -f c1_cleanup_launcher | sed '1s/c1_cleanup_launcher/fixture_cleanup_launcher/')"
+    c1_cleanup_launcher() {
+      # Check the breadcrumb before real cleanup; stop on purpose afterwards
+      # to simulate an interruption with no completed Markdown report.
+      grep -Fxq 'signal=TERM startup-phase=decoy-privacy' "${R11_EVIDENCE%.md}.interrupt" || exit 78
+      fixture_cleanup_launcher "$@" && c1_verify_cleanup "$2" || exit 79
+      exit 130
+    }
+  fi
+fi
 session() {
   c1_recover_before_start "$ROOT" || return 1
   session_path=$(c1_session_new "$ROOT" "$$") || return 1
@@ -334,6 +368,40 @@ r11_exit_status_and_late_privacy() (
         ;;
     esac
     [[ ! -e "$S" ]] || return 1
+  done
+)
+
+r11_interrupt_breadcrumb() (
+  local variant status file
+  local -a evidence
+  shopt -s nullglob
+  for variant in INT TERM HUP startup-failed no-signal-130; do
+    printf '%s\n' "$variant" >"$FIXTURE/interrupt-variant"
+    status=0
+    entry r11-only >"$FIXTURE/$variant.log" 2>&1 || status=$?
+    evidence=("$FIXTURE/evidence/"*.md)
+    [[ ${#evidence[@]} == 1 ]] || return 1
+    file=${evidence[0]}
+    [[ ! -e "$STATE/active" ]] || return 1
+    case "$variant" in
+      INT|TERM|HUP)
+        [[ "$status" == 130 ]] &&
+          cmp -s -- "${file%.md}.interrupt" <(printf 'signal=%s startup-phase=decoy-privacy\n' "$variant") &&
+          [[ "$(stat -c '%a' -- "${file%.md}.interrupt")" == 600 ]] || return 1
+        ;;
+      startup-failed|no-signal-130)
+        [[ ! -e "${file%.md}.interrupt" ]] || return 1
+        if [[ "$variant" == startup-failed ]]; then [[ "$status" == 1 ]] || return 1
+        else [[ "$status" == 130 ]] || return 1; fi
+        ;;
+    esac
+    if [[ "$variant" == TERM ]]; then [[ ! -s "$file" ]] || return 1
+    else
+      grep -Fxq -- '- Cleanup: PASS' "$file" &&
+        grep -Fxq -- '- R11: FAIL' "$file" &&
+        ! grep -Fq -- 'do-not-report' "$file" || return 1
+    fi
+    rm -f -- "$file" "${file%.md}.interrupt"
   done
 )
 
@@ -1389,7 +1457,7 @@ if [[ "${1:-}" == --mutations ]]; then
     wait_for_fixture_port_release || exit 1
   done
 else
-  for case_name in competing_launchers overlapping_cleaners malformed_active retained_privacy_failure reused_owner watchdog_waits_for_launcher r11_exit_status_and_late_privacy launcher_crash_recovery active_publication_preserves_owner verification_is_retried \
+  for case_name in competing_launchers overlapping_cleaners malformed_active retained_privacy_failure reused_owner watchdog_waits_for_launcher r11_exit_status_and_late_privacy r11_interrupt_breadcrumb launcher_crash_recovery active_publication_preserves_owner verification_is_retried \
     launcher_ambiguous_record watchdog_ambiguous_record watchdog_exits_after_cleanup run_finalization signal_identity_checks_start_time monitor_shutdown_and_loss websockify_reaping_ack monitor_initial_sweep_cadence startup_timing_diagnostics websockify_status_only monitor_probe_failure_evidence harness_head_drift guarded_delayed_startup drain_timeout_evidence monitor_stop_ack_race startup_unknown_port startup_monitor_handoff_boundary; do
     if ! run_case "$HERE" "$case_name"; then
       printf 'FAIL: %s\n' "$case_name" >&2

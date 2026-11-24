@@ -32,6 +32,7 @@ S=''
 MONITOR_PID='' MONITOR_START=''
 CHECKS=()
 PROD_PENDING=unknown
+R11_STARTUP_PHASE=''
 
 usage() { sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
@@ -239,15 +240,19 @@ fail_desktop() {
 # start_private_desktop PASSWORD -> sets PORT_PRIVATE, WS, WSST
 start_private_desktop() {
   local pass=$1 vis owner step
+  if [[ -n "${R11_STARTUP_PHASE:-}" ]]; then R11_STARTUP_PHASE=desktop-prep; fi
   BASE=$(c1_codespace_base "$C1_NOVNC_PORT") || { c1_err 'CODESPACE_NAME / forwarding domain unavailable'; return 1; }
   [[ -n "${GITHUB_TOKEN:-}" ]] || { c1_err 'GITHUB_TOKEN is not available in this Codespace terminal'; return 1; }
   HDR="$S/probe-token.hdr"
   # Called as `if ! start_private_desktop` (errexit is OFF in here): every step is checked explicitly.
   c1_write_header_file "$HDR" X-Github-Token "$GITHUB_TOKEN" || return 1
   c1_write_header_file "$S/api-token.hdr" Authorization "token $GITHUB_TOKEN" || return 1
+  if [[ -n "${R11_STARTUP_PHASE:-}" ]]; then R11_STARTUP_PHASE=display-start; fi
   c1_start_display_vnc "$S" "$pass" || return 1
+  if [[ -n "${R11_STARTUP_PHASE:-}" ]]; then R11_STARTUP_PHASE=decoy-privacy; fi
   c1_log "verifying Codespaces port $C1_NOVNC_PORT privacy with a decoy (no desktop behind it yet)"
   c1_verify_private_with_decoy "$S" "$C1_NOVNC_PORT" "$BASE" "$HDR" || { PORT_PRIVATE=failed; return 1; }
+  if [[ -n "${R11_STARTUP_PHASE:-}" ]]; then R11_STARTUP_PHASE=visibility-verify; fi
   # "Private to organization" also requires GitHub sign-in, so the probe alone
   # cannot exclude it. Accept only a gh read-back of "private", or a
   # personal (User-owned) repository, where organization visibility does not apply.
@@ -267,6 +272,7 @@ start_private_desktop() {
     PORT_PRIVATE=failed
     return 1
   fi
+  if [[ -n "${R11_STARTUP_PHASE:-}" ]]; then R11_STARTUP_PHASE=websockify-start; fi
   local wrc=0
   WS=$(C1_GUARD_STARTUP=1 c1_start_websockify "$S" "$C1_NOVNC_PORT") || wrc=$?
   if (( wrc )); then
@@ -276,6 +282,7 @@ start_private_desktop() {
   fi
   WSST=$(c1_proc_start "$WS"); [[ -n "$WSST" ]] || { fail_desktop websockify-start; return 1; }
   if (( REQ_GH )); then PORT_PRIVATE=verified-probe-gh; else PORT_PRIVATE=verified-probe-user-repo; fi
+  if [[ -n "${R11_STARTUP_PHASE:-}" ]]; then R11_STARTUP_PHASE=monitor-arm; fi
   # Do not give the operator access until the monitor completes a private sweep.
   # shellcheck disable=SC2016
   MONITOR_PID=$(c1_spawn "$S" privacy-monitor bash -c 'source "$1"; C1_MONITOR_TRACK=1 c1_privacy_monitor_loop "$2" "$3" "$4" "$5" "$6" "" 0.2 "$7" "$8"' \
@@ -291,6 +298,27 @@ start_private_desktop() {
   done
   fail_desktop monitor-start
   return 1
+}
+
+# This local, best-effort breadcrumb is separate from the verdict so it can
+# survive incomplete cleanup or report writing. It is not cleanup/privacy proof.
+r11_interrupt() {
+  trap '' INT TERM HUP
+  local signal=$1 phase=${R11_STARTUP_PHASE:-unknown} breadcrumb
+  case "$signal" in INT|TERM|HUP) ;; *) exit 130 ;; esac
+  case "$phase" in
+    session-setup|desktop-prep|display-start|decoy-privacy|visibility-verify|websockify-start|monitor-arm|startup-complete) ;;
+    *) phase=unknown ;;
+  esac
+  if [[ ${R11_EVIDENCE:-} == *.md ]]; then
+    breadcrumb="${R11_EVIDENCE%.md}.interrupt"
+    if [[ ! -e "$breadcrumb" && ! -L "$breadcrumb" ]]; then
+      ( set -o noclobber
+        printf 'signal=%s startup-phase=%s\n' "$signal" "$phase" >"$breadcrumb"
+      ) 2>/dev/null || true
+    fi
+  fi
+  exit 130
 }
 
 # Dedicated R11 evidence is written after verified cleanup, including on errors.
@@ -401,13 +429,17 @@ r11_session() {
   R11_EVIDENCE=$(mktemp "$EVIDENCE_DIR/c1-r11-$(date -u +%Y%m%dT%H%M%SZ).XXXXXXXX.md")
   PORT_PRIVATE=not-started BASE='' HDR='' WS='' WSST='' REQ_GH=0
   C1_PRIVACY_DETAIL=''
+  R11_STARTUP_PHASE=session-setup
   trap 'finish_r11 "$?"' EXIT
-  trap 'exit 130' INT TERM HUP
+  trap 'r11_interrupt INT' INT
+  trap 'r11_interrupt TERM' TERM
+  trap 'r11_interrupt HUP' HUP
   S=$(c1_session_new "$ROOT" "$$") || return 1
   export C1_HARNESS_SESSION=$S TMPDIR="$S/tmp"
   c1_start_watchdog "$ROOT" "$S" "$$" "$LIB" || return 1
   pass=$(c1_gen_password)
   if ! start_private_desktop "$pass"; then exit 1; fi
+  R11_STARTUP_PHASE=startup-complete
   exit 0
 }
 
