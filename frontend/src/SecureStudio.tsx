@@ -21,6 +21,8 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
   const [selectedScene, setSelectedScene] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [pollError, setPollError] = useState<string | null>(null)
+  const [queueError, setQueueError] = useState<string | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const generation = useRef(0)
   const inFlight = useRef<AbortController | null>(null)
@@ -64,30 +66,46 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
   useEffect(() => () => { generation.current += 1; inFlight.current?.abort() }, [])
 
   useEffect(() => {
-    if (!accountIdentity || !job || job.status === 'completed' || job.status === 'failed') return
-    let alive = true
-    let stopped = false
+    if (!accountIdentity || !job || busy || job.status === 'completed' || job.status === 'failed') return
     const version = generation.current
     const abort = new AbortController()
-    const timer = window.setInterval(async () => {
+    const current = () => !abort.signal.aborted && generation.current === version
+    let timer: number
+    const poll = async () => {
       try {
         const next = await api.status(projectId, job.job_id, abort.signal)
-        if (alive && !stopped && generation.current === version &&
-            (await getSignedInAccount())?.homeAccountId === accountIdentity) setJob(next)
+        if ((await getSignedInAccount())?.homeAccountId !== accountIdentity || !current()) return
+        setPollError(null)
+        setJob(next)
       } catch (cause) {
-        if (alive && !abort.signal.aborted && generation.current === version) {
-          setError(displayError(cause))
-          if (cause instanceof Error && 'status' in cause &&
-              [401, 403, 404].includes(Number(cause.status))) {
-            stopped = true
-            abort.abort()
-            window.clearInterval(timer)
-          }
-        }
+        if (!current()) return
+        setPollError(displayError(cause))
+        if (cause instanceof Error && 'status' in cause &&
+            [401, 403, 404].includes(Number(cause.status))) return
+        timer = window.setTimeout(poll, 3000)
       }
-    }, 3000)
-    return () => { alive = false; abort.abort(); window.clearInterval(timer) }
-  }, [api, job, projectId, accountIdentity])
+    }
+    timer = window.setTimeout(poll, 3000)
+    return () => { abort.abort(); window.clearTimeout(timer) }
+  }, [api, job, projectId, accountIdentity, busy])
+
+  async function queueJob(project: string, jobId: string, task: ReturnType<typeof begin>) {
+    try {
+      await api.queue(project, jobId, task.controller.signal)
+      if (task.current()) setQueueError(null)
+    } catch (cause) {
+      if (task.current()) {
+        setQueueError(displayError(cause) + ' The job was saved. Check its status before retrying the queue.')
+      }
+    }
+    if (!task.current()) return
+    try {
+      const next = await api.status(project, jobId, task.controller.signal)
+      if ((await getSignedInAccount())?.homeAccountId === accountIdentity && task.current()) setJob(next)
+    } catch (cause) {
+      if (task.current()) setPollError(displayError(cause))
+    }
+  }
 
   async function create(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -101,41 +119,32 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
     const task = begin()
     setBusy(true)
     setError(null)
+    setPollError(null)
+    setQueueError(null)
     setJob(null)
     setVideoUrl(null)
     try {
       const created = await api.submit(project, prompt, task.controller.signal)
-      if (!task.current() || (await getSignedInAccount())?.homeAccountId !== accountIdentity) return
+      if ((await getSignedInAccount())?.homeAccountId !== accountIdentity || !task.current()) return
       setJob(created)
-      try {
-        await api.queue(project, created.job_id, task.controller.signal)
-        if (!task.current()) return
-        const next = await api.status(project, created.job_id, task.controller.signal)
-        if (task.current() && (await getSignedInAccount())?.homeAccountId === accountIdentity) setJob(next)
-      } catch (cause) {
-        if (task.current()) setError(displayError(cause) +
-          ' Job creation was retained; queue it after the service is available.')
-      }
+      await queueJob(project, created.job_id, task)
     } catch (cause) {
       if (task.current()) setError(displayError(cause))
     } finally {
       if (task.current()) { setBusy(false); inFlight.current = null }
     }
   }
+  const canRetryQueue = job?.status === 'created' || (job?.status === 'queued' && queueError !== null)
   async function queueAgain() {
-    if (!job || job.status !== 'created') return
+    if (!job || !canRetryQueue) return
     const project = projectId
     const jobId = job.job_id
     const task = begin()
     setBusy(true)
     setError(null)
+    setPollError(null)
     try {
-      await api.queue(project, jobId, task.controller.signal)
-      if (!task.current()) return
-      const next = await api.status(project, jobId, task.controller.signal)
-      if (task.current() && (await getSignedInAccount())?.homeAccountId === accountIdentity) setJob(next)
-    } catch (cause) {
-      if (task.current()) setError(displayError(cause))
+      await queueJob(project, jobId, task)
     } finally {
       if (task.current()) { setBusy(false); inFlight.current = null }
     }
@@ -147,9 +156,10 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
     const task = begin()
     setBusy(true)
     setError(null)
+    setVideoUrl(null)
     try {
       const blob = await api.download(project, jobId, task.controller.signal)
-      if (task.current() && (await getSignedInAccount())?.homeAccountId === accountIdentity) setVideoUrl(URL.createObjectURL(blob))
+      if ((await getSignedInAccount())?.homeAccountId === accountIdentity && task.current()) setVideoUrl(URL.createObjectURL(blob))
     } catch (cause) {
       if (task.current()) setError(displayError(cause))
     } finally {
@@ -164,7 +174,7 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
         <p className="muted">{accountIdentity ? 'Microsoft session selected; project access is checked by the backend.' : 'Sign in using the account controls above before submitting.'}</p>
         <form onSubmit={create}>
           <label htmlFor="project-id" className="eyebrow">Authorized project ID</label>
-          <input className="project-input" id="project-id" value={projectId} onChange={e => { invalidate(); setProjectId(e.target.value); setJob(null); setVideoUrl(null); setBusy(false); setError(null) }} placeholder="Project UUID" />
+          <input className="project-input" id="project-id" value={projectId} onChange={e => { invalidate(); setProjectId(e.target.value); setJob(null); setVideoUrl(null); setBusy(false); setError(null); setPollError(null); setQueueError(null) }} placeholder="Project UUID" />
           <label htmlFor="secure-video-prompt" className="eyebrow">Video prompt</label>
           <textarea id="secure-video-prompt" maxLength={2000} value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="Describe your video..." />
           <div className="actions"><span className="muted">{prompt.length}/2,000</span><button className="primary" type="submit" disabled={!accountIdentity || busy}>{busy ? 'Working…' : 'Submit authenticated job'}</button></div>
@@ -177,7 +187,9 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
           <p><strong>{job.job_id}</strong></p>
           <p role="status">Status: <strong>{job.status}</strong></p>
           <p className="muted">Status is polled from the backend. No percentage is inferred.</p>
-          {job.status === 'created' ? <button className="secondary" type="button" disabled={busy} onClick={queueAgain}>Retry synthetic queue</button> : null}
+          {pollError ? <p role="alert" className="field-error">{pollError}</p> : null}
+          {canRetryQueue && queueError ? <p role="alert" className="field-error">{queueError}</p> : null}
+          {canRetryQueue ? <button className="secondary" type="button" disabled={busy} onClick={queueAgain}>Retry synthetic queue</button> : null}
           {job.status === 'failed' ? <p role="alert">The job failed. Review server-side evidence before retrying.</p> : null}
         </> : <div className="empty">No authorized job in this session.</div>}
         <div className="stats"><div className="stat"><span className="muted">Synthetic target</span><strong>05:00</strong></div><div className="stat"><span className="muted">Paid requests</span><strong>Disabled</strong></div></div>
@@ -197,7 +209,7 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
           {job?.status === 'completed' ?
             <button type="button" className="primary" disabled={busy} onClick={retrieveVideo}>{videoUrl ? 'Refresh authorized video' : 'Retrieve private MP4'}</button> :
             <p>Available only when a backend job is completed and the private artifact is authorized.</p>}
-          {videoUrl && job ? <>
+          {videoUrl && job?.status === 'completed' ? <>
             <video controls src={videoUrl} style={{ width: '100%', maxHeight: 450, marginTop: 20 }} />
             <p><a href={videoUrl} download={job.job_id + '.mp4'}>Download authorized MP4</a></p>
           </> : null}
