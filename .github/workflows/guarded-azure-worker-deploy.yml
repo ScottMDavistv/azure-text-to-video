@@ -197,7 +197,7 @@ jobs:
           version="$(az version --query '"azure-cli"' -o tsv)"
           [[ "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]
           [[ "$(printf '%s\n' 2.76.0 "$version" | sort -V | head -1)" = 2.76.0 ]]
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Confirm exact checked-out SHA and approval deadline
@@ -207,7 +207,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           [[ "$APPROVAL_DEADLINE" =~ ^[1-9][0-9]{9}$ ]]
           (( $(date +%s) < APPROVAL_DEADLINE ))
-      - uses: azure/login@v3
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_WHATIF_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
