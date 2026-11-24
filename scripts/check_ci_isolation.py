@@ -138,15 +138,21 @@ _AZURE_PROTECTED = "vars.PROTECTED_MAIN_VERIFIED == 'true'"
 _AZURE_GUARDS = {
     "preview": (
         _AZURE_MANUAL_MAIN
-        + "(inputs.operation == 'preview' || inputs.operation == 'whatif' || inputs.operation == 'deploy') && "
+        + "(inputs.operation == 'preview' || inputs.operation == 'deploy') && "
         + _AZURE_OWNER,
         "dev-deployment",
     ),
     "whatif": (
         _AZURE_MANUAL_MAIN
-        + "(inputs.operation == 'whatif' || inputs.operation == 'deploy') && "
+        + "inputs.operation == 'deploy' && "
         + _AZURE_OWNER + " && " + _AZURE_PROTECTED,
         "dev-deployment-apply",
+    ),
+    "owner_whatif": (
+        _AZURE_MANUAL_MAIN + "inputs.operation == 'whatif' && " + _AZURE_OWNER
+        + " && github.triggering_actor == 'ScottMDavistv' && github.run_attempt == '1' && "
+        + _AZURE_PROTECTED + " && vars.AZURE_DEV_WHATIF_ENABLED == 'true'",
+        "dev-worker-whatif-preview",
     ),
     "deploy": (
         _AZURE_MANUAL_MAIN + "inputs.operation == 'deploy' && "
@@ -158,13 +164,25 @@ _AZURE_GUARDS = {
 }
 
 
-def guarded_azure_job(key, job, triggers, feature):
+def guarded_azure_job(key, job, triggers, feature, has_owner_whatif):
     known = _AZURE_GUARDS.get(key)
+    # Legacy guards are compatible only if the dedicated route is absent.
+    old_conditions = {
+        "preview": _AZURE_MANUAL_MAIN
+                   + "(inputs.operation == 'preview' || inputs.operation == 'whatif' || inputs.operation == 'deploy') && "
+                   + _AZURE_OWNER,
+        "whatif": _AZURE_MANUAL_MAIN
+                  + "(inputs.operation == 'whatif' || inputs.operation == 'deploy') && "
+                  + _AZURE_OWNER + " && " + _AZURE_PROTECTED,
+    }
     return bool(
         known and not feature
         and "workflow_dispatch" in triggers
         and triggers <= {"push", "schedule", "workflow_dispatch"}
-        and job.get("if") == known[0]
+        and (job.get("if") == known[0]
+             or (not has_owner_whatif and key in old_conditions
+                 and job.get("if") == old_conditions[key]))
+        and (key != "owner_whatif" or job.get("needs") == "whatif_admission")
         and job.get("environment") == known[1]
         and job.get("permissions") == {"contents": "read", "id-token": "write"}
     )
@@ -233,6 +251,7 @@ def examine(path, doc, raw=""):
     jobs = doc.get("jobs")
     if not triggers or not isinstance(jobs, dict) or not jobs:
         return [path + ": missing triggers or jobs"]
+    has_owner_whatif = "owner_whatif" in jobs
     unsupported = triggers - SUPPORTED
     if unsupported:
         problems.append(path + ": unsupported trigger(s) " + repr(sorted(unsupported)))
@@ -284,7 +303,8 @@ def examine(path, doc, raw=""):
         privileged = elevated(local) or bool(job.get("environment")) or bool(secrets)
         if secrets and not job.get("environment"):
             problems.append(where + ": custom secret requires a restricted environment")
-        azure_manual = path == GUARDED_AZURE and guarded_azure_job(key, job, triggers, feature)
+        azure_manual = path == GUARDED_AZURE and guarded_azure_job(
+            key, job, triggers, feature, has_owner_whatif)
         if path == GUARDED_AZURE and privileged and not azure_manual:
             problems.append(where + ": Azure privilege requires the exact manual job guard")
         if privileged and (untrusted or "workflow_dispatch" in triggers or

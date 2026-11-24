@@ -151,6 +151,47 @@ class IsolationTests(unittest.TestCase):
                 self.assertFalse(checker.main_only(condition))
                 self.assertFalse(checker.excludes_pr(condition))
 
+    def test_guarded_azure_standalone_whatif_migration_isolation(self):
+        legacy = self.guarded_azure_document()
+        self.assertEqual(checker.examine(checker.GUARDED_AZURE, legacy), [])
+
+        standalone = copy.deepcopy(legacy)
+        jobs = standalone["jobs"]
+        prefix = "github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && "
+        owner = "github.actor == 'ScottMDavistv'"
+        protected = "vars.PROTECTED_MAIN_VERIFIED == 'true'"
+        jobs["preview"]["if"] = (
+            prefix + "(inputs.operation == 'preview' || inputs.operation == 'deploy') && " + owner
+        )
+        jobs["whatif"]["if"] = prefix + "inputs.operation == 'deploy' && " + owner + " && " + protected
+        jobs["whatif_admission"] = {
+            "needs": "validate",
+            "permissions": {"contents": "read", "actions": "read"},
+            "steps": [],
+        }
+        jobs["owner_whatif"] = {
+            "needs": "whatif_admission",
+            "if": prefix + "inputs.operation == 'whatif' && " + owner
+                  + " && github.triggering_actor == 'ScottMDavistv' && github.run_attempt == '1' && "
+                  + protected + " && vars.AZURE_DEV_WHATIF_ENABLED == 'true'",
+            "environment": "dev-worker-whatif-preview",
+            "permissions": {"contents": "read", "id-token": "write"},
+            "steps": [],
+        }
+        self.assertEqual(checker.examine(checker.GUARDED_AZURE, standalone), [])
+        self.assertTrue(self.evaluate(standalone), "the Azure exception must remain path-specific")
+        for names in (("preview",), ("whatif",), ("preview", "whatif")):
+            with self.subTest(legacy_guards=names):
+                mixed = copy.deepcopy(standalone)
+                for name in names:
+                    mixed["jobs"][name]["if"] = legacy["jobs"][name]["if"]
+                errors = checker.examine(checker.GUARDED_AZURE, mixed)
+                for name in names:
+                    self.assertIn(
+                        checker.GUARDED_AZURE + " job " + name
+                        + ": Azure privilege requires the exact manual job guard", errors
+                    )
+
     def test_guarded_azure_metadata_drift_fails_closed(self):
         changes = (
             ("workflow permissions", lambda d: d["permissions"].update({"id-token": "write"})),
