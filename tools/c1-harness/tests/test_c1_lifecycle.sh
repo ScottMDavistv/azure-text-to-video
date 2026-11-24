@@ -236,12 +236,31 @@ r11_exit_status_and_late_privacy() (
   ROOT="$root_fixture" REPO=fixture HARNESS_REL=fixture R11_HEAD=fixture
   # Substitute only the observation sources. Run the real listener classification.
   c1_proc_listen_table() {
+    if [[ ${verification_variant:-} == verify-inode-* ]]; then
+      local calls=0
+      if [[ -f "$FIXTURE/inode-scans" ]]; then calls=$(<"$FIXTURE/inode-scans"); fi
+      printf '%s\n' "$((calls + 1))" >"$FIXTURE/inode-scans"
+      # Only the inode inventory (third observation) receives these rows/errors.
+      (( calls == 2 )) || return 0
+      case "$verification_variant" in
+        verify-inode-proc) printf 'raw fixture proc detail\n' >&2; return 1 ;;
+        verify-inode-disagreement|verify-inode-match) printf '31 127.0.0.1:7000\n' ;;
+      esac
+      return 0
+    fi
     case "${verification_variant:-}" in
       verify-port-open|verify-port-unavailable) printf '31 127.0.0.1:6080\n' ;;
       verify-port-proc) printf 'raw fixture proc detail\n' >&2; return 1 ;;
     esac
   }
   c1_ss_listen_table() {
+    if [[ ${verification_variant:-} == verify-inode-* && $(<"$FIXTURE/inode-scans") == 3 ]]; then
+      case "$verification_variant" in
+        verify-inode-ss) printf 'raw fixture ss detail\n' >&2; return 1 ;;
+        verify-inode-match) printf '31 127.0.0.1:7000\n' ;;
+      esac
+      return 0
+    fi
     case "${verification_variant:-}" in
       verify-port-open) printf '31 127.0.0.1:6080\n' ;;
       verify-port-ss) printf 'raw fixture ss detail\n' >&2; return 1 ;;
@@ -254,6 +273,9 @@ r11_exit_status_and_late_privacy() (
   c1_cleanup_launcher() {
     fixture_cleanup_launcher "$@" || return "$?"
     [[ "$variant" != cleanup-failed ]] || return 7
+    if [[ "$variant" == verify-inode-invalid-register ]]; then
+      : >"$ROOT/.${S##*/}.inodes" || return 9
+    fi
     if [[ "$variant" == verify-record-retirement ]]; then
       rm -f -- "$ROOT/.${S##*/}.pending" && mkdir "$ROOT/.${S##*/}.pending" || return 9
     fi
@@ -265,7 +287,11 @@ r11_exit_status_and_late_privacy() (
     [[ "$variant" != verify-failed ]] || return 8
   }
   git() { printf 'fixture\n'; }
-  for variant in clean late startup-failed interrupted stop-failed cleanup-failed verify-failed verify-port-open verify-port-unavailable verify-port-proc verify-port-ss verify-record-retirement; do
+  for variant in clean late startup-failed interrupted stop-failed cleanup-failed verify-failed \
+    verify-port-open verify-port-unavailable verify-port-proc verify-port-ss verify-record-retirement \
+    verify-inode-invalid-register verify-inode-proc verify-inode-ss verify-inode-disagreement \
+    verify-inode-invalid-row verify-inode-match verify-inode-resolved; do
+    rm -f -- "$FIXTURE/inode-scans"
     S=$(c1_session_new "$ROOT" "$$") || return 1
     R11_EVIDENCE="$FIXTURE/$variant.md"
     PORT_PRIVATE=verified-probe-gh
@@ -276,6 +302,11 @@ r11_exit_status_and_late_privacy() (
       c1_startup_mark "$S" origin 100 &&
         c1_startup_mark "$S" watchdog-handoff 190 || return 1
     fi
+    case "$variant" in
+      verify-inode-invalid-row) printf 'raw fixture invalid row\n' >"$S/listen-inodes" ;;
+      verify-inode-proc|verify-inode-ss|verify-inode-disagreement|verify-inode-match|verify-inode-resolved)
+        printf '31\n' >"$S/listen-inodes" ;;
+    esac
     if [[ "$variant" == late ]]; then
       c1_record_privacy_failure "$S" public || return 1
       c1_record_monitor_probe_failure "$S" 'unauthenticated probe got HTTP 200' 2>/dev/null &&
@@ -305,6 +336,7 @@ r11_exit_status_and_late_privacy() (
           grep -Fxq -- '- First failure observation: none-recorded' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Post-cleanup reason: none' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Post-cleanup desktop listener evidence: none' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Post-cleanup inode evidence: none' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Websockify outcome: exit 37 (ordering unknown)' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Startup timing: listener-verification=unavailable monitor-start=unavailable first-probe=unavailable exposure-to-probe-result=unavailable exposure-to-watchdog-handoff=900ms auth-return=unavailable auth-write=unavailable auth-read=unavailable auth-read-incomplete=unavailable auth-read-budget-exhausted=unavailable' "$R11_EVIDENCE" &&
           grep -qx -- '- R11: PASS' "$R11_EVIDENCE" || return 1
@@ -340,6 +372,7 @@ r11_exit_status_and_late_privacy() (
         [[ "$status" == 1 ]] &&
           grep -Fxq -- '- Session cleanup: FAIL (exit 7)' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Post-cleanup verification: not-run' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Post-cleanup inode evidence: not-run' "$R11_EVIDENCE" &&
           grep -Fxq -- '[c1] R11 session cleanup: FAIL (exit 7)' "$FIXTURE/$variant.log" || return 1
         ;;
       verify-port-open|verify-port-unavailable|verify-port-proc|verify-port-ss|verify-record-retirement)
@@ -359,6 +392,30 @@ r11_exit_status_and_late_privacy() (
           ! grep -Fq -- "raw fixture" "$R11_EVIDENCE" &&
           grep -Fxq -- '- R11: FAIL' "$R11_EVIDENCE" &&
           [[ -e "$ROOT/.${S##*/}.pending" ]] || return 1
+        ;;
+      verify-inode-resolved)
+        [[ "$status" == 0 && $(<"$FIXTURE/inode-scans") == 3 ]] &&
+          grep -Fxq -- '- Post-cleanup inode evidence: none' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Cleanup: PASS' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- R11: PASS' "$R11_EVIDENCE" &&
+          [[ ! -e "$ROOT/.${S##*/}.inodes" && ! -e "$ROOT/.${S##*/}.pending" ]] || return 1
+        ;;
+      verify-inode-*)
+        local inode_stage=${variant#verify-inode-} expected_scans=3
+        case "$inode_stage" in
+          invalid-register) expected_scans=2 ;;
+          disagreement) inode_stage=source-disagreement ;;
+          match) inode_stage=matching-listener ;;
+        esac
+        [[ "$status" == 1 && $(<"$FIXTURE/inode-scans") == "$expected_scans" ]] &&
+          grep -Fxq -- '- Session cleanup: PASS' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Post-cleanup verification: FAIL (exit 1)' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Post-cleanup reason: inode-evidence-unresolved' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Post-cleanup desktop listener evidence: none' "$R11_EVIDENCE" &&
+          grep -Fxq -- "- Post-cleanup inode evidence: $inode_stage" "$R11_EVIDENCE" &&
+          grep -Fxq -- '- R11: FAIL' "$R11_EVIDENCE" &&
+          ! grep -Eq -- 'raw fixture|127\.0\.0\.1|7000|inode 31' "$R11_EVIDENCE" &&
+          [[ -e "$ROOT/.${S##*/}.inodes" && -e "$ROOT/.${S##*/}.pending" ]] || return 1
         ;;
       verify-failed)
         [[ "$status" == 1 ]] &&

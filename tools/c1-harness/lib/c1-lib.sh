@@ -1207,7 +1207,7 @@ c1_cleanup_all() {
 # 6080/5173 provably closed and no listener inode recorded during the session
 # still listening (L-3). Unavailable listener evidence is a cleanup FAILURE.
 c1_verify_cleanup() {
-  local s=$1 ok=0 rc reg ino addr line detail='' desktop_stage=none
+  local s=$1 ok=0 rc reg ino addr line detail='' desktop_stage=none inode_stage=none
   local -A live=()
   [[ -z "$(c1_marked_pids "$s")" ]] || { c1_err 'harness processes still running'; detail=process-remains; ok=1; }
   [[ ! -e "$s" ]] || { c1_err 'session directory still present'; detail=${detail:-session-remains}; ok=1; }
@@ -1253,6 +1253,8 @@ c1_verify_cleanup() {
     else rm -f -- "$preg" || { detail=${detail:-record-retirement-failed}; ok=1; }; fi
   fi
   c1_verify_supervisors "$s" || { detail=${detail:-supervisor-evidence-unresolved}; ok=1; }
+  # The inode inventory is a third observation, independent of both port checks.
+  if [[ ${C1_CLEANUP_INODE_STAGE+x} ]]; then local C1_CLEANUP_TABLE_STAGE=''; fi
   reg="$(dirname -- "$s")/.${s##*/}.inodes"
   if [[ -e "$reg" || -L "$reg" ]]; then
     # N-6: ambiguous preserved evidence cannot establish listener closure.
@@ -1260,21 +1262,28 @@ c1_verify_cleanup() {
     if [[ ! -f "$reg" || -L "$reg" || ! -r "$reg" || ! -s "$reg" ]]; then
       c1_err 'preserved listener inode evidence is not a readable nonempty regular file'
       inode_unresolved=1
+      inode_stage=invalid-register
     elif ! c1_listen_tables; then
       c1_err 'cannot prove recorded harness listeners are closed (listener evidence unavailable)'
       inode_unresolved=1
+      case "${C1_CLEANUP_TABLE_STAGE:-}" in
+        proc|ss|source-disagreement) inode_stage=$C1_CLEANUP_TABLE_STAGE ;;
+        *) inode_stage=inventory-unavailable ;;
+      esac
     else
       while read -r ino addr; do [[ -n "$ino" ]] && live[$ino]=$addr; done <<<"$C1_LT_PROC"$'\n'"$C1_LT_SS"
       while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ ! "$line" =~ ^[1-9][0-9]*$ ]]; then
           c1_err 'malformed preserved listener inode evidence; record retained'
           inode_unresolved=1
+          if [[ "$inode_stage" == none ]]; then inode_stage=invalid-row; fi
           continue
         fi
         ino=$line
         if [[ -n "${live[$ino]:-}" ]]; then
           c1_err "harness listener inode $ino is still listening on ${live[$ino]}"
           inode_unresolved=1
+          if [[ "$inode_stage" == none ]]; then inode_stage=matching-listener; fi
         fi
       done <"$reg"
     fi
@@ -1291,6 +1300,7 @@ c1_verify_cleanup() {
   # An optional caller-local slot receives only the first fixed diagnostic.
   if [[ ${C1_CLEANUP_DETAIL+x} ]]; then C1_CLEANUP_DETAIL=$detail; fi
   if [[ ${C1_CLEANUP_DESKTOP_STAGE+x} ]]; then C1_CLEANUP_DESKTOP_STAGE=$desktop_stage; fi
+  if [[ ${C1_CLEANUP_INODE_STAGE+x} ]]; then C1_CLEANUP_INODE_STAGE=$inode_stage; fi
   return "$ok"
 }
 
