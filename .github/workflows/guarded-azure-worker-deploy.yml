@@ -20,11 +20,19 @@ on:
         options: [preview, whatif, deploy]
         required: true
       confirmation:
-        description: For deploy only, type DEPLOY-DEV-WORKER
+        description: For What-If, type PREVIEW-DEV-WORKER; for deploy, type DEPLOY-DEV-WORKER
         required: false
         type: string
       approved_sha:
-        description: For deploy only, paste the full reviewed main commit SHA
+        description: For What-If or deploy, paste the full reviewed main commit SHA
+        required: false
+        type: string
+      approved_preview_target:
+        description: For What-If only, enter rg-textvideo-dev/job-textvideo-worker-dev
+        required: false
+        type: string
+      approved_preview_digest:
+        description: For What-If only, enter the full reviewed sha256 image digest
         required: false
         type: string
 permissions:
@@ -68,7 +76,7 @@ jobs:
           MAIN_PROTECTED: ${{ vars.PROTECTED_MAIN_VERIFIED }}
   preview:
     needs: validate
-    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && (inputs.operation == 'preview' || inputs.operation == 'whatif' || inputs.operation == 'deploy') && github.actor == 'ScottMDavistv'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && (inputs.operation == 'preview' || inputs.operation == 'deploy') && github.actor == 'ScottMDavistv'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -99,7 +107,7 @@ jobs:
             --query '{name:name,trigger:properties.configuration.triggerType,profile:properties.workloadProfileName}' -o json
   whatif:
     needs: preview
-    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && (inputs.operation == 'whatif' || inputs.operation == 'deploy') && github.actor == 'ScottMDavistv' && vars.PROTECTED_MAIN_VERIFIED == 'true'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy' && github.actor == 'ScottMDavistv' && vars.PROTECTED_MAIN_VERIFIED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -127,6 +135,101 @@ jobs:
           az deployment group what-if -g rg-textvideo-dev \
             --template-file infra/worker-job.bicep \
             --parameters workerImage="$WORKER_IMAGE" \
+            --result-format FullResourcePayloads --output json > "$preview_file"
+          python scripts/verify_worker_image_whatif.py "$preview_file"
+        env:
+          WORKER_IMAGE: acrtextvideo1794671698.azurecr.io/textvideo-worker@sha256:219ebbe03d9b1356a4091912b4955c1987ba8a0131a4e084953ab3796b5f0646
+  whatif_admission:
+    needs: validate
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.operation == 'whatif' && github.actor == 'ScottMDavistv' && github.triggering_actor == 'ScottMDavistv' && github.run_attempt == '1' && vars.PROTECTED_MAIN_VERIFIED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      deadline: ${{ steps.admit.outputs.deadline }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate exact approval without Azure credentials
+        id: admit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          APPROVED_TARGET: ${{ inputs.approved_preview_target }}
+          APPROVED_DIGEST: ${{ inputs.approved_preview_digest }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          deadline="$(gh api --hostname github.com "repos/ScottMDavistv/azure-text-to-video/actions/runs/$GITHUB_RUN_ID" \
+            | python3 -I scripts/verify_worker_whatif_dispatch.py)"
+          [[ "$deadline" =~ ^[1-9][0-9]{9}$ ]]
+          printf 'deadline=%s\n' "$deadline" >> "$GITHUB_OUTPUT"
+  owner_whatif:
+    needs: whatif_admission
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.operation == 'whatif' && github.actor == 'ScottMDavistv' && github.triggering_actor == 'ScottMDavistv' && github.run_attempt == '1' && vars.PROTECTED_MAIN_VERIFIED == 'true' && vars.AZURE_DEV_WHATIF_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    environment: dev-worker-whatif-preview
+    env:
+      APPROVAL_DEADLINE: ${{ needs.whatif_admission.outputs.deadline }}
+      PREVIEW_CLIENT_ID: ${{ vars.AZURE_WHATIF_CLIENT_ID }}
+      APPROVED_DIGEST: ${{ inputs.approved_preview_digest }}
+      AUDIT_CLIENT_ID: ${{ vars.AZURE_PREVIEW_CLIENT_ID }}
+      DEPLOY_CLIENT_ID: ${{ vars.AZURE_DEPLOY_CLIENT_ID }}
+    steps:
+      - name: Confirm approval validity and isolated identity before Azure login
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$APPROVAL_DEADLINE" =~ ^[1-9][0-9]{9}$ ]]
+          (( $(date +%s) < APPROVAL_DEADLINE ))
+          uuid='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          [[ "$PREVIEW_CLIENT_ID" =~ $uuid && "$AUDIT_CLIENT_ID" =~ $uuid && "$DEPLOY_CLIENT_ID" =~ $uuid ]]
+          [[ "${PREVIEW_CLIENT_ID,,}" != "${AUDIT_CLIENT_ID,,}" && "${PREVIEW_CLIENT_ID,,}" != "${DEPLOY_CLIENT_ID,,}" ]]
+          version="$(az version --query '"azure-cli"' -o tsv)"
+          [[ "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]
+          [[ "$(printf '%s\n' 2.76.0 "$version" | sort -V | head -1)" = 2.76.0 ]]
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Confirm exact checked-out SHA and approval deadline
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          [[ "$APPROVAL_DEADLINE" =~ ^[1-9][0-9]{9}$ ]]
+          (( $(date +%s) < APPROVAL_DEADLINE ))
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_WHATIF_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+      - name: Preview only the approved image change
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(az account show --query id -o tsv)" = "41fbffdc-1793-44f9-b70f-220ea8a9bc6c"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python scripts/verify_azure_worker_safe.py
+          umask 077
+          preview_file="$(mktemp)"
+          trap 'rm -f "$preview_file"' EXIT
+          [[ "$APPROVAL_DEADLINE" =~ ^[1-9][0-9]{9}$ ]]
+          (( $(date +%s) < APPROVAL_DEADLINE ))
+          [[ "$WORKER_IMAGE" = "acrtextvideo1794671698.azurecr.io/textvideo-worker@$APPROVED_DIGEST" ]]
+          az deployment group what-if -g rg-textvideo-dev \
+            --template-file infra/worker-job.bicep \
+            --parameters workerImage="$WORKER_IMAGE" \
+            --validation-level ProviderNoRbac \
             --result-format FullResourcePayloads --output json > "$preview_file"
           python scripts/verify_worker_image_whatif.py "$preview_file"
         env:
