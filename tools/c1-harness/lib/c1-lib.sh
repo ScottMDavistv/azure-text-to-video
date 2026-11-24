@@ -412,9 +412,16 @@ c1_ss_listen_table() {
 # for blindness: one source empty while the other is not is a failure).
 c1_listen_tables() {
   C1_LT_PROC='' C1_LT_SS=''
-  C1_LT_PROC=$(c1_proc_listen_table) || return 1
-  C1_LT_SS=$(c1_ss_listen_table) || return 1
+  C1_LT_PROC=$(c1_proc_listen_table) || {
+    if [[ ${C1_CLEANUP_TABLE_STAGE+x} ]]; then C1_CLEANUP_TABLE_STAGE=proc; fi
+    return 1
+  }
+  C1_LT_SS=$(c1_ss_listen_table) || {
+    if [[ ${C1_CLEANUP_TABLE_STAGE+x} ]]; then C1_CLEANUP_TABLE_STAGE=ss; fi
+    return 1
+  }
   if { [[ -z "$C1_LT_PROC" ]] && [[ -n "$C1_LT_SS" ]]; } || { [[ -n "$C1_LT_PROC" ]] && [[ -z "$C1_LT_SS" ]]; }; then
+    if [[ ${C1_CLEANUP_TABLE_STAGE+x} ]]; then C1_CLEANUP_TABLE_STAGE=source-disagreement; fi
     c1_err 'listener evidence: kernel tables and ss disagree (one reports no listeners at all)'; return 1
   fi
 }
@@ -1200,11 +1207,19 @@ c1_cleanup_all() {
 # 6080/5173 provably closed and no listener inode recorded during the session
 # still listening (L-3). Unavailable listener evidence is a cleanup FAILURE.
 c1_verify_cleanup() {
-  local s=$1 ok=0 rc reg ino addr line detail=''
+  local s=$1 ok=0 rc reg ino addr line detail='' desktop_stage=none
   local -A live=()
   [[ -z "$(c1_marked_pids "$s")" ]] || { c1_err 'harness processes still running'; detail=process-remains; ok=1; }
   [[ ! -e "$s" ]] || { c1_err 'session directory still present'; detail=${detail:-session-remains}; ok=1; }
+  # Capture only the existing desktop-port check, not the later app/inode reads.
+  if [[ ${C1_CLEANUP_DESKTOP_STAGE+x} ]]; then local C1_CLEANUP_TABLE_STAGE=''; fi
   rc=0; c1_port_free "$C1_NOVNC_PORT" || rc=$?
+  if (( rc == 2 )); then
+    case "${C1_CLEANUP_TABLE_STAGE:-}" in
+      proc|ss|source-disagreement) desktop_stage=$C1_CLEANUP_TABLE_STAGE ;;
+      *) desktop_stage=unavailable ;;
+    esac
+  fi
   (( rc == 0 )) || { if (( rc == 2 )); then detail=${detail:-desktop-listener-unverified}; c1_err "cannot prove port $C1_NOVNC_PORT is closed (listener evidence unavailable)"; else detail=${detail:-desktop-listener-open}; c1_err "port $C1_NOVNC_PORT still listening"; fi; ok=1; }
   rc=0; c1_port_free "$C1_APP_PORT" || rc=$?
   (( rc == 0 )) || { if (( rc == 2 )); then detail=${detail:-app-listener-unverified}; c1_err "cannot prove port $C1_APP_PORT is closed (listener evidence unavailable)"; else detail=${detail:-app-listener-open}; c1_err "port $C1_APP_PORT still listening"; fi; ok=1; }
@@ -1275,6 +1290,7 @@ c1_verify_cleanup() {
   fi
   # An optional caller-local slot receives only the first fixed diagnostic.
   if [[ ${C1_CLEANUP_DETAIL+x} ]]; then C1_CLEANUP_DETAIL=$detail; fi
+  if [[ ${C1_CLEANUP_DESKTOP_STAGE+x} ]]; then C1_CLEANUP_DESKTOP_STAGE=$desktop_stage; fi
   return "$ok"
 }
 

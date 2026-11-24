@@ -299,6 +299,7 @@ finish_r11() {
   local listener_state='' listener_detail='' C1_FINAL_PRIVACY=pending first_failure=none-recorded
   local monitor_shutdown=not-run session_cleanup=not-run cleanup_verification=not-run monitor_probe_failure=none-recorded
   local C1_CLEANUP_DETAIL= cleanup_detail=not-run startup_timing=unavailable C1_WEBSOCKIFY_OUTCOME=unavailable
+  local C1_CLEANUP_DESKTOP_STAGE=not-run
   trap - EXIT
   trap '' INT TERM HUP
 
@@ -374,6 +375,7 @@ finish_r11() {
     printf -- '- Session cleanup: %s\n' "$session_cleanup"
     printf -- '- Post-cleanup verification: %s\n' "$cleanup_verification"
     printf -- '- Post-cleanup reason: %s\n' "$cleanup_detail"
+    printf -- '- Post-cleanup desktop listener evidence: %s\n' "$C1_CLEANUP_DESKTOP_STAGE"
     printf -- '- Final privacy evidence: %s\n' "$C1_FINAL_PRIVACY"
     printf -- '- Cleanup: %s\n' "$cleanup_result"
     printf -- '- Monitor coverage: startup and shutdown only; sustained monitoring not tested\n'

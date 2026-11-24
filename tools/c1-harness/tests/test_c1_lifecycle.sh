@@ -200,14 +200,18 @@ r11_exit_status_and_late_privacy() (
   eval "$(sed -n '/^finish_r11() {$/,/^}$/p' "$BASE/c1-session.sh")"
   local status=0 root_fixture="$STATE" variant
   ROOT="$root_fixture" REPO=fixture HARNESS_REL=fixture R11_HEAD=fixture
-  c1_port_free() {
-    if [[ "$1" == "$C1_NOVNC_PORT" ]]; then
-      case "$variant" in
-        verify-port-open) return 1 ;;
-        verify-port-unavailable) return 2 ;;
-      esac
-    fi
-    return 0
+  # Substitute only the observation sources. Run the real listener classification.
+  c1_proc_listen_table() {
+    case "${verification_variant:-}" in
+      verify-port-open|verify-port-unavailable) printf '31 127.0.0.1:6080\n' ;;
+      verify-port-proc) printf 'raw fixture proc detail\n' >&2; return 1 ;;
+    esac
+  }
+  c1_ss_listen_table() {
+    case "${verification_variant:-}" in
+      verify-port-open) printf '31 127.0.0.1:6080\n' ;;
+      verify-port-ss) printf 'raw fixture ss detail\n' >&2; return 1 ;;
+    esac
   }
   c1_verify_harness_clean() { return 0; }
   c1_stop_privacy_monitor() { [[ "$variant" != stop-failed ]] || return 6; }
@@ -222,11 +226,12 @@ r11_exit_status_and_late_privacy() (
     return 0
   }
   c1_verify_cleanup() {
+    local verification_variant="$variant"
     fixture_verify_cleanup "$@" || return "$?"
     [[ "$variant" != verify-failed ]] || return 8
   }
   git() { printf 'fixture\n'; }
-  for variant in clean late startup-failed interrupted stop-failed cleanup-failed verify-failed verify-port-open verify-port-unavailable verify-record-retirement; do
+  for variant in clean late startup-failed interrupted stop-failed cleanup-failed verify-failed verify-port-open verify-port-unavailable verify-port-proc verify-port-ss verify-record-retirement; do
     S=$(c1_session_new "$ROOT" "$$") || return 1
     R11_EVIDENCE="$FIXTURE/$variant.md"
     PORT_PRIVATE=verified-probe-gh
@@ -265,6 +270,7 @@ r11_exit_status_and_late_privacy() (
         [[ "$status" == 0 ]] &&
           grep -Fxq -- '- First failure observation: none-recorded' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Post-cleanup reason: none' "$R11_EVIDENCE" &&
+          grep -Fxq -- '- Post-cleanup desktop listener evidence: none' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Websockify outcome: exit 37 (ordering unknown)' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Startup timing: listener-verification=unavailable monitor-start=unavailable first-probe=unavailable exposure-to-probe-result=unavailable exposure-to-watchdog-handoff=900ms auth-return=unavailable auth-write=unavailable auth-read=unavailable auth-read-incomplete=unavailable auth-read-budget-exhausted=unavailable' "$R11_EVIDENCE" &&
           grep -qx -- '- R11: PASS' "$R11_EVIDENCE" || return 1
@@ -302,17 +308,21 @@ r11_exit_status_and_late_privacy() (
           grep -Fxq -- '- Post-cleanup verification: not-run' "$R11_EVIDENCE" &&
           grep -Fxq -- '[c1] R11 session cleanup: FAIL (exit 7)' "$FIXTURE/$variant.log" || return 1
         ;;
-      verify-port-open|verify-port-unavailable|verify-record-retirement)
-        local reason
+      verify-port-open|verify-port-unavailable|verify-port-proc|verify-port-ss|verify-record-retirement)
+        local reason stage=none
         case "$variant" in
           verify-port-open) reason=desktop-listener-open ;;
-          verify-port-unavailable) reason=desktop-listener-unverified ;;
+          verify-port-unavailable) reason=desktop-listener-unverified; stage=source-disagreement ;;
+          verify-port-proc) reason=desktop-listener-unverified; stage=proc ;;
+          verify-port-ss) reason=desktop-listener-unverified; stage=ss ;;
           verify-record-retirement) reason=record-retirement-failed ;;
         esac
         [[ "$status" == 1 ]] &&
           grep -Fxq -- '- Session cleanup: PASS' "$R11_EVIDENCE" &&
           grep -Fxq -- '- Post-cleanup verification: FAIL (exit 1)' "$R11_EVIDENCE" &&
           grep -Fxq -- "- Post-cleanup reason: $reason" "$R11_EVIDENCE" &&
+          grep -Fxq -- "- Post-cleanup desktop listener evidence: $stage" "$R11_EVIDENCE" &&
+          ! grep -Fq -- "raw fixture" "$R11_EVIDENCE" &&
           grep -Fxq -- '- R11: FAIL' "$R11_EVIDENCE" &&
           [[ -e "$ROOT/.${S##*/}.pending" ]] || return 1
         ;;
