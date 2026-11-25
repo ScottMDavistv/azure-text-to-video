@@ -5,6 +5,8 @@ import { createVideoApi, validateProjectId, type VideoJob } from './secureJourne
 
 const apiOrigin = import.meta.env.VITE_VIDEO_API_ORIGIN?.trim() || ''
 const initialProject = import.meta.env.VITE_VIDEO_PROJECT_ID?.trim() || ''
+const pollInterval = 3000
+const statusDeadline = 10000
 
 function displayError(error: unknown): string {
   if (error instanceof Error && (
@@ -26,6 +28,7 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const generation = useRef(0)
   const inFlight = useRef<AbortController | null>(null)
+  const terminalPoll = useRef<string | null>(null)
   const invalidate = () => {
     generation.current += 1
     inFlight.current?.abort()
@@ -65,29 +68,55 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl) }, [videoUrl])
   useEffect(() => () => { generation.current += 1; inFlight.current?.abort() }, [])
 
+  const activeJobId = job && job.status !== 'completed' && job.status !== 'failed' ? job.job_id : null
   useEffect(() => {
-    if (!accountIdentity || !job || busy || job.status === 'completed' || job.status === 'failed') return
+    if (!accountIdentity || !activeJobId || busy) return
+    const sessionKey = JSON.stringify([accountIdentity, projectId, activeJobId])
+    if (terminalPoll.current === sessionKey) return
     const version = generation.current
     const abort = new AbortController()
     const current = () => !abort.signal.aborted && generation.current === version
     let timer: number
     const poll = async () => {
+      const deadline = new AbortController()
+      const signal = AbortSignal.any([abort.signal, deadline.signal])
+      const timeout = window.setTimeout(() => {
+        deadline.abort(new DOMException('Status request timed out', 'TimeoutError'))
+      }, statusDeadline)
+      // The deadline also covers token acquisition and response parsing.
+      // Those promises may not observe the fetch signal themselves.
+      let onAbort: () => void = () => {}
+      const cancelled = new Promise<never>((_, reject) => {
+        onAbort = () => reject(signal.reason)
+        signal.addEventListener('abort', onAbort, { once: true })
+      })
       try {
-        const next = await api.status(projectId, job.job_id, abort.signal)
-        if ((await getSignedInAccount())?.homeAccountId !== accountIdentity || !current()) return
+        const next = await Promise.race([cancelled, (async () => {
+          const result = await api.status(projectId, activeJobId, signal)
+          return (await getSignedInAccount())?.homeAccountId === accountIdentity ? result : null
+        })()])
+        if (!current() || !next) return
         setPollError(null)
         setJob(next)
+        if (next.status === 'completed' || next.status === 'failed') return
       } catch (cause) {
         if (!current()) return
-        setPollError(displayError(cause))
+        setPollError(deadline.signal.aborted ?
+          'The status check timed out. The studio will try again.' : displayError(cause))
         if (cause instanceof Error && 'status' in cause &&
-            [401, 403, 404].includes(Number(cause.status))) return
-        timer = window.setTimeout(poll, 3000)
+            [401, 403, 404].includes(Number(cause.status))) {
+          terminalPoll.current = sessionKey
+          return
+        }
+      } finally {
+        window.clearTimeout(timeout)
+        signal.removeEventListener('abort', onAbort)
       }
+      timer = window.setTimeout(poll, pollInterval)
     }
-    timer = window.setTimeout(poll, 3000)
+    timer = window.setTimeout(poll, 0)
     return () => { abort.abort(); window.clearTimeout(timer) }
-  }, [api, job, projectId, accountIdentity, busy])
+  }, [api, activeJobId, projectId, accountIdentity, busy])
 
   async function queueJob(project: string, jobId: string, task: ReturnType<typeof begin>) {
     try {
@@ -97,13 +126,6 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
       if (task.current()) {
         setQueueError(displayError(cause) + ' The job was saved. Check its status before retrying the queue.')
       }
-    }
-    if (!task.current()) return
-    try {
-      const next = await api.status(project, jobId, task.controller.signal)
-      if ((await getSignedInAccount())?.homeAccountId === accountIdentity && task.current()) setJob(next)
-    } catch (cause) {
-      if (task.current()) setPollError(displayError(cause))
     }
   }
 

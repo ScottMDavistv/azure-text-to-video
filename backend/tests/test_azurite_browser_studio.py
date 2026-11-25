@@ -219,3 +219,88 @@ def test_studio_queue_retry_preserves_dispatch_lease(studio, monkeypatch):
     assert table.get_entity("video", job_id)["dispatchAttempts"] == 1
     assert len(queue.peek_messages()) == 1
     expect(page.get_by_text("Test fixture lost acknowledgement")).to_have_count(0)
+
+
+def install_status_fixture(page, terminal=None):
+    """Fault-inject status only; submission and queue requests remain real."""
+    page.evaluate("""(terminal) => {
+        const original = window.fetch.bind(window);
+        const state = window.statusFixture = {calls: 0, active: 0, overlap: false, aborted: 0};
+        window.fetch = (url, options) => {
+            if (options.method !== 'GET' || !String(url).match(/\\/jobs\\/[0-9a-f-]+$/)) {
+                return original(url, options);
+            }
+            if (++state.calls > 1) {
+                if (state.active) state.overlap = true;
+                return original(url, options);
+            }
+            if (terminal) return Promise.resolve(new Response('internal fixture detail', {status: terminal}));
+            state.active++;
+            options.signal.addEventListener('abort', () => {
+                state.active--;
+                state.aborted++;
+            }, {once: true});
+            // Intentionally ignore asynchronous cancellation. The late response
+            // claims completion but must not be accepted by the studio.
+            return new Promise(resolve => {
+                state.finish = () => resolve(new Response(JSON.stringify({
+                    job_id: String(url).split('/').at(-1), status: 'completed',
+                    prompt: 'stale response', created_at: '2026-01-01'
+                })));
+            });
+        };
+    }""", terminal)
+
+
+def start_polling(page):
+    page.get_by_label("Video prompt").fill("Exercise status polling")
+    page.get_by_role("button", name="Submit authenticated job").click()
+    page.wait_for_function("window.statusFixture.calls === 1")
+
+
+def test_stalled_status_times_out_then_recovers_without_overlap(studio):
+    from playwright.sync_api import expect
+
+    page, *_ = studio
+    install_status_fixture(page)
+    start_polling(page)
+    # A stalled request must last beyond a normal poll interval without overlap.
+    page.wait_for_timeout(3500)
+    assert page.evaluate("window.statusFixture.calls") == 1
+    expect(page.get_by_text("The status check timed out. The studio will try again.")).to_be_visible(
+        timeout=12000)
+    assert page.evaluate("window.statusFixture.aborted") == 1
+    assert page.evaluate("window.statusFixture.active") == 0
+    expect(job_status(page)).to_have_text("Status: queued", timeout=6000)
+    assert page.evaluate("window.statusFixture.calls") >= 2
+    assert not page.evaluate("window.statusFixture.overlap")
+    expect(page.get_by_text("The status check timed out. The studio will try again.")).to_have_count(0)
+    page.evaluate("window.statusFixture.finish()")
+    expect(job_status(page)).to_have_text("Status: queued")
+    expect(page.get_by_role("button", name="Retrieve private MP4")).to_have_count(0)
+
+
+@pytest.mark.parametrize("code", [401, 403, 404])
+def test_polling_stops_on_terminal_status(studio, code):
+    from playwright.sync_api import expect
+
+    page, *_ = studio
+    install_status_fixture(page, terminal=code)
+    start_polling(page)
+    expect(page.get_by_role("region", name="Live job status").get_by_role("alert")).to_be_visible()
+    expect(page.get_by_text("internal fixture detail")).to_have_count(0)
+    page.wait_for_timeout(3500)
+    assert page.evaluate("window.statusFixture.calls") == 1
+
+
+def test_project_change_aborts_status_and_ignores_late_result(studio):
+    from playwright.sync_api import expect
+
+    page, *_ = studio
+    install_status_fixture(page)
+    start_polling(page)
+    page.get_by_label("Authorized project ID").fill("00000000-0000-0000-0000-000000000000")
+    page.wait_for_function("window.statusFixture.aborted === 1")
+    page.evaluate("window.statusFixture.finish()")
+    expect(page.get_by_text("No authorized job in this session.")).to_be_visible()
+    expect(page.get_by_role("button", name="Retrieve private MP4")).to_have_count(0)
