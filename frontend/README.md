@@ -244,3 +244,23 @@ Scope: isolated frontend development PR only. No CI deployment, Azure/IAM/financ
 
 
 **Integration note:** PR #42 carries the security foundation popup auth implementation from merged PR #46. Account-switch detection uses the MSAL account `homeAccountId`, and the authenticated studio is remounted when this identity changes. Browser switch/logout race testing and live Entra remain separate gates.
+
+### Local browser acceptance for synthetic jobs
+
+From the repository root, with backend development dependencies installed,
+frontend dependencies installed (`npm --prefix frontend ci`), and Azurite
+running on loopback ports 10000–10002:
+
+```sh
+python -m pip install playwright==1.57.0
+AZURITE_BROWSER_TEST=1 CHROME_BIN=/usr/bin/chromium PYTHONPATH=backend \
+  python -m pytest -q -s backend/tests/test_azurite_browser_studio.py
+```
+
+Use a local Chromium with H.264/AAC support, or set `CHROME_BIN` to the
+equivalent Chrome binary. FFmpeg and ffprobe must be on PATH. The harness
+starts loopback-only Vite and FastAPI servers, uses disposable private
+Azurite resources, and substitutes a test identity at the MSAL and token
+verification boundaries. Project membership, HTTP responses, dispatch,
+worker execution, rendering, and MP4 delivery are real. Paid providers
+are disabled. This does not validate live Entra.
