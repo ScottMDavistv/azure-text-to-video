@@ -178,7 +178,10 @@ class IsolationTests(unittest.TestCase):
             "permissions": {"contents": "read", "id-token": "write"},
             "steps": [],
         }
-        self.assertEqual(checker.examine(checker.GUARDED_AZURE, standalone), [])
+        self.assertIn(
+            checker.GUARDED_AZURE + " job owner_whatif: dedicated preview environment is reserved",
+            checker.examine(checker.GUARDED_AZURE, standalone),
+        )
         self.assertTrue(self.evaluate(standalone), "the Azure exception must remain path-specific")
         for names in (("preview",), ("whatif",), ("preview", "whatif")):
             with self.subTest(legacy_guards=names):
@@ -191,6 +194,74 @@ class IsolationTests(unittest.TestCase):
                         checker.GUARDED_AZURE + " job " + name
                         + ": Azure privilege requires the exact manual job guard", errors
                     )
+
+    def test_preview_environment_reserved_in_any_non_callee_job(self):
+        doc = {
+            "on": {"workflow_dispatch": ""},
+            "permissions": {"contents": "read"},
+            "jobs": {"check": {"if": "github.ref == 'refs/heads/main'",
+                               "environment": "unrelated-dev"}},
+        }
+        self.assertEqual(self.evaluate(doc), [])
+        for environment in ("dev-worker-whatif-preview", "DEV-WORKER-WHATIF-PREVIEW",
+                            {"name": "dev-worker-whatif-preview"},
+                            {"name": "$" + "{{ inputs.env }}"}):
+            with self.subTest(environment=environment):
+                doc["jobs"]["check"]["environment"] = environment
+                self.assertTrue(any("dedicated preview environment is reserved" in x
+                                    for x in self.evaluate(doc)))
+
+    def test_reserved_preview_call_is_path_and_ref_specific(self):
+        doc = {"on": {"workflow_dispatch": ""}, "permissions": {"contents": "read"},
+               "jobs": {"check": {"uses": "./.github/workflows/other.yml"}}}
+        self.assertEqual(self.evaluate(doc), [])
+        for uses in (
+            checker.PREVIEW_REF,
+            checker.PREVIEW_REF.replace("ScottMDavistv", "other-owner"),
+            checker.PREVIEW_REF.replace("azure-text-to-video", "other-repository"),
+            checker.PREVIEW_REF.replace(checker.PREVIEW_CALLEE_SHA, "main"),
+            checker.PREVIEW_REF.replace(checker.PREVIEW_CALLEE_SHA, "0" * 40),
+            checker.PREVIEW_REF.replace(".yml@", ".YAML@"),
+            "./" + checker.PREVIEW_CALLEE,
+            "./.github/workflows/$" + "{{ inputs.workflow }}",
+        ):
+            with self.subTest(uses=uses):
+                doc["jobs"]["check"]["uses"] = uses
+                self.assertTrue(any("exact reviewed preview call" in x for x in self.evaluate(doc)))
+
+    def test_byte_pinned_preview_pair_is_scoped_to_scan(self):
+        import hashlib
+        import tempfile
+        from unittest import mock
+
+        # Inert surrogates exercise the pin mechanism without executable steps.
+        callee = b"on: workflow_call\npermissions: {contents: read}\njobs: {stub: {if: 'false'}}\n"
+        caller = (
+            "on: workflow_dispatch\npermissions: {contents: read}\n"
+            "jobs:\n  owner_whatif:\n    permissions: {contents: read, id-token: write}\n"
+            f"    uses: {checker.PREVIEW_REF}\n"
+        ).encode()
+        with tempfile.TemporaryDirectory() as t, mock.patch.multiple(
+            checker, PREVIEW_CALLEE_BYTES=hashlib.sha256(callee).hexdigest(),
+            PREVIEW_CALLER_BYTES=hashlib.sha256(caller).hexdigest(),
+        ):
+            root = pathlib.Path(t)
+            staged, dispatch = root / checker.PREVIEW_CALLEE, root / checker.GUARDED_AZURE
+            staged.parent.mkdir(parents=True)
+            staged.write_bytes(callee)
+            self.assertEqual(checker.scan(root), [])
+            dispatch.write_bytes(caller)
+            self.assertEqual(checker.scan(root), [])
+            staged.unlink()
+            self.assertTrue(checker.scan(root), "pinned caller cannot precede the callee")
+            staged.write_bytes(callee + b"# changed\n")
+            self.assertTrue(checker.scan(root), "any callee change must fail closed")
+            staged.write_bytes(callee)
+            dispatch.write_bytes(caller + b"# changed\n")
+            self.assertTrue(checker.scan(root), "any caller change must fail closed")
+            dispatch.unlink()
+            dispatch.with_name("other.yml").write_bytes(caller)
+            self.assertTrue(checker.scan(root), "caller bytes do not authorize a different path")
 
     def test_guarded_azure_metadata_drift_fails_closed(self):
         changes = (
