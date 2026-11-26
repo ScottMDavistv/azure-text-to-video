@@ -1,3 +1,42 @@
+# C1 validation harness | offline reconciliation candidate
+
+**Parked.** The public launcher only supports help. The default command and all
+operational modes (including R11, preflight, cleanup, purge, offline-only and
+selftest) refuse before sourcing the harness or touching session state. No
+environment variable enables these modes.
+
+This reconciliation preserves the newer #60 tree and the unique #74 workflow,
+Playwright and WebRTC policy/test files. The frontend workflow can run inert
+test entry points directly; it does not activate the launcher or authorize live
+work. It is not a deployment or certification of any kind.
+
+For approved offline development, run the local shell and Node fixtures
+directly, in a loopback-only environment, from the repository root:
+
+    bash tools/c1-harness/tests/test_c1_lifecycle.sh
+    bash tools/c1-harness/tests/test_c1_lib.sh
+    node --test tools/c1-harness/tests/*.test.mjs
+
+## Latest supervised R11 evidence (2026-11-24 20:56:45 UTC)
+
+- Tested harness: 9adfd4a417f2d3c2f13163359a0cd4f51476ce6a, the historical Draft PR #74 head, not this standalone snapshot. The tested source was stacked on Draft PR #60 at f4f1066af0a0def2b595a14c211341c27733064c (not included).
+- **R11 FAIL, command exit 130.** The decoy passed; the real desktop listener was verified loopback-only. The first monitored authenticated probe had no complete result before its deadline. First recorded failure: monitor-startup startup-timeout. The watchdog handoff was not confirmed.
+- The sanitized breadcrumb recorded TERM during monitor arming; the sender was not independently established. The record does not prove a privacy breach, HTTP/authentication rejection, or an underlying transport cause.
+- **Cleanup PASS**, including post-cleanup verification. This applies to this run, not to the startup privacy verdict. The immediately preceding attempt at the same commit had unverified post-cleanup listener evidence; five bounded read-only listener samples later passed but did not establish the earlier cause.
+- No Entra sign-in was performed. Full C1, sustained monitoring and live privacy remain unverified. [Issue #82](https://github.com/ScottMDavistv/azure-text-to-video/issues/82) remains open.
+
+## Follow-up
+
+Treat both Draft branches and the failed live evidence as historical inputs. Confirm #60 and any required #74 frontend or runtime policy changes in separate reviewed work before deciding whether to re-enable anything. Keep the existing fail-closed privacy and timing gates, isolate the first monitored authenticated probe and verify cleanup, then obtain a separately authorized, supervised R11 PASS and a fresh independent review before any live gate changes.
+
+## Historical operator guide (do not execute)
+
+The guide below is preserved verbatim from #74 at 9adfd4a for review and
+provenance. Its instructions and commit pins are historical, not approval or
+current operating steps. The preserved library pins and exact allowlists need
+a separate reviewed refresh before the launcher can be re-enabled. Issue #82
+and live C1 remain open; no live R11 retry or sign-in is authorized here.
+
 # C1 validation harness — operator guide
 
 One command runs the C1 Microsoft Entra localhost validation in GitHub Codespaces. It opens a private browser desktop that you view in your normal web browser, pauses at each point where you have to act, and writes sanitized evidence plus a review package you paste into a separate Claude session. Nothing gets installed on your own computer.

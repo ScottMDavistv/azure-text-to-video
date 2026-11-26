@@ -117,6 +117,99 @@ class IsolationTests(unittest.TestCase):
             obj["jobs"]["checks"]["if"] = expr
             self.assertTrue(self.evaluate(obj), expr)
 
+    def guarded_azure_document(self):
+        # Inert stand-in for the reviewed workflow metadata; no executing steps.
+        main = "github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && "
+        owner = "github.actor == 'ScottMDavistv'"
+        protected = "vars.PROTECTED_MAIN_VERIFIED == 'true'"
+        guards = {
+            "preview": main + "(inputs.operation == 'preview' || inputs.operation == 'whatif' || "
+                       "inputs.operation == 'deploy') && " + owner,
+            "whatif": main + "(inputs.operation == 'whatif' || inputs.operation == 'deploy') && "
+                      + owner + " && " + protected,
+            "deploy": main + "inputs.operation == 'deploy' && " + owner +
+                      " && inputs.approved_sha == github.sha && inputs.confirmation == 'DEPLOY-DEV-WORKER' "
+                      "&& vars.AZURE_DEV_DEPLOY_ENABLED == 'true' && " + protected,
+        }
+        jobs = {"validate": {"runs-on": "ubuntu-latest", "steps": []}}
+        for name, expr in guards.items():
+            jobs[name] = {
+                "runs-on": "ubuntu-latest", "steps": [], "if": expr,
+                "environment": "dev-deployment" if name == "preview" else "dev-deployment-apply",
+                "permissions": {"contents": "read", "id-token": "write"},
+            }
+        return {"on": {"workflow_dispatch": {}, "push": {"branches": ["main"]}, "schedule": []},
+                "permissions": {"contents": "read"}, "jobs": jobs}
+
+    def test_known_azure_manual_guards_are_path_specific(self):
+        doc = self.guarded_azure_document()
+        self.assertEqual(checker.examine(checker.GUARDED_AZURE, doc), [])
+        self.assertTrue(self.evaluate(doc))
+        for name in ("preview", "whatif", "deploy"):
+            condition = doc["jobs"][name]["if"]
+            with self.subTest(job=name):
+                self.assertFalse(checker.main_only(condition))
+                self.assertFalse(checker.excludes_pr(condition))
+
+    def test_guarded_azure_standalone_whatif_migration_isolation(self):
+        legacy = self.guarded_azure_document()
+        self.assertEqual(checker.examine(checker.GUARDED_AZURE, legacy), [])
+
+        standalone = copy.deepcopy(legacy)
+        jobs = standalone["jobs"]
+        prefix = "github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && "
+        owner = "github.actor == 'ScottMDavistv'"
+        protected = "vars.PROTECTED_MAIN_VERIFIED == 'true'"
+        jobs["preview"]["if"] = (
+            prefix + "(inputs.operation == 'preview' || inputs.operation == 'deploy') && " + owner
+        )
+        jobs["whatif"]["if"] = prefix + "inputs.operation == 'deploy' && " + owner + " && " + protected
+        jobs["whatif_admission"] = {
+            "needs": "validate",
+            "permissions": {"contents": "read", "actions": "read"},
+            "steps": [],
+        }
+        jobs["owner_whatif"] = {
+            "needs": "whatif_admission",
+            "if": prefix + "inputs.operation == 'whatif' && " + owner
+                  + " && github.triggering_actor == 'ScottMDavistv' && github.run_attempt == '1' && "
+                  + protected + " && vars.AZURE_DEV_WHATIF_ENABLED == 'true'",
+            "environment": "dev-worker-whatif-preview",
+            "permissions": {"contents": "read", "id-token": "write"},
+            "steps": [],
+        }
+        self.assertEqual(checker.examine(checker.GUARDED_AZURE, standalone), [])
+        self.assertTrue(self.evaluate(standalone), "the Azure exception must remain path-specific")
+        for names in (("preview",), ("whatif",), ("preview", "whatif")):
+            with self.subTest(legacy_guards=names):
+                mixed = copy.deepcopy(standalone)
+                for name in names:
+                    mixed["jobs"][name]["if"] = legacy["jobs"][name]["if"]
+                errors = checker.examine(checker.GUARDED_AZURE, mixed)
+                for name in names:
+                    self.assertIn(
+                        checker.GUARDED_AZURE + " job " + name
+                        + ": Azure privilege requires the exact manual job guard", errors
+                    )
+
+    def test_guarded_azure_metadata_drift_fails_closed(self):
+        changes = (
+            ("workflow permissions", lambda d: d["permissions"].update({"id-token": "write"})),
+            ("validator permissions", lambda d: d["jobs"]["validate"].update(
+                permissions={"contents": "read", "id-token": "write"})),
+            ("automatic-only trigger", lambda d: d["on"].pop("workflow_dispatch")),
+            ("additional trigger", lambda d: d["on"].update({"workflow_call": {}})),
+            ("wrong environment", lambda d: d["jobs"]["preview"].update(
+                environment="unreviewed-dev")),
+            ("unknown guard term", lambda d: d["jobs"]["preview"].update(
+                {"if": d["jobs"]["preview"]["if"] + " && inputs.additional_review"})),
+        )
+        for name, change in changes:
+            with self.subTest(drift=name):
+                doc = self.guarded_azure_document()
+                change(doc)
+                self.assertTrue(checker.examine(checker.GUARDED_AZURE, doc))
+
     def test_untrusted_feature_push_rejects_write_secrets_and_checkout_credentials(self):
         obj = copy.deepcopy(BASE)
         obj["on"] = {"push": {"branches": ["feature/**"]}}

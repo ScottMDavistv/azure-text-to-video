@@ -1,47 +1,33 @@
-# C1 authentication testing — Tier 1 and Tier 2
+# C1 authentication testing: Tier 1 and Tier 2
 
-## Tier 1: unattended on frontend pull requests
+## Tier 1: synthetic checks in ordinary PR CI
 
-The existing `Frontend Quality Gates` pull-request workflow runs frontend unit tests, a pinned Playwright browser suite, seven browser mutations in disposable Git worktrees, lint and the production build. The browser step checks out the exact PR head SHA, then restores GitHub's PR merge checkout for lint and build compatibility checks. The job has read-only permissions, a 15-minute limit and a 15-minute browser step limit. The GitHub-hosted runner consumes GitHub Actions minutes.
+Frontend Quality Gates runs unit tests, version-pinned Playwright browser checks, static and browser mutations, lint, build, and a Chromium session-race check. It tests the browser suite at the exact PR head, then restores GitHub's PR merge checkout for the later checks. The job and browser step have 15-minute limits. The hosted runner consumes GitHub Actions minutes.
 
-The synthetic browser tests initialize the real `entraAuth.ts` and interact with the real React UI, but replace instance methods of the MSAL client in browser memory. They exercise synthetic login, token scope acquisition, logout, login denial, cancelled login, consent failure after an interaction-required fallback, and cancelled logout. **No real Entra token is issued** and the synthetic tests cannot demonstrate MFA, tenant registration or a real delegated grant.
+The synthetic tests use the real React UI and MSAL configuration, with fixture behavior for identity-provider responses. They cover synthetic login, delegated scope acquisition, login and consent failure, cancellation, and local logout. They cannot prove MFA, real tenant consent, real delegated tokens, or Microsoft provider sign-out. HTTP/WebSocket checks are not proof of WebRTC/UDP isolation.
 
-Browser egress controls abort all external HTTP and WebSocket attempts. Do not introduce tokens, real accounts, persistent MSAL browser state, GitHub secrets or provider API calls into Tier 1.
+Keep `contents: read`, `persist-credentials: false`, and `C1_LIVE=0` in CI. Respect workflow approval settings. The four checks and the independent offline diff review passed at PR #60 `cf37876` against protected `main` `9ab8335`. For scope and evidence limits, see [the C1 README](README.md). Results do not carry forward to a different SHA.
 
-The workflow may be pending manual approval under repository rules; do not bypass these settings. Preserve its existing `contents: read` permission and `persist-credentials: false` checkout. A run passing is implementation/CI evidence, **not an independent security review**; Claude must review the exact head before approval or merge.
+## Tier 2: real Microsoft Entra integration (blocked)
 
-## Tier 2: real Microsoft Entra integration — supervised owner decision
+**Do not start Tier 2 now.** Before an owner can authorize it, require:
+- An approved #74 harness and a recorded real R11 pass under #82, including private authenticated desktop forwarding and teardown. #74's parked launcher is not a live runner.
+- Independent verification of browser-enforced WebRTC/UDP egress controls, with the existing privacy, forwarding and cleanup gates intact.
+- A clean checkout at the exact independently reviewed suite commit and a matching reviewed harness pin. Use a commit named in a new owner approval, whether it is on the PR branch or already in protected `main`; do not assume that the latest PR head or a merge commit is approved. Verify the exact SHA before starting.
+- Verified development Entra SPA and API registrations, the expected tenant, the public SPA client ID, and the registered `http://localhost:5173` redirect. No client secrets. Use a dedicated non-admin test account with no financial/provider privileges. Follow tenant MFA and Conditional Access. Do not change registration, grant new consent or weaken tenant controls to complete the test.
 
-**Current real development registrations** (verify in the portal before testing):
-- Frontend SPA public client ID: `6d5e9e96-8be6-445c-9176-3b67d020612c`
-- API application client ID: `a5a09b74-aead-455f-9de7-9b844c8a8465`
-- Tenant: `773e9051-c546-4b75-9432-90f4f8242660`
-- Entra SPA registered redirect: `http://localhost:5173` (also a Codespaces URL, but the test expects localhost).
+### Procedure only after those gates and separate owner approval
 
-PR #46 is merged into `main` (reviewed auth head `6b62c05aad50620f60f4d26ad2821b74b939f920`). For supervised Tier 2, use only the **current independently reviewed exact PR #60 head**, after checking its ancestry, live-suite compatibility and registered redirect. Never reuse an older pinned suite SHA or infer that synthetic Tier 1 evidence certifies live Entra behavior.
+1. Use the approved harness for the private Codespaces desktop. Verify private authenticated forwarding for noVNC on port 6080. Keep X11 and VNC TCP ports unforwarded and use the harness-managed VNC Unix socket.
+2. Verify the clean checkout, the SHA named in the approval, and the pin used by the approved harness. The live Playwright config requires `C1_EXPECTED_SHA` to match the actual checkout. Use only the approved launch procedure, which supplies that SHA and the verified public SPA configuration. Do not use `C1_MUTATION_MODE` for live evidence.
+3. In the private desktop, perform the supervised sign-in, consent and cancellation checks. Verify the expected Microsoft login origin before interaction, and stop if unapproved registration or consent changes would be required. Capture separate evidence for consent denial and cancelled logout.
+4. Record the exact SHA, browser/version, UTC time, outcomes and sanitized error codes only. Verify the registered SPA redirect, delegated scope, Microsoft redirect hosts and local cache/account state. Keep Microsoft provider sign-out **UNVERIFIED** unless separate evidence establishes termination of the provider session. Never share tokens, credentials, cookies, or browser profiles.
+5. Tear down the temporary browser and VNC session, remove temporary test output after review, and verify private port 6080 is closed.
 
-### Minimal owner procedure
+### Future unattended integration
 
-1. Use the independently reviewed C1 harness for the supervised Codespaces desktop. Verify private, authenticated forwarding for noVNC on port **6080** through the harness before sign-in. Keep X11 and VNC TCP ports unforwarded and use the harness-managed Unix socket for VNC.
-2. Use an authorized **dedicated non-admin test account** with no financial/provider privileges; do not place its password, recovery factors, access tokens, cookies or browser profile in the repo, GitHub secrets, ChatGPT, or Claude. Follow tenant MFA/Conditional Access policies; do not disable or circumvent them.
-3. Check out a clean worktree at the exact reviewed PR #60 SHA, confirm the current GitHub PR head still matches, and run:
-   ```bash
-   cd /workspaces/azure-text-to-video/frontend
-   export DISPLAY=:99
-   export VITE_ENTRA_SPA_CLIENT_ID=6d5e9e96-8be6-445c-9176-3b67d020612c
-   # Set this to the complete current PR #60 head after independent exact-head review.
-   export C1_EXPECTED_SHA=REPLACE_WITH_REVIEWED_PR60_SHA
-   C1_LIVE=1 npx playwright test --config=playwright.config.mjs --headed --workers=1 --grep '^LIVE:'
-   ```
-4. In the private noVNC desktop, complete sign-in and consent using only the verified Microsoft domain. Pause/resume the Playwright Inspector. Perform the separate consent-denial and cancelled-logout checks using an appropriately unconsented test user where tenant policy permits; if tenant consent or app registration changes would be required, STOP and request separate approval.
-5. Record only the exact SHA, browser/version, UTC time, test outcomes and sanitized MSAL error codes. The independent reviewer verifies the registered SPA redirect, delegated `access_as_user`, Microsoft redirect hosts, local MSAL account/cache state and each supervised cancellation outcome. Microsoft provider sign-out stays **INCOMPLETE** pending separate evidence that the provider session ended.
-6. Tear down the temporary browser/VNC session, remove temp test output, and close private forwarded port 6080.
+Do not replay personal passwords or disable MFA. A separate non-production Entra tenant, synthetic identity, and reviewed integration plan would require separate design and owner approval. Service-principal tests can cover the API but do not replace interactive SPA sign-in.
 
-### Should Tier 2 itself become unattended?
+## Integration gates
 
-Not by replaying personal passwords or disabling MFA. For high-assurance unattended tests, propose a **separate non-production Entra test tenant**, dedicated non-admin synthetic test identity and a separately reviewed identity-provider integration plan that respects Conditional Access/MFA. This is a **future design proposal**, not authorization to create tenants, modify IAM, grant consent, pay for licenses, or bypass MFA. Service-principal client-credentials tests can verify the backend API but are **not** a substitute for a user-interactive SPA login.
-
-## Gates
-
-- PR #46 (auth) is merged into protected `main`. PR #60 (including consolidated Tier 1 coverage from PR #69) remains DRAFT until independently reviewed, exact-head CI validated and owner merge approval granted. PR #69 remains open pending separately authorized consolidation closure.
-- No Azure deployment, paid FAL calls, IAM/finance changes, automatic dispatch or workflow-approval bypass.
+PR #46 is in protected `main`; PR #69's Tier 1 coverage was consolidated into #60 and #69 was closed without merging. #51 and #61 remain open evidence items. #82 still binds #60 and #74; this documentation does not change it. PR #60 stays Draft until the recorded gates are satisfied or the owner explicitly approves a separate scope decision, and any later merge requires separate approval. No Azure deployment, paid FAL, IAM/finance changes, automatic dispatch or workflow-approval bypass.

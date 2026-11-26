@@ -1,3 +1,5 @@
+> Historical review of the stacked #74 harness only. The reconciliation candidate is parked; do not run the commands below. This is not a C1 or live-privacy sign-off. See [README](README.md) for current status.
+
 # Independent security review handoff — C1 validation harness
 
 **Status: DRAFT. The consolidated round-2 remediation and the C1 desktop-blocker remediation (below) await a NEW independent full-diff review.** No implementing session listed below may review or approve it. This document is the implementer's account: treat it as claims, not evidence. **C1 REMAINS OPEN.**

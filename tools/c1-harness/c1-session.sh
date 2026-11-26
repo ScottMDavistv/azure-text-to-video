@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+
+# Standalone main snapshot: keep the implementation for offline development, but
+# stop all operator modes before sourcing code or touching local/session state.
+# Re-enabling any operation requires a separate reviewed code change.
+case "${1:-}" in
+  -h|--help|help)
+    printf '%s\n' 'C1 harness is parked. See tools/c1-harness/README.md.'
+    exit 0
+    ;;
+  *)
+    printf '%s\n' 'C1 harness is parked; operational modes are disabled.' >&2
+    exit 78
+    ;;
+esac
 # C1 Microsoft Entra validation harness — ONE COMMAND, development only.
 #
 #   bash tools/c1-harness/c1-session.sh              # full supervised session (Codespaces only)

@@ -128,4 +128,10 @@ jobs:
           done
           shellcheck --severity=error --external-sources --source-path=SCRIPTDIR "${scripts[@]}"
           bash tools/c1-harness/c1-session.sh --help
-          bash tools/c1-harness/c1-session.sh selftest
+          # Preserve the parked operator boundary; execute only offline fixtures.
+          rc=0
+          bash tools/c1-harness/c1-session.sh || rc=$?
+          test "$rc" -eq 78
+          bash tools/c1-harness/tests/test_c1_lifecycle.sh
+          bash tools/c1-harness/tests/test_c1_lib.sh
+          node --test tools/c1-harness/tests/*.test.mjs
