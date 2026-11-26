@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { createServer } from 'node:http'
+import { requireFreshPermission, requireMicrosoftPopupOrigin } from './c1-operation-evidence.mjs'
 import { loadSources, sourceViolations } from './c1-source-policy.mjs'
 import {
   live, sha, checkoutDirty, allowedHmrOrigins, allowedRequest,
@@ -348,8 +349,11 @@ test('LIVE: popup login, validated claims, silent acquisition and verified local
   expect(result).toEqual({ ok: true, silent: true })
   // A popup on repeat acquisition means silent behavior is broken.
   const beforeRepeat = popups.length
-  await page.getByRole('button', { name: 'Check API permission' }).click()
-  await expect(page.getByRole('status').first()).toContainText('Delegated API permission acquired')
+  await requireFreshPermission(
+    page.getByRole('button', { name: 'Check API permission' }),
+    page.getByRole('status').first(),
+    expect,
+  )
   expect(popups.length).toBe(beforeRepeat)
   await assertMemoryOnly(page, context)
   await page.getByRole('button', { name: 'Sign out' }).click()
@@ -390,6 +394,7 @@ test('LIVE: deliberately cancelled popup returns MSAL user_cancelled, not a gene
     page.waitForEvent('popup'),
     page.getByRole('button', { name: 'Sign in with Microsoft' }).click(),
   ])
+  await requireMicrosoftPopupOrigin(popup)
   await page.pause() // operator deliberately closes/cancels actual Microsoft popup
   await expect.poll(() => page.evaluate(() => window.__c1CancelCode)).toBe('user_cancelled')
   await expect.poll(() => popup.isClosed()).toBe(true)
