@@ -231,19 +231,33 @@ class IsolationTests(unittest.TestCase):
 
     def test_byte_pinned_preview_pair_is_scoped_to_scan(self):
         import hashlib
+        import json
+        import sys
         import tempfile
+        from types import SimpleNamespace
         from unittest import mock
 
-        # Inert surrogates exercise the pin mechanism without executable steps.
-        callee = b"on: workflow_call\npermissions: {contents: read}\njobs: {stub: {if: 'false'}}\n"
-        caller = (
-            "on: workflow_dispatch\npermissions: {contents: read}\n"
-            "jobs:\n  owner_whatif:\n    permissions: {contents: read, id-token: write}\n"
-            f"    uses: {checker.PREVIEW_REF}\n"
-        ).encode()
-        with tempfile.TemporaryDirectory() as t, mock.patch.multiple(
-            checker, PREVIEW_CALLEE_BYTES=hashlib.sha256(callee).hexdigest(),
-            PREVIEW_CALLER_BYTES=hashlib.sha256(caller).hexdigest(),
+        # Exercise real path and raw-byte checks without requiring PyYAML in
+        # general CI. The offline workflow fixtures cover the real YAML loader.
+        callee = json.dumps({
+            "on": "workflow_call", "permissions": {"contents": "read"},
+            "jobs": {"stub": {"if": "false"}},
+        }).encode()
+        caller = json.dumps({
+            "on": "workflow_dispatch", "permissions": {"contents": "read"},
+            "jobs": {"owner_whatif": {
+                "permissions": {"contents": "read", "id-token": "write"},
+                "uses": checker.PREVIEW_REF,
+            }},
+        }).encode()
+        with (
+            tempfile.TemporaryDirectory() as t,
+            mock.patch.dict(sys.modules, {"yaml": SimpleNamespace(YAMLError=ValueError)}),
+            mock.patch.object(checker, "strict_load", side_effect=lambda _yaml, text: json.loads(text)),
+            mock.patch.multiple(
+                checker, PREVIEW_CALLEE_BYTES=hashlib.sha256(callee).hexdigest(),
+                PREVIEW_CALLER_BYTES=hashlib.sha256(caller).hexdigest(),
+            ),
         ):
             root = pathlib.Path(t)
             staged, dispatch = root / checker.PREVIEW_CALLEE, root / checker.GUARDED_AZURE
@@ -254,11 +268,17 @@ class IsolationTests(unittest.TestCase):
             self.assertEqual(checker.scan(root), [])
             staged.unlink()
             self.assertTrue(checker.scan(root), "pinned caller cannot precede the callee")
-            staged.write_bytes(callee + b"# changed\n")
-            self.assertTrue(checker.scan(root), "any callee change must fail closed")
+            staged.write_bytes(callee + b" \n")
+            self.assertIn(
+                checker.PREVIEW_CALLEE + ": reserved preview callee must match reviewed bytes",
+                checker.scan(root),
+            )
             staged.write_bytes(callee)
-            dispatch.write_bytes(caller + b"# changed\n")
-            self.assertTrue(checker.scan(root), "any caller change must fail closed")
+            dispatch.write_bytes(caller + b" \n")
+            self.assertIn(
+                checker.GUARDED_AZURE + ": staged preview callee requires the exact reviewed caller or no caller",
+                checker.scan(root),
+            )
             dispatch.unlink()
             dispatch.with_name("other.yml").write_bytes(caller)
             self.assertTrue(checker.scan(root), "caller bytes do not authorize a different path")
