@@ -1,73 +1,35 @@
-# C1 — Microsoft Entra localhost Playwright validation
+# C1 Microsoft Entra localhost Playwright validation
 
-Development-only tests stacked on PR #46, tracked in PR #60. Nothing in this suite authorizes Azure deployment, IAM changes, paid FAL, merging, or billable GitHub Actions/Claude dispatch.
+Development-only validation in PR #60 against protected `main`. PR #46's authentication changes are already in `main`. This suite does not authorize live sign-in, Azure deployment, IAM or finance changes, paid provider calls, CI dispatch, or a merge.
 
-## Execution on a trusted development machine
+## Tier 1: synthetic browser tests
 
-From the repository's `frontend/` directory:
+See [Tier 1 and Tier 2](TIER1-TIER2.md) for the distinction between synthetic and live evidence. From the repository's `frontend/` directory on a trusted development machine, within an approved development run:
 
 ```bash
 npm ci
 # Exact-version, no-save test runner; never use --package-lock=false (lockfile drift).
 npm install --no-save --ignore-scripts @playwright/test@1.65.1
-node e2e/c1-lockfile-check.mjs        # installed tree must equal package-lock.json
+node e2e/c1-lockfile-check.mjs
 npx playwright install chromium
 npx playwright test --config=playwright.config.mjs
 C1_UNCONFIGURED=1 npx playwright test --config=playwright.config.mjs
-node e2e/c1-mutation-check.mjs        # 7 static mutations + 7 anti-vacuity coverage decoys
-node e2e/run-browser-mutations.mjs    # baseline gate + 7 browser mutations, zero-delivery sink
+node e2e/c1-mutation-check.mjs
+node e2e/run-browser-mutations.mjs
 ```
 
-Offline runs inject a synthetic public SPA client ID (`00000000-0000-4000-8000-000000000000`) into a fresh Vite server, intercept external requests, and never sign in to Microsoft. The unconfigured case runs separately. **Passing these tests is not a C1 live PASS.**
+These runs use a synthetic public SPA client ID and a fresh Vite server. They intercept external HTTP and WebSocket requests and never sign in to Microsoft. This evidence does not establish WebRTC/UDP egress control. Frontend Quality Gates runs the synthetic and unconfigured suites and both mutation runners at the exact PR head, with a read-only token and no secrets. CI explicitly sets `C1_LIVE=0`. Dependency and browser setup can still require approved downloads; the synthetic browser cases do not require Microsoft Entra access.
 
-### Supervised live Entra session
+The static runner checks seven source mutations and seven coverage decoys without editing the working tree. The browser runner requires a passing unmutated baseline, then checks each mutation with static checks disabled. Its synthetic M5 check verifies that `logoutPopup` is called for the expected account; it does not verify Microsoft session termination. M6 uses a local HTTP/WebSocket sink. M7-S (storage after real token acquisition) still requires separately authorized live evidence.
 
-Verify your Microsoft Entra SPA application ID, tenant and registered redirect `http://localhost:5173` (SPA type). Set only the public client ID, not a secret:
+Normal runs require a fresh server on port 5173 and a clean checkout, including untracked files. The runner rejects hidden Git index changes and binds the test evidence to the actual checkout. Only offline browser mutation runs may use `C1_MUTATION_MODE=1`; such runs cannot certify a live SHA. Keep each mutation in a disposable worktree and leave the tested checkout unchanged.
 
-```bash
-C1_LIVE=1 VITE_ENTRA_SPA_CLIENT_ID=<your-public-spa-client-id> \
-  npx playwright test --config=playwright.config.mjs --headed --workers=1
-```
+## Review and release status
 
-A fresh web server is mandatory in all modes; a running server on port 5173 must be shut down first. The runner rejects modified tracked files AND untracked files in a normal test run. Commit or remove local changes before evidence collection. For temporary OFFLINE browser mutation builds only, set `C1_MUTATION_MODE=1`; this overrides the clean-tree rule, explicitly invalidates live certification, and is rejected in `C1_LIVE` mode. The Playwright config supplies `VITE_C1_SHA`, and tests verify the browser received the checkout SHA. Browser reports do not record bearer tokens. `page.pause()` requires operator interaction; manually complete login/logout or cancel the correct popup and resume. Frontend Quality Gates runs the offline suite, unconfigured suite, both mutation runners and the lockfile check at the exact PR head (read-only token, no secrets); live mode is never run in GitHub Actions.
+At `cf37876675b2c2c077bf3bfdf7ec6c3f71bca16c` against `9ab83354589fe19d06bf2467cec3ee80ed80cf55`, the full-diff independent review passed within its offline scope, with low-severity notes. Frontend, Backend, Security and Trusted Workflow Isolation checks passed on that exact head. The reviewer ran focused unit checks and a partial static mutation run, not the full browser CI suite. These receipts apply only to that commit, not a later revision or a merge commit. Earlier reviews of superseded heads are historical.
 
-The live test checks tenant, token audience and scope, issuer, expiration, active MSAL account, memory-only storage, silent token retrieval, and denial of unsafe egress. It verifies local MSAL cache clearing by checking that the active account and account cache are empty and that the app rejects token acquisition for lack of an account. These checks also run after reload. Microsoft provider sign-out remains **INCOMPLETE** until separate evidence establishes the provider session ended.
+The repeat-permission check requires fresh UI completion and no new popup; it does not imply Entra minted a new token rather than MSAL returning a cached token. The cancellation check requires a committed, open Microsoft login document at the exact expected origin before operator cancellation, followed by popup closure, sanitized MSAL cancellation and empty local account state.
 
-The cancelled-login test requires an actual popup opened by the sign-in button, popup closure, the sanitized MSAL `user_cancelled` code, and an empty local account state. Unauthorized external requests are blocked by a browser-context route before network delivery, including popups. Recheck the Microsoft sign-in host allowlist during supervised validation. Consent denial and cancelled logout require their own supervised cases and evidence.
+**Live C1 is INCOMPLETE. Microsoft provider sign-out is UNVERIFIED.** Local sign-out tests verify cache and active-account clearing, unavailable token acquisition, and signed-out state after reload. They do not establish that the Microsoft SSO session ended. Issue #61 tracks remaining C1 evidence. #51 remains an open historical review-evidence item for merged PR #46; merge ancestry is not review evidence. #82 remains a merge gate for #60 and #74 and requires a real, supervised R11 pass. The most recent supplied run failed despite cleanup passing. Do not treat this document or the offline review as a waiver or authorization to make #60 Ready or merge it.
 
-## Security evidence and independent review
-
-Record exact checkout SHA, browser/version, UTC time, test commands, each C1 result, and relevant sanitized MSAL error codes. Do **not** share credentials, bearer tokens, cookies, request URLs containing OAuth parameters, decoded JWT claims, HAR files, console dumps, traces, screenshots of Microsoft sign-in, or auth storage state.
-
-The source mutation runner performs seven intentionally defective source transformations **in memory**, verifies that each violates a static constraint, and never changes repository files. It is a useful regression guard but **not a substitute for Playwright runtime mutation testing**. Reviewers should independently repeat browser mutation tests on a temporary checkout before certifying suite readiness.
-
-Current independent Claude verdict on original suite at `d32ec67`: REQUEST CHANGES. Retest and independently review the new exact head before changing this verdict. PR #46's C1 gate and review Thread 1 remain open; C2, C3 and #51 still apply. Never self-approve or automatically merge.
-
-## Independent browser mutation sequence
-
-Use a separate disposable clean checkout for each mutation, apply only one deliberate change at a time, and run `C1_MUTATION_MODE=1 npx playwright test --config=playwright.config.mjs` (with no real client ID). Record the exact **behavioral** failed assertion rather than static source checks alone. Revert every change, remove test artifacts, confirm a clean tree, and rerun the baseline. M5 (no-op logout) and some token-storage-on-success mutations cannot be proven by an unauthenticated offline run; mark these **NOT EXECUTED / REQUIRES SUPERVISED LIVE SESSION** rather than claiming detection from static checks. Never invoke paid providers or send real credentials for mutation testing.
-
-## Claude re-review follow-up (2026-11-17)
-
-The independent reviewer found 4/7 browser mutation detections at `e36f2b0`, with escaped M2/M4 and untested M5. Additional branch commits now add browser-level `127.0.0.1` redirect checks, in-browser interaction-required token fallback spies, logoutPopup invocation spies, exact-origin HTTP restrictions including localhost ports, WebSocket blocking via `routeWebSocket`, stricter storage and cookies/IndexedDB checks, and exact-head evidence enforcement. The runner rejects `git ls-files -v` skip-worktree/assume-unchanged flags and requires a caller-supplied exact `C1_EXPECTED_SHA` in LIVE mode. Sanitized begin/test/end evidence includes `browser.version()` and UTC times. Artifacts write to the OS temporary directory, which must be deleted after evidence review.
-
-**These new browser checks are not independently executed or certified.** Claude must rerun both offline suites in a trusted checkout, compare each original mutation against browser assertions with source invariants disabled, and repeat M6-B wrong-port HTTP, M6-C WebSocket, and M7-B opaque token storage checks using a controlled local sink. M7-S post-success token leakage still requires an authorized live account; do not award a synthetic-browser PASS. Independent reviewer must verify the Microsoft domain allowlist on an owner-approved non-billable supervised dry run without leaking authorization URLs or tokens. Live consent-denial and cancelled-logout handling require separate explicit evidence. PR #46 C1 remains OPEN.
-
-If using `C1_MUTATION_MODE=1`, test runs are development-only and are never acceptable as live C1 SHA attestation. Do not change source code and then run with `C1_LIVE=1`.
-
-## Follow-up to Claude review at ad64f2b
-
-Claude's independent browser re-review found 6 pass / 1 fail / 3 skipped on the offline baseline. B-1 was a bare `@azure/msal-browser` specifier inside `page.evaluate`, which the browser could not resolve. The M4 test now obtains the optimized dependency URL from Vite's transformed `/src/entraAuth.ts` and imports the same module instance, preserving `InteractionRequiredAuthError instanceof` identity. It requires the synthetic fallback to invoke 1 popup and 0 redirects. The evidence `dirty=` marker now reflects actual `git status`, not just `C1_MUTATION_MODE`.
-
-**Not yet independently verified at the new exact head:** clean 0-fail offline baseline and M4 mutant fail at the popup/redirect assertion with static checks disabled. Claude must rerun both, and confirm that the optimized MSAL module resolution works with the actual Vite version. The independent review request is on PR #60 and Issue #61. Live C1 remains INCOMPLETE.
-
-## Alignment with PR #46 `6b62c05` and consolidation of PR #71 (`52659bc`)
-
-PR #46 moved the MSAL configuration and popup flows into `src/entraAuthCore.ts`; `src/entraAuth.ts` now only injects the real `PublicClientApplication` and `InteractionRequiredAuthError`. This branch merges that certified head and PR #71, and retargets every check:
-
-- `c1-source-policy.mjs` inspects `entraAuth.ts`, `entraAuthCore.ts` and `App.tsx`, and **fails closed** if MSAL runtime imports, `PublicClientApplication` or popup/redirect flow calls appear in any other `src` file, or if the wrapper stops delegating to the core. Seven coverage decoys in `c1-mutation-check.mjs` prove it cannot pass vacuously.
-- `c1-mutations.mjs` is the single definition of M1–M7 (anchors in `entraAuthCore.ts`/`App.tsx`, exactly-once anchor, received-value proofs), shared by the static and browser runners.
-- `run-browser-mutations.mjs` first requires the unmutated browser-only baseline to pass, verifies static checks are disabled, and for M6 asserts zero HTTP/WebSocket deliveries to a local sink.
-- From PR #71: the exact-host HTTPS `login.microsoft.com` allowlist entry and its spoofed-host regression test; the lockfile-respecting CI install. Added here: remote Microsoft hosts are restricted to the default HTTPS port (PR #71 review F-4), diagnostics record `scheme://host:port` (F-3), and `c1-lockfile-check.mjs` enforces F-1 in CI.
-
-**Not independently reviewed yet.** The implementing session must not certify these changes. Live C1 remains INCOMPLETE and requires renewed owner authorization naming the new SHAs. PR #46 SSO-logout issue #76 is tracked separately.
+For a future, separately authorized live run, use the [Tier 2 gates and procedure](TIER1-TIER2.md). Do not use the parked launcher or bypass R11 or the WebRTC egress gate. Share only sanitized results: exact checkout SHA, browser version, UTC time, test names and verdicts, and sanitized MSAL error codes. Never share bearer tokens, cookies, OAuth URLs, decoded JWT claims, HAR files, raw console output, traces, sign-in screenshots, or browser storage state.
