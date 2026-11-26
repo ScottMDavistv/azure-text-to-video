@@ -283,6 +283,39 @@ class IsolationTests(unittest.TestCase):
             dispatch.with_name("other.yml").write_bytes(caller)
             self.assertTrue(checker.scan(root), "caller bytes do not authorize a different path")
 
+    def test_reviewed_preview_yaml_pair_uses_production_pins(self):
+        import tempfile
+
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML unavailable")
+
+        fixtures = pathlib.Path(__file__).parent / "fixtures/c1-byte-pinned-preview"
+        callee = (fixtures / "dev-worker-whatif-preview.yml.txt").read_bytes()
+        caller = (fixtures / "guarded-azure-worker-deploy.yml.txt").read_bytes()
+        with tempfile.TemporaryDirectory() as t:
+            root = pathlib.Path(t)
+            staged, dispatch = root / checker.PREVIEW_CALLEE, root / checker.GUARDED_AZURE
+            staged.parent.mkdir(parents=True)
+            staged.write_bytes(callee)
+            self.assertEqual(checker.scan(root), [])
+            dispatch.write_bytes(caller)
+            self.assertEqual(checker.scan(root), [])
+
+            # Leave the YAML semantics unchanged: only the reviewed bytes drift.
+            staged.write_bytes(callee + b" \n")
+            self.assertIn(
+                checker.PREVIEW_CALLEE + ": reserved preview callee must match reviewed bytes",
+                checker.scan(root),
+            )
+            staged.write_bytes(callee)
+            dispatch.write_bytes(caller + b" \n")
+            self.assertIn(
+                checker.GUARDED_AZURE + ": staged preview callee requires the exact reviewed caller or no caller",
+                checker.scan(root),
+            )
+
     def test_guarded_azure_metadata_drift_fails_closed(self):
         changes = (
             ("workflow permissions", lambda d: d["permissions"].update({"id-token": "write"})),
