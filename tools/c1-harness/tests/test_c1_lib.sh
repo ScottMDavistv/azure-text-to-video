@@ -2567,11 +2567,11 @@ if [[ -n "$TOP" ]] &&
    git -C "$TOP" merge-base --is-ancestor "$C1_PARKED_PR74_SOURCE" HEAD 2>/dev/null; then
   parked_reconciled_scope() {
     local expected actual
-    expected=$(printf '%s\n' '.github/workflows/frontend-quality-gates.yml' 'frontend/e2e/c1-webrtc-chromium.sh' 'frontend/e2e/c1-webrtc-policy.mjs' 'frontend/e2e/c1-webrtc-udp-check.mjs' 'frontend/playwright.config.mjs' 'tools/c1-harness/README.md' 'tools/c1-harness/SECURITY-REVIEW.md' 'tools/c1-harness/tests/test_c1_lib.sh' | LC_ALL=C sort)
+    expected=$(printf '%s\n' '.github/workflows/frontend-quality-gates.yml' 'frontend/e2e/c1-webrtc-chromium.sh' 'frontend/e2e/c1-webrtc-policy.mjs' 'frontend/e2e/c1-webrtc-udp-check.mjs' 'frontend/playwright.config.mjs' 'tools/c1-harness/README.md' 'tools/c1-harness/SECURITY-REVIEW.md' 'tools/c1-harness/tests/test_c1_lib.sh' 'tools/c1-harness/tests/run-ci-fixtures-isolated.sh' 'tools/c1-harness/tests/ci-fixture-isolation.test.mjs' | LC_ALL=C sort)
     actual=$(git -C "$TOP" diff --no-renames --name-only "$C1_PARKED_PR60_BASE" HEAD | LC_ALL=C sort)
     [[ "$actual" == "$expected" ]]
   }
-  t 'parked reconciliation changes only the exact eight reviewed-scope paths relative to current PR60' parked_reconciled_scope
+  t 'parked reconciliation changes only the inventoried reconciliation and fixture-isolation paths relative to current PR60' parked_reconciled_scope
   t 'parked reconciliation preserves the current PR60 launcher byte for byte' \
     git -C "$TOP" diff --quiet "$C1_PARKED_PR60_BASE" HEAD -- tools/c1-harness/c1-session.sh
   t 'parked reconciliation preserves incoming PR74 WebRTC files and Playwright config byte for byte' \

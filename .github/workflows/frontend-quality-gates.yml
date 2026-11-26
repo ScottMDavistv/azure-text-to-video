@@ -66,15 +66,9 @@ jobs:
           # Fail if the extra install drifted any locked dependency (PR #71 review F-1).
           node e2e/c1-lockfile-check.mjs
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb xauth
+          sudo apt-get install -y --no-install-recommends xvfb xauth iproute2
           npx playwright install --with-deps chromium
-          npx playwright test --config=playwright.config.mjs --workers=1
-          C1_UNCONFIGURED=1 npx playwright test --config=playwright.config.mjs --workers=1
-          node e2e/c1-mutation-check.mjs
-          node e2e/run-browser-mutations.mjs
-          # L-2: fail closed unless unrestricted Chromium actually sends STUN,
-          # followed by zero UDP delivery with browser-enforced policy.
-          xvfb-run -a node e2e/c1-webrtc-udp-check.mjs
+          bash ../tools/c1-harness/tests/run-ci-fixtures-isolated.sh browser
           node e2e/c1-lockfile-check.mjs
           git checkout --detach "$GITHUB_SHA"
       - name: Lint frontend
@@ -127,11 +121,4 @@ jobs:
             bash -n "$script"
           done
           shellcheck --severity=error --external-sources --source-path=SCRIPTDIR "${scripts[@]}"
-          bash tools/c1-harness/c1-session.sh --help
-          # Preserve the parked operator boundary; execute only offline fixtures.
-          rc=0
-          bash tools/c1-harness/c1-session.sh || rc=$?
-          test "$rc" -eq 78
-          bash tools/c1-harness/tests/test_c1_lifecycle.sh
-          bash tools/c1-harness/tests/test_c1_lib.sh
-          node --test tools/c1-harness/tests/*.test.mjs
+          bash tools/c1-harness/tests/run-ci-fixtures-isolated.sh harness
