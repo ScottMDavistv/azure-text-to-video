@@ -13,12 +13,12 @@ COPY job_management.py .
 COPY job_admin_routes.py .
 COPY storage.py .
 COPY jobs.py .
-COPY worker.py .
-COPY job_queue.py .
+COPY worker.py synthetic_scene_plan.py .
+COPY job_queue.py dispatch_recovery.py .
 COPY consumer.py .
 COPY queue_lease.py .
 COPY stale_jobs.py .
-COPY worker_service.py .
+COPY worker_service.py worker_readiness.py .
 COPY worker_cli.py .
 COPY provider_config.py .
 COPY video_provider.py .
@@ -67,7 +67,7 @@ COPY fal_billing_reconciliation.py .
 
 COPY reconciliation_runner.py .
 
-COPY paid_job_finalization.py .
+COPY paid_job_finalization.py finance_recovery.py .
 
 # Stage A non-billable recovery modules; not registered as entrypoints.
 COPY distributed_fairness.py stage_a_dispatch.py stage_a_coordinator.py .
