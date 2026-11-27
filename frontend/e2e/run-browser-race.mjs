@@ -123,7 +123,7 @@ try {
     '--headless=new', '--no-sandbox', '--disable-gpu',
     '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-extensions',
-    '--host-resolver-rules=MAP * ~NOTFOUND', '--no-proxy-server',
+    '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1', '--no-proxy-server',
     '--user-data-dir=' + profile, '--remote-debugging-pipe', 'about:blank',
   ], {stdio:['ignore','ignore','ignore','pipe','pipe']})
   browserClosed = new Promise(resolve => browser.once('close', resolve))
