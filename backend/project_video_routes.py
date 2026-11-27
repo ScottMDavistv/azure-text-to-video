@@ -75,7 +75,9 @@ def response_job(job):
         "created_at": job["createdAt"],
     }
     if job["status"] == "failed":
-        response["error_type"] = job.get("errorType", "RenderFailed")
+        # Storage is not a public error vocabulary. Never return arbitrary
+        # exception names/messages, even from legacy or malformed records.
+        response["error_type"] = "RenderFailed"
     return response
 
 @router.post("/{project_id}/jobs", status_code=201)
