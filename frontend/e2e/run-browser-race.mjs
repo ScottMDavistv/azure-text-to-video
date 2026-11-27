@@ -92,15 +92,23 @@ async function checkFixture(browser, origin) {
             if (!markers.length) return 'PENDING';
             if (markers.length !== 1 || markers[0].tagName !== 'PRE') return 'INVALID';
             const { result } = markers[0].dataset;
-            return (result === 'PASS' || result === 'FAIL') &&
-              markers[0].textContent.startsWith(result + ': ') ? result : 'INVALID';
+            if (!(result === 'PASS' || result === 'FAIL') ||
+                !markers[0].textContent.startsWith(result + ': ')) return 'INVALID';
+            if (result === 'PASS') return result;
+            const allowed = ['C42_MOUNT', 'C42_FOCUS', 'C42_ACCOUNT_SWITCH', 'C42_PROJECT_SWITCH', 'C42_PRIVATE_MEDIA', 'C42_LOGOUT', 'C42_POLL_PAUSE', 'C42_POLL_RESUME', 'C42_CANCELLED', 'C42_CREATE_HOLD', 'C42_CREATE_RECOVERY', 'C42_QUEUE_RECOVERY', 'C42_QUEUE_FAILURE', 'C42_DENIED_RECOVERY', 'C42_FINAL_ACCOUNT'];
+            const code = markers[0].dataset.checkpoint;
+            return 'FAIL:' + (allowed.includes(code) ? code : 'C42_UNKNOWN');
           })()`,
           returnByValue: true,
         }, sessionId)
         if (evaluation.exceptionDetails) throw new Error('Could not read the Chromium fixture result')
         const result = evaluation.result?.value
         if (result === 'PASS') return
-        if (result === 'FAIL') throw new Error('Chromium session-race fixture reported failure')
+        const failures = ['C42_MOUNT', 'C42_FOCUS', 'C42_ACCOUNT_SWITCH', 'C42_PROJECT_SWITCH', 'C42_PRIVATE_MEDIA', 'C42_LOGOUT', 'C42_POLL_PAUSE', 'C42_POLL_RESUME', 'C42_CANCELLED', 'C42_CREATE_HOLD', 'C42_CREATE_RECOVERY', 'C42_QUEUE_RECOVERY', 'C42_QUEUE_FAILURE', 'C42_DENIED_RECOVERY', 'C42_FINAL_ACCOUNT', 'C42_UNKNOWN'].map(code => 'FAIL:' + code)
+        if (failures.includes(result)) {
+          failedCheckpoint = result.slice(5)
+          throw new Error('Chromium session-race fixture reported failure')
+        }
         if (result !== 'PENDING') throw new Error('Invalid Chromium fixture result marker')
         await sleep(100)
       }
@@ -110,8 +118,10 @@ async function checkFixture(browser, origin) {
   }
 }
 
+let failedCheckpoint = null
 let browser
 let browserClosed
+async function runBrowserFixture() {
 const profile = await mkdtemp(join(tmpdir(), 'c42-browser-'))
 try {
   await server.listen()
@@ -153,4 +163,12 @@ try {
     try { await server.close() } finally { await rm(profile, {recursive:true,force:true}) }
   }
 }
-console.log('PASS: headless Chromium account-switch, stale request, revoked URL, logout race')
+}
+try {
+  await runBrowserFixture()
+  console.log('PASS: headless Chromium account-switch, stale request, revoked URL, logout race')
+} catch {
+  // Never forward an exception, stack or browser text to the terminal.
+  console.error(failedCheckpoint || 'C42_RUNNER_FAILURE')
+  process.exitCode = 1
+}
