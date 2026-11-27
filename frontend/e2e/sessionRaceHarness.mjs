@@ -36,8 +36,15 @@ async function run() {
   click('Sign in with Microsoft')
   await until(() => document.body.textContent.includes('Signed in: Account A'), 'Account A signed in')
   await until(() => document.querySelector('#secure-video-prompt'), 'SecureStudio mounted')
+  // Keyboard users receive a focusable error summary and associated prompt limit.
+  document.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+  await until(() => document.activeElement?.id === 'secure-request-error', 'validation error focus')
+  assert(document.querySelector('#secure-video-prompt').getAttribute('aria-describedby') === 'secure-prompt-limit', 'Prompt limit association absent')
   changeText('#secure-video-prompt', 'offline browser test')
-  click('Submit authenticated job')
+  // Two submit events before React updates disabled state must yield one mutation.
+  const form = document.querySelector('form')
+  form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+  form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
   await until(() => window.__racePending.length === 1, 'pending A submission')
   // Switch accounts before the A response completes. Its controller must abort,
   // and a late response must not resurrect the old job.

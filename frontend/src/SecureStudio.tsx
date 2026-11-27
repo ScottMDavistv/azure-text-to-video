@@ -26,6 +26,7 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
   const [pollError, setPollError] = useState<string | null>(null)
   const [queueError, setQueueError] = useState<string | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const errorSummary = useRef<HTMLParagraphElement | null>(null)
   const generation = useRef(0)
   const inFlight = useRef<AbortController | null>(null)
   const terminalPoll = useRef<string | null>(null)
@@ -41,6 +42,8 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
     const version = ++generation.current
     return { controller, current: () => generation.current === version && !controller.signal.aborted }
   }
+
+  useEffect(() => { if (error) errorSummary.current?.focus() }, [error])
 
   const api = useMemo(() => createVideoApi({
     baseUrl: apiOrigin,
@@ -131,6 +134,7 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
 
   async function create(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (inFlight.current) return
     const promptError = validatePrompt(prompt)
     if (promptError) { setError(promptError); return }
     try {
@@ -158,7 +162,7 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
   }
   const canRetryQueue = job?.status === 'created' || (job?.status === 'queued' && queueError !== null)
   async function queueAgain() {
-    if (!job || !canRetryQueue) return
+    if (inFlight.current || !job || !canRetryQueue) return
     const project = projectId
     const jobId = job.job_id
     const task = begin()
@@ -172,7 +176,7 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
     }
   }
   async function retrieveVideo() {
-    if (!job || job.status !== 'completed') return
+    if (inFlight.current || !job || job.status !== 'completed') return
     const project = projectId
     const jobId = job.job_id
     const task = begin()
@@ -194,14 +198,14 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
         <h2 id="secure-prompt-heading">Authenticated video request</h2>
         <p className="muted">Microsoft Entra identity and project membership are verified by the backend. Paid rendering remains disabled.</p>
         <p className="muted">{accountIdentity ? 'Microsoft session selected; project access is checked by the backend.' : 'Sign in using the account controls above before submitting.'}</p>
-        <form onSubmit={create}>
+        <form onSubmit={create} aria-busy={busy} aria-describedby={error ? "secure-request-error" : undefined}>
           <label htmlFor="project-id" className="eyebrow">Authorized project ID</label>
           <input className="project-input" id="project-id" value={projectId} onChange={e => { invalidate(); setProjectId(e.target.value); setJob(null); setVideoUrl(null); setBusy(false); setError(null); setPollError(null); setQueueError(null) }} placeholder="Project UUID" />
           <label htmlFor="secure-video-prompt" className="eyebrow">Video prompt</label>
-          <textarea id="secure-video-prompt" maxLength={2000} value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="Describe your video..." />
-          <div className="actions"><span className="muted">{prompt.length}/2,000</span><button className="primary" type="submit" disabled={!accountIdentity || busy}>{busy ? 'Working…' : 'Submit authenticated job'}</button></div>
+          <textarea id="secure-video-prompt" aria-describedby="secure-prompt-limit" maxLength={2000} value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="Describe your video..." />
+          <div className="actions"><span id="secure-prompt-limit" className="muted">{prompt.length}/2,000 characters</span><button className="primary" type="submit" disabled={!accountIdentity || busy}>{busy ? 'Working…' : 'Submit authenticated job'}</button></div>
         </form>
-        {error ? <p role="alert" className="field-error">{error}</p> : null}
+        {error ? <p id="secure-request-error" ref={errorSummary} tabIndex={-1} role="alert" className="field-error">{error}</p> : null}
       </section>
       <section className="panel" aria-labelledby="secure-job-heading">
         <h2 id="secure-job-heading">Live job status</h2>
