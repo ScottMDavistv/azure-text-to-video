@@ -10,7 +10,7 @@ The current run API model requires the exact unsuffixed workflow path. If a futu
 
 ## Commit and scanner sequence
 
-The first local commit adds the disabled callee and admission module. The second pins that real first commit from the preview-only caller, updates the two exact scanner hashes and fixtures, and adds tests. There is no circular self-pin. The first commit is an intermediate object for pinning, not a standalone publication candidate; its inherited caller/scanner does not yet describe the new route. The final commit is the offline review candidate. Strict parsing precedes byte checks; caller and callee live paths remain reserved. Old callers, modified bytes and missing/changed pins are rejected. Fixtures do not authorize different live paths.
+The first local commit adds the disabled callee and admission module. The second pins that real first commit from the preview-only caller, updates the two exact scanner hashes and fixtures, and adds tests. There is no circular self-pin. The first commit is an intermediate object for pinning, not a standalone publication candidate; its inherited caller/scanner does not yet describe the new route. The final commit is the offline review candidate. Strict parsing precedes byte checks; caller and callee live paths remain reserved. The trusted main scanner preserves its separately reviewed legacy exact pair and additionally recognizes the disabled solo pair. Cross-pairs, modified bytes and missing/changed pins are rejected. Fixtures do not authorize different live paths.
 
 ## Separate future gates — not approved or verified here
 
@@ -22,3 +22,7 @@ The first local commit adds the disabled callee and admission module. The second
 6. Obtain Scott's separate final approval for one exact run/head/attempt/target/digest with bounded expiry, then platform approval on that same pending run. Recheck all external OFF controls and scope before any cloud action. No hosted run or Azure operation is approved by this document.
 
 Offline entry points: python -B -m unittest -v tests/design_management/test_solo_preview_dispatch.py tests/design_management/test_ci_isolation.py tests/design_management/test_legacy_whatif_parking.py; python -B scripts/check_ci_isolation.py --root . . Use already installed dependencies only. The admission CLI itself always exits 78 with a fixed refusal in this candidate, including under python -O and attempted environment overrides. Tests execute neither workflows nor cloud commands.
+
+## Offline reconciliation with protected main
+
+This candidate merges exact main 22c034ac20050e49d2a7d1e681db455f40bdb65f as second parent while retaining a746fda037293d8a735ce13e6424afe83173123c as first parent. Main scanner bytes are retained unchanged. Historical c1 fixtures retain the legacy pair; solo-disabled-preview fixtures retain this disabled pair. Governance and solo mutation tests use the separate SOLO constants. The security command includes both scanner suites plus parking and admission; all other workflow bytes are preserved from #44. This local merge is not publication, hosted CI or activation evidence.

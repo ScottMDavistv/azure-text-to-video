@@ -10,8 +10,8 @@ def main():
     try:
         import yaml
         root = Path(__file__).resolve().parents[1]
-        for path, digest in ((policy.GUARDED_AZURE, policy.PREVIEW_CALLER_BYTES),
-                             (policy.PREVIEW_CALLEE, policy.PREVIEW_CALLEE_BYTES)):
+        for path, digest in ((policy.GUARDED_AZURE, policy.SOLO_CALLER_BYTES),
+                             (policy.PREVIEW_CALLEE, policy.SOLO_CALLEE_BYTES)):
             raw = (root / path).read_bytes()
             if hashlib.sha256(raw).hexdigest() != digest:
                 raise ValueError('byte drift')

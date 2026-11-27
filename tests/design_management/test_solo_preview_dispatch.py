@@ -99,8 +99,8 @@ class RealWorkflowBoundaries(unittest.TestCase):
         callee=(ROOT/checker.PREVIEW_CALLEE).read_bytes()
         cases=[('exact',caller,callee,0),('missing',caller,None,1),
             ('caller drift',caller+b'\n',callee,1),('callee drift',caller,callee+b'\n',1),
-            ('wrong pin',caller.replace(checker.PREVIEW_CALLEE_SHA.encode(),b'1'*40),callee,1),
-            ('absent pin',caller.replace(b'@'+checker.PREVIEW_CALLEE_SHA.encode(),b''),callee,1),
+            ('wrong pin',caller.replace(checker.SOLO_CALLEE_SHA.encode(),b'1'*40),callee,1),
+            ('absent pin',caller.replace(b'@'+checker.SOLO_CALLEE_SHA.encode(),b''),callee,1),
             ('enabled caller',caller.replace(b'${{ false }}',b'${{ true }}'),callee,1),
             ('enabled callee',caller,callee.replace(b'${{ false }}',b'${{ true }}'),1),
             ('caller oidc',caller.replace(b'actions: read',b'actions: read\n      id-token: write'),callee,1),

@@ -143,7 +143,7 @@ class IsolationTests(unittest.TestCase):
 
     def test_known_azure_manual_guards_are_path_specific(self):
         doc = self.guarded_azure_document()
-        self.assertTrue(checker.examine(checker.GUARDED_AZURE, doc))
+        self.assertEqual(checker.examine(checker.GUARDED_AZURE, doc), [])
         self.assertTrue(self.evaluate(doc))
         for name in ("preview", "whatif", "deploy"):
             condition = doc["jobs"][name]["if"]
@@ -153,7 +153,7 @@ class IsolationTests(unittest.TestCase):
 
     def test_guarded_azure_standalone_whatif_migration_isolation(self):
         legacy = self.guarded_azure_document()
-        self.assertTrue(checker.examine(checker.GUARDED_AZURE, legacy))
+        self.assertEqual(checker.examine(checker.GUARDED_AZURE, legacy), [])
 
         standalone = copy.deepcopy(legacy)
         jobs = standalone["jobs"]
@@ -353,7 +353,7 @@ class IsolationTests(unittest.TestCase):
         self.assertEqual(checker.events(doc), {"workflow_dispatch"})
         self.assertEqual(set(doc["jobs"]), {"owner_whatif"})
         self.assertEqual(doc["jobs"]["owner_whatif"]["if"], "${{ false }}")
-        self.assertEqual(doc["jobs"]["owner_whatif"]["uses"], checker.PREVIEW_REF)
+        self.assertEqual(doc["jobs"]["owner_whatif"]["uses"], checker.SOLO_REF)
 
     def test_guarded_azure_permission_and_gate_regressions_denied(self):
         try:

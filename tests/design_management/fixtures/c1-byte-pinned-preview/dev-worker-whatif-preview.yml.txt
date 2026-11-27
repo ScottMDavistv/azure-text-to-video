@@ -1,5 +1,5 @@
-name: Solo operator dev worker preview — HARD DISABLED
-# A future dedicated application-only App initiates; Scott approves the same run.
+name: Dedicated dev worker What-If preview (staged, not connected)
+# Only the independently approved owner may dispatch the original workflow.
 # No workflow_call parameters or outputs carry authority into this file.
 on:
   workflow_call:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 jobs:
   whatif_admission:
-    if: ${{ false }}
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'whatif' && github.actor == 'ScottMDavistv' && github.triggering_actor == 'ScottMDavistv' && github.run_attempt == '1' && vars.PROTECTED_MAIN_VERIFIED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -16,17 +16,22 @@ jobs:
     outputs:
       deadline: ${{ steps.admit.outputs.deadline }}
     steps:
+      - name: Validate exact original GitHub caller
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_WORKFLOW_REF" == 'ScottMDavistv/azure-text-to-video/.github/workflows/guarded-azure-worker-deploy.yml@refs/heads/main' ]]
+          [[ "$GITHUB_REPOSITORY" == 'ScottMDavistv/azure-text-to-video' && "$GITHUB_REPOSITORY_ID" == '1457187422' && "$GITHUB_REPOSITORY_OWNER_ID" == '212811615' ]]
+          [[ "$GITHUB_REF" == 'refs/heads/main' && "$GITHUB_EVENT_NAME" == 'workflow_dispatch' && "$GITHUB_RUN_ATTEMPT" == '1' ]]
+          [[ "$GITHUB_ACTOR" == 'ScottMDavistv' && "$GITHUB_ACTOR_ID" == '212811615' && "$GITHUB_TRIGGERING_ACTOR" == 'ScottMDavistv' ]]
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - name: Refuse unresolved application identity before metadata request
-        run: python3 -I scripts/verify_solo_preview_dispatch.py --check-pins
       - name: Validate exact approval without Azure credentials
         id: admit
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          OPERATION: ${{ github.event.inputs.operation }}
           APPROVED_SHA: ${{ github.event.inputs.approved_sha }}
           CONFIRMATION: ${{ github.event.inputs.confirmation }}
           APPROVED_TARGET: ${{ github.event.inputs.approved_preview_target }}
@@ -35,18 +40,18 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          deadline="$(gh api --hostname github.com "repos/ScottMDavistv/azure-text-to-video/actions/runs/$GITHUB_RUN_ID" 2>/dev/null \
-            | python3 -I scripts/verify_solo_preview_dispatch.py)"
+          deadline="$(gh api --hostname github.com "repos/ScottMDavistv/azure-text-to-video/actions/runs/$GITHUB_RUN_ID" \
+            | python3 -I scripts/verify_worker_whatif_dispatch.py)"
           [[ "$deadline" =~ ^[1-9][0-9]{9}$ ]]
           printf 'deadline=%s\n' "$deadline" >> "$GITHUB_OUTPUT"
   owner_whatif:
     needs: whatif_admission
-    if: ${{ false }}
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'whatif' && github.actor == 'ScottMDavistv' && github.triggering_actor == 'ScottMDavistv' && github.run_attempt == '1' && vars.PROTECTED_MAIN_VERIFIED == 'true' && vars.AZURE_DEV_WHATIF_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
-      # No id-token permission in this disabled candidate.
+      id-token: write
     environment: dev-worker-whatif-preview
     env:
       APPROVAL_DEADLINE: ${{ needs.whatif_admission.outputs.deadline }}
