@@ -8,11 +8,14 @@ window.__raceRequests = [];
 window.__racePending = [];
 window.__raceRevoked = [];
 window.__raceDurableRows = [];
+window.__raceQueueTargets = [];
+window.__raceJobPrompt = "offline browser test";
+window.__raceLifecycle = "created";
 const revoke = URL.revokeObjectURL.bind(URL);
 URL.revokeObjectURL = url => { window.__raceRevoked.push(url); return revoke(url); };
 window.__raceUuid = '14588b13-6c3b-4dd0-8e8b-0d22d3e26f2c';
 window.fetch = async (url, options) => {
-  window.__raceRequests.push({url: String(url), signal: options?.signal, method: options?.method, auth: options?.headers?.Authorization});
+  window.__raceRequests.push({url: String(url), signal: options?.signal, method: options?.method, body: options?.body, auth: options?.headers?.Authorization});
   if (options?.signal?.aborted) throw new DOMException('Aborted','AbortError');
   if (window.__raceMode === 'held') {
     return await new Promise((resolve, reject) => {
@@ -22,14 +25,28 @@ window.fetch = async (url, options) => {
     });
   }
   const path = String(url);
-  if (window.__raceMode === 'create-uncertain' && options?.method === 'POST' && path.endsWith('/jobs')) {
-    // Durable-equivalent fixture commit precedes the missing response.
-    window.__raceDurableRows.push({job_id:'ce34abf6-f5ec-468c-9a18-1e9df0b20545', project_path:path, prompt:JSON.parse(options.body).prompt});
-    return new Promise(() => {});
+  if (options?.method === 'POST' && path.endsWith('/jobs')) {
+    const submitted = JSON.parse(options.body);
+    if (window.__raceMode === 'recover-denied') return new Response('', {status:403});
+    if (['create-uncertain','create-recover','create-uncertain-fast'].includes(window.__raceMode)) {
+      const prior = window.__raceDurableRows.find(row => row.operation_id === submitted.operation_id && row.project_path === path);
+      if (prior) {
+        if (prior.prompt !== submitted.prompt) return new Response('', {status:409});
+        window.__raceUuid = prior.job_id;
+        window.__raceJobPrompt = prior.prompt;
+        window.__raceLifecycle = 'created';
+        return new Response(JSON.stringify({...prior,status:'created',created_at:'2026-11-27T00:00:00Z'}),{headers:{'Content-Type':'application/json'}});
+      }
+      // Commit before withholding the first response; keyed replay never inserts again.
+      window.__raceDurableRows.push({job_id:crypto.randomUUID(),project_path:path,prompt:submitted.prompt,operation_id:submitted.operation_id});
+      if (window.__raceMode === 'create-uncertain-fast') return new Response('',{status:503});
+      return new Promise(() => {});
+    }
+    window.__raceJobPrompt = submitted.prompt;
   }
   if (window.__raceMode === 'queue-failure' && path.endsWith('/queue')) return new Response('', {status:503});
   if (window.__raceMode === 'poll-failure' && options?.method === 'GET') return new Response('', {status:503});
-  const job = {job_id: window.__raceUuid, prompt: 'offline browser test', status: ['poll-failure','queue-failure'].includes(window.__raceMode) ? 'created' : window.__raceMode === 'cancelled' ? (options?.method === 'POST' ? 'created' : 'cancelled') : 'completed', created_at: '2026-11-17T00:00:00Z'};
+  const job = {job_id: window.__raceUuid, prompt: window.__raceJobPrompt, status: window.__raceMode === 'create-recover' ? window.__raceLifecycle : ['poll-failure','queue-failure'].includes(window.__raceMode) ? 'created' : window.__raceMode === 'cancelled' ? (options?.method === 'POST' ? 'created' : 'cancelled') : 'completed', created_at: '2026-11-17T00:00:00Z'};
   const headers = {'Content-Type':'application/json'};
   if (path.endsWith('/video/metadata')) {
     return new Response(JSON.stringify({
@@ -42,6 +59,8 @@ window.fetch = async (url, options) => {
     return new Response(new Blob(['mp4'],{type:'video/mp4'}),{headers:{'Content-Type':'video/mp4','Content-Length':'3'}});
   }
   if (path.endsWith('/queue')) {
+    window.__raceQueueTargets.push(path.split('/').at(-2));
+    window.__raceLifecycle = 'queued';
     return new Response(JSON.stringify({job_id:window.__raceUuid,status:'queued',dispatched:true}),{headers});
   }
   return new Response(JSON.stringify(job),{headers});

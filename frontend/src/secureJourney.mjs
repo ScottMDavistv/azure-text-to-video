@@ -143,17 +143,22 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch, r
     (jobId ? '/' + validateProjectId(jobId) : '')
 
   return {
-    async submit(projectId, prompt, signal) {
+    async submit(projectId, prompt, signal, operationId) {
       if (typeof prompt !== 'string' || prompt.trim().length < 1 ||
           prompt.trim().length > 2000) throw new VideoApiError(422, 'Enter 1–2,000 characters.')
-      // A lost/malformed successful response can hide a committed server-generated
-      // ID. There is no idempotent create/recovery endpoint to safely resubmit.
+      const operation = operationId === undefined ? undefined : validateProjectId(operationId)
+      // Reuse an operation only through an explicit caller action, never automatically.
       let dispatched = false
       try {
-        return validateJob(await request(path(projectId), {
-          method: 'POST', body: { prompt: prompt.trim() }, signal,
+        const job = validateJob(await request(path(projectId), {
+          method: 'POST', body: { prompt: prompt.trim(),
+            ...(operation === undefined ? {} : { operation_id: operation }) }, signal,
           onDispatch: () => { dispatched = true },
         }))
+        if (operation !== undefined && job.prompt !== prompt.trim()) {
+          throw new VideoApiError(502, 'Creation response does not match the submitted prompt.')
+        }
+        return job
       } catch (error) {
         const refused = error instanceof VideoApiError &&
           [400, 401, 403, 404, 413, 422].includes(error.status)

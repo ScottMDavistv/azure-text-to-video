@@ -9,6 +9,7 @@ const apiOrigin = import.meta.env.VITE_VIDEO_API_ORIGIN?.trim() || ''
 const initialProject = import.meta.env.VITE_VIDEO_PROJECT_ID?.trim() || ''
 const pollInterval = 3000
 const statusDeadline = 10000
+type PendingCreation = Readonly<{ project: string; account: string; prompt: string; operationId: string; retried: boolean }>
 
 function displayError(error: unknown): string {
   if (error instanceof Error && (
@@ -21,6 +22,21 @@ function displayError(error: unknown): string {
 export default function SecureStudio({ accountIdentity }: { accountIdentity: string | null }) {
   const [projectId, setProjectId] = useState(initialProject)
   const [uncertainProjects, setUncertainProjects] = useState<ReadonlySet<string>>(() => new Set())
+  const [availableRecoveries, setAvailableRecoveries] = useState<ReadonlySet<string>>(() => new Set())
+  const recoveryKey = (account: string, project: string) => JSON.stringify([account, project])
+  const pendingCreations = useRef(new Map<string, PendingCreation>())
+  const rememberCreation = (pending: PendingCreation) => {
+    pendingCreations.current.set(pending.project, pending)
+    setAvailableRecoveries(previous => new Set([...previous, recoveryKey(pending.account, pending.project)]))
+  }
+  const forgetCreation = (pending: PendingCreation) => {
+    pendingCreations.current.delete(pending.project)
+    setAvailableRecoveries(previous => {
+      const next = new Set(previous)
+      next.delete(recoveryKey(pending.account, pending.project))
+      return next
+    })
+  }
   const creationUncertain = uncertainProjects.has(projectId.toLowerCase())
   const [prompt, setPrompt] = useState('')
   const [job, setJob] = useState<VideoJob | null>(null)
@@ -142,7 +158,10 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
   async function queueJob(project: string, jobId: string, task: ReturnType<typeof begin>) {
     try {
       await api.queue(project, jobId, task.controller.signal)
-      if (task.current()) setQueueError(null)
+      if (task.current()) {
+        setQueueError(null)
+        setJob(previous => previous?.job_id === jobId ? { ...previous, status: 'queued' } : previous)
+      }
     } catch (cause) {
       if (task.current()) {
         setQueueError(displayError(cause) + ' The job was saved. Check its status before retrying the queue.')
@@ -152,14 +171,17 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
 
   async function create(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (inFlight.current || creationUncertain) return
+    if (inFlight.current || creationUncertain || pendingCreations.current.has(projectId.toLowerCase())) return
     const promptError = validatePrompt(prompt)
     if (promptError) { setError(promptError); return }
     try {
       validateProjectId(projectId)
       if (!accountIdentity) { setError('Sign in with Microsoft first.'); return }
     } catch (cause) { setError(displayError(cause)); return }
-    const project = projectId
+    const project = validateProjectId(projectId)
+    const pending: PendingCreation = Object.freeze({ project, account: accountIdentity!,
+      prompt: prompt.trim(), operationId: crypto.randomUUID(), retried: false })
+    rememberCreation(pending)
     const task = begin()
     setBusy(true)
     setError(null)
@@ -167,16 +189,60 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
     setQueueError(null)
     setVideoUrl(null)
     try {
-      const created = await api.submit(project, prompt, task.controller.signal)
-      if ((await getSignedInAccount())?.homeAccountId !== accountIdentity || !task.current()) return
+      const created = await api.submit(project, pending.prompt, task.controller.signal, pending.operationId)
+      if ((await getSignedInAccount())?.homeAccountId !== accountIdentity || !task.current()) {
+        setUncertainProjects(previous => new Set([...previous, project]))
+        return
+      }
+      forgetCreation(pending)
       setJob(created)
-      await queueJob(project, created.job_id, task)
+      if (created.status === 'created') await queueJob(project, created.job_id, task)
     } catch (cause) {
       if (cause instanceof Error && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) {
         // Keep the original project's hold even if the owner changed projects
         // while the dispatched request was being aborted.
         setUncertainProjects(previous => new Set([...previous, project.toLowerCase()]))
+      } else {
+        forgetCreation(pending)
       }
+      if (task.current()) setError(displayError(cause))
+    } finally {
+      if (task.current()) { setBusy(false); inFlight.current = null }
+    }
+  }
+  async function recoverCreation() {
+    const pending = pendingCreations.current.get(projectId.toLowerCase())
+    if (inFlight.current || !creationUncertain || !pending || pending.retried ||
+        pending.account !== accountIdentity) return
+    // Spend the one explicit recovery attempt before awaiting anything.
+    pendingCreations.current.set(pending.project, Object.freeze({ ...pending, retried: true }))
+    setAvailableRecoveries(previous => {
+      const next = new Set(previous)
+      next.delete(recoveryKey(pending.account, pending.project))
+      return next
+    })
+    const task = begin()
+    setBusy(true)
+    setError(null)
+    try {
+      if ((await getSignedInAccount())?.homeAccountId !== pending.account) {
+        throw new Error('Authentication session changed')
+      }
+      const recovered = await api.submit(pending.project, pending.prompt,
+        task.controller.signal, pending.operationId)
+      if (!task.current() || (await getSignedInAccount())?.homeAccountId !== pending.account) return
+      forgetCreation(pending)
+      setUncertainProjects(previous => {
+        const next = new Set(previous)
+        next.delete(pending.project)
+        return next
+      })
+      setJob(recovered)
+      setQueueError(null)
+      setPollError(null)
+      // Recovery never queues automatically. A recovered created job may be
+      // queued separately through the existing, known-ID queue action.
+    } catch (cause) {
       if (task.current()) setError(displayError(cause))
     } finally {
       if (task.current()) { setBusy(false); inFlight.current = null }
@@ -227,7 +293,10 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
           <textarea id="secure-video-prompt" aria-describedby="secure-prompt-limit" maxLength={2000} value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="Describe your video..." />
           <div className="actions"><span id="secure-prompt-limit" className="muted">{prompt.length}/2,000 characters</span><button className="primary" type="submit" disabled={!accountIdentity || busy || creationUncertain}>{busy ? 'Working…' : creationUncertain ? 'Creation outcome unknown' : 'Submit authenticated job'}</button></div>
         </form>
-        {creationUncertain ? <p role="alert">Creation is paused for this project in this session. No confirmed ID was returned for the uncertain request. An authorized operator must reconcile it before a replacement is submitted. Changing projects or reloading does not resolve the server outcome.</p> : null}
+        {creationUncertain ? <p role="alert">Creation is paused for this project in this session. No confirmed ID was returned for the uncertain request. You may explicitly retry the original creation once using its unchanged operation ID and submitted prompt. Recovery only restores the job reference; it does not queue automatically. If recovery fails, ask an authorized operator to reconcile it before creating a replacement. Changing projects or reloading does not resolve the server outcome.</p> : null}
+        {creationUncertain ? <button type="button" className="secondary" disabled={busy ||
+          !accountIdentity || !availableRecoveries.has(recoveryKey(accountIdentity, projectId.toLowerCase()))}
+          onClick={recoverCreation}>Retry original creation once</button> : null}
         {error ? <p id="secure-request-error" ref={errorSummary} tabIndex={-1} role="alert" className="field-error">{error}</p> : null}
       </section>
       <section className="panel" aria-labelledby="secure-job-heading">

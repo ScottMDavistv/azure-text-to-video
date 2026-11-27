@@ -9,7 +9,7 @@ export function createVideoApi(options: {
   fetcher?: typeof fetch
   requestTimeoutMs?: number
 }): {
-  submit(projectId: string, prompt: string, signal?: AbortSignal): Promise<VideoJob>
+  submit(projectId: string, prompt: string, signal?: AbortSignal, operationId?: string): Promise<VideoJob>
   queue(projectId: string, jobId: string, signal?: AbortSignal): Promise<{job_id: string;status: 'queued';dispatched: boolean}>
   status(projectId: string, jobId: string, signal?: AbortSignal): Promise<VideoJob>
   metadata(projectId: string, jobId: string, signal?: AbortSignal): Promise<VideoMetadata>

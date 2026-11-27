@@ -21,3 +21,8 @@ Worker claims, state transitions and manual stale recovery now refuse missing, b
 The studio recognizes the existing administrative `cancelled` status as terminal, stops polling it, and offers no queue/video actions for that job. No new cancellation authority or endpoint is introduced.
 
 Creation has no existing server idempotency key or member lookup route for a lost server-generated job ID. After a dispatched create has an unknown outcome (including timeout, transport failure, malformed response or server unavailability), the client marks that project uncertain and blocks another creation in the current mounted session. An explicit refusal before creation is treated separately. The last confirmed job is retained and clearly distinguished from the uncertain request. The hold survives project switching within that session, including aborting a dispatched request during a switch. The owner is directed to authorized operator reconciliation, not to blindly retry or label the job failed. This safeguard is in memory only: reload, logout, another tab or another device are not protected by server-side deduplication. Durable recovery/idempotency requires a separately reviewed server contract and concurrent/ambiguous-commit tests; no broad persistence was added here.
+
+
+## Final session-only Studio integration
+
+The subsequent optional server operation-ID contract is now used by the Studio. One explicit same-account/project retry reuses the immutable submitted prompt and operation ID held in memory. Recovery restores the known job without automatic queueing; an explicit queue action only targets that recovered ID. Previous sections describe the earlier checkpoints. See `create-operation-replay.md` for the current contract and reload/device limitations.

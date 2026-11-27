@@ -100,7 +100,7 @@ async function run() {
   const mutations = window.__raceRequests.filter(r => r.method === 'POST').length
   await sleep(3200)
   assert(window.__raceRequests.length === pausedRequests, 'Polling continued after pause')
-  assert(document.body.textContent.includes('Status: created'), 'Failed observation invented job failure')
+  assert(document.body.textContent.includes('Status: queued'), 'Failed observation invented job failure')
   window.__raceMode = 'immediate'
   click('Resume status checks')
   await until(() => document.body.textContent.includes('Status: completed'), 'explicit status resume')
@@ -133,6 +133,23 @@ async function run() {
   await until(() => !document.body.textContent.includes('Creation is paused for this project'), 'no pending state in another project')
   changeText('#project-id', originalProject)
   await until(() => document.body.textContent.includes('Creation is paused for this project'), 'project hold survives switching')
+  changeText('#secure-video-prompt', 'Edited draft must not replace original')
+  window.__raceMode = 'create-recover'
+  const queueCount = window.__raceQueueTargets.length
+  const retry = [...document.querySelectorAll('button')].find(b => b.textContent === 'Retry original creation once')
+  retry.click(); retry.click()
+  await until(() => document.body.textContent.includes('Status: created') && !document.body.textContent.includes('Creation is paused for this project'), 'explicit original creation recovery')
+  assert(window.__raceDurableRows.length === 1, 'Replay inserted a second row')
+  const stored = window.__raceDurableRows[0]
+  const attempts = window.__raceRequests.filter(r => r.body && JSON.parse(r.body).operation_id === stored.operation_id)
+  assert(attempts.length === 2 && attempts.every(r => JSON.parse(r.body).prompt === stored.prompt && r.url === stored.project_path && r.auth === attempts[0].auth), 'Retry changed operation, project or submitted prompt')
+  assert(document.body.textContent.includes(stored.job_id), 'Recovered ID not shown')
+  assert(window.__raceQueueTargets.length === queueCount, 'Recovery auto-queued')
+  const queueButton = [...document.querySelectorAll('button')].find(b => b.textContent === 'Retry synthetic queue')
+  queueButton.click(); queueButton.click()
+  await until(() => document.body.textContent.includes('Status: queued'), 'explicit recovered-ID queue')
+  await sleep(100)
+  assert(window.__raceQueueTargets.length === queueCount + 1 && window.__raceQueueTargets.at(-1) === stored.job_id, 'Recovered job queued twice or wrong ID')
   window.__raceAccount = {homeAccountId:'account-D', name:'Account D', username:'d@example.test'}
   await until(() => document.body.textContent.includes('Signed in: Account D'), 'new account after uncertain create')
   assert(!document.body.textContent.includes('Creation is paused for this project'), 'Old pending state carried into another account')
@@ -145,6 +162,23 @@ async function run() {
   assert(document.body.textContent.includes(window.__raceUuid), 'Known job ID lost on queue failure')
   assert(!document.body.textContent.includes('Creation is paused for this project'), 'Queue failure misclassified as unknown creation')
   assert(document.querySelector('#secure-video-prompt').value === 'Known job queue failure', 'Known job prompt lost')
-  result('Unknown creation held without resubmit; cancelled terminal state; bounded polling/resume; Account A->B late submit, project switch, B->C MP4 URL revocation, C logout in-flight', true)
+  window.__raceMode = 'create-uncertain-fast'
+  click('Submit authenticated job')
+  await until(() => document.body.textContent.includes('Creation is paused for this project'), 'negative recovery fixture')
+  window.__raceMode = 'recover-denied'
+  click('Retry original creation once')
+  await until(() => document.body.textContent.includes('You do not have permission'), 'recovery denial')
+  const deniedRetry = [...document.querySelectorAll('button')].find(b => b.textContent === 'Retry original creation once')
+  assert(deniedRetry.disabled, 'Denied retry was offered repeatedly')
+  assert(document.body.textContent.includes('Creation is paused for this project'), 'Denied recovery unblocked a new creation')
+  const deniedCalls = window.__raceRequests.length
+  deniedRetry.click()
+  await sleep(100)
+  assert(window.__raceRequests.length === deniedCalls, 'Denial auto-reposted')
+  window.__raceAccount = {homeAccountId:'account-E', name:'Account E', username:'e@example.test'}
+  await until(() => document.body.textContent.includes('Signed in: Account E'), 'account switch after denied recovery')
+  assert(!document.body.textContent.includes('Creation is paused for this project'), 'Pending recovery crossed accounts')
+  assert(![...document.querySelectorAll('button')].some(b => b.textContent === 'Retry original creation once'), 'Prior account recovery action remained')
+  result('Explicit immutable same-ID recovery and one known-ID queue; denied retry held; unknown creation held without resubmit; cancelled terminal state; bounded polling/resume; Account A->B late submit, project switch, B->C MP4 URL revocation, C logout in-flight', true)
 }
 run().catch(error => result(error?.stack || String(error), false))

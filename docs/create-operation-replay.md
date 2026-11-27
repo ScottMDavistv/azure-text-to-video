@@ -1,6 +1,6 @@
 # Optional create-operation replay contract
 
-`POST /projects/{project_id}/jobs` accepts an optional `operation_id`: a canonical lowercase UUID string. Existing clients that omit it (or send null) retain random, independent job creation. No frontend workflow, browser storage, prompt persistence or credential handling is added.
+`POST /projects/{project_id}/jobs` accepts an optional `operation_id`: a canonical lowercase UUID string. Existing clients that omit it (or send null) retain random, independent job creation. The API remains compatible with older clients. The Studio integration below uses memory only; no durable browser storage or credential handling is added.
 
 A participating caller chooses one ID for one intended creation and repeats that same ID and prompt after an uncertain response. The server derives a versioned UUID from the verified internal user ID, authorized project ID and operation ID. It performs the existing atomic `create_entity`, never an upsert. The prompt is trimmed using the existing normalization and stored only in the job's existing prompt field; only `createOperationId` metadata is added to that row.
 
@@ -8,6 +8,14 @@ On an existing row, current project membership is checked again. Ownership, proj
 
 A storage error other than a definite existing-row response remains 503/uncertain, even if creation committed. The next same-ID request may resolve it through the existing row. No new random fallback ID is created internally, and no automatic POST retry is introduced by the browser. Membership denial or revocation remains denial, including a second check after a create conflict.
 
-This guarantee depends on the original job row continuing to exist. There is no new retention period, expiry, migration, storage resource, tombstone or purge policy. Deleting that row also removes its replay record. Choosing a new operation ID is a new creation, not a recovery. Participating callers must retain their operation ID through uncertainty; this patch does not persist it in the browser, change the current session hold UI or claim cross-device recovery. Future UI adoption, retention/offboarding choices and hosted behavior need separate review.
+This guarantee depends on the original job row continuing to exist. There is no new retention period, expiry, migration, storage resource, tombstone or purge policy. Deleting that row also removes its replay record. Choosing a new operation ID is a new creation, not a recovery. Participating callers must retain their operation ID through uncertainty; the Studio does not persist it across reloads or devices. Retention/offboarding choices and hosted behavior need separate review.
 
 Offline evidence includes HTTP tests with a locked create-only fixture and real isolated Azurite Table conditional-create tests. Sixteen concurrent same-key attempts yield exactly one row. Lost-response fixtures commit first, then withhold/fail acknowledgement; replay returns the same row. Synthetic access identities are not real Entra proof, and emulator behavior is not hosted Azure acceptance.
+
+## Studio session-only explicit recovery
+
+Each normal Studio submission captures an immutable submitted prompt, canonical project ID, selected account identity and fresh operation UUID in component memory. The same operation ID is sent on the initial POST. No localStorage, sessionStorage, durable prompt copy, credentials or logging is introduced. Editing the draft does not mutate the captured request.
+
+An uncertain result continues to block a new creation for that project. **Retry original creation once** is available only for the same project/account and only once. It performs one explicit POST using the captured request; there is no automatic repost. Authorization, conflict, malformed response or another uncertain failure leaves the hold in place and disables further recovery attempts. Changing project does not apply that hold/retry to a different project; returning to the original project can recover its original operation. Account change/unmount discards the component state. Reload or another device cannot recover through this UI.
+
+Successful recovery restores the returned job ID and current state. It never queues automatically. A returned created job may subsequently use the existing explicit known-ID queue action. In-flight guards reject same-tick duplicate clicks, and successful queue acknowledgement sets the displayed job to queued and clears the retry error immediately. Returned queued/processing/terminal jobs are not auto-queued. Backend dispatch protections remain unchanged. If the recovered outcome cannot be established, operator reconciliation is still required before a replacement request.

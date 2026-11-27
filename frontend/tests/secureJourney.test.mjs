@@ -348,3 +348,34 @@ test('pre-dispatch timeout and explicit refusal do not mark a committed outcome'
     await assert.rejects(api.submit(PROJECT, 'Test'), error => error.status === status && error.outcomeUnknown !== true)
   }
 })
+
+test('explicit same-operation replay recovers a committed job with one row and no queue', async () => {
+  const rows = new Map()
+  const calls = []
+  const operation = '44d9a967-223e-4bb9-ac60-8d5a37563b19'
+  const api = createVideoApi({ requestTimeoutMs:10, tokenProvider:async()=> 'synthetic',
+    fetcher:async (url,options)=>{
+      calls.push({url,body:JSON.parse(options.body)})
+      const body=JSON.parse(options.body)
+      if (rows.has(body.operation_id)) return {ok:true,json:async()=>rows.get(body.operation_id)}
+      rows.set(body.operation_id,{...sample,prompt:body.prompt})
+      return new Promise(()=>{}) // durable-equivalent commit precedes response loss
+    } })
+  await assert.rejects(api.submit(PROJECT,'Immutable original',undefined,operation), error=>error.outcomeUnknown===true)
+  assert.equal(calls.length,1)
+  const recovered=await api.submit(PROJECT,'Immutable original',undefined,operation)
+  assert.equal(recovered.job_id,JOB)
+  assert.equal(rows.size,1)
+  assert.deepEqual(calls,[0,1].map(()=>({url:`/projects/${PROJECT}/jobs`,body:{prompt:'Immutable original',operation_id:operation}})))
+})
+
+test('optional operation rejects invalid ID before dispatch and mismatched response prompt', async () => {
+  let calls=0
+  const api=createVideoApi({tokenProvider:async()=>'synthetic',fetcher:async()=>{
+    calls++;return {ok:true,json:async()=>sample}
+  }})
+  await assert.rejects(api.submit(PROJECT,'Test',undefined,'bad'),VideoApiError)
+  assert.equal(calls,0)
+  await assert.rejects(api.submit(PROJECT,'Different',undefined,PROJECT),error=>error.outcomeUnknown===true)
+  assert.equal(calls,1)
+})
