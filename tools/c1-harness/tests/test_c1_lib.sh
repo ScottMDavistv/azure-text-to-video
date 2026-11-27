@@ -1654,12 +1654,30 @@ s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bi
 else
   skip 'privacy verification (openssl/curl/python3/ss missing)'
 fi
-supervised_requires_codespaces() {
-  command -v script >/dev/null || return 0
-  local out; out=$(env -u CODESPACES script -qec "bash '$HERE/../c1-session.sh'" /dev/null 2>&1 </dev/null || true)
-  [[ "$out" == *'supervised mode runs only in a GitHub Codespace'* ]]
-}
-t 'supervised mode refuses to run outside a Codespace (no unverifiable privacy)' supervised_requires_codespaces
+parked_launcher_refuses_before_import() (
+  set -e
+  local dir="$TMP/parked-launcher" output status mode codespaces
+  mkdir -p "$dir/lib"
+  cp "$HERE/../c1-session.sh" "$dir/c1-session.sh"
+  # The fake import would create a marker and change the status if reached.
+  printf '%s\n' 'touch "$PARKED_TEST_MARKER"; exit 99' >"$dir/lib/c1-lib.sh"
+  export PARKED_TEST_MARKER="$dir/imported"
+  for codespaces in false true; do
+    for mode in '' run r11-only preflight cleanup purge --offline-only selftest unknown; do
+      local -a args=()
+      [[ -z "$mode" ]] || args=("$mode")
+      status=0
+      output=$(CODESPACES="$codespaces" bash "$dir/c1-session.sh" "${args[@]}" 2>&1) || status=$?
+      [[ "$status" == 78 && "$output" == 'C1 harness is parked; operational modes are disabled.' ]] || return 1
+    done
+  done
+  for mode in -h --help help; do
+    output=$(bash "$dir/c1-session.sh" "$mode") || return 1
+    [[ "$output" == 'C1 harness is parked. See tools/c1-harness/README.md.' ]] || return 1
+  done
+  [[ ! -e "$PARKED_TEST_MARKER" ]]
+)
+t 'parked launcher refuses all operational modes before importing its library' parked_launcher_refuses_before_import
 t 'launcher never runs a verification as `cmd && check` (errexit-exempt, fail-open) (N-1)' bash -c '! grep -nE "^[^#]*&& check [a-z_]+" "$1"' _ "$HERE/../c1-session.sh"
 t 'launcher has no typed-confirmation privacy fallback' bash -c '! grep -q "Type PRIVATE" "$1" "$2"' _ "$HERE/../c1-session.sh" "$HERE/../lib/c1-lib.sh"
 
@@ -2007,7 +2025,21 @@ if [[ -n "$REAL_SS" ]] && command -v python3 >/dev/null; then
     endsess "$s"; (( rc != 0 ))
   }
   t 'ss empty while kernel tables list listeners: evidence rejected (empty output is not success)' ss_blind_empty
-  real_tables_agree() { c1_listen_tables && [[ -n "$C1_LT_PROC" ]] && [[ "$(LC_ALL=C sort <<<"$C1_LT_PROC")" == "$(LC_ALL=C sort <<<"$C1_LT_SS")" ]]; }
+  real_tables_agree() (
+    # Do not depend on an unrelated process listening on the test runner.
+    local s pid port ino rc=0
+    s=$(newsess)
+    export C1_HARNESS_SESSION=$s
+    read -r pid port ino < <(listen_on "$s" selfowned 127.0.0.1 spawn)
+    if ! c1_listen_tables ||
+       ! grep -Fxq "$ino 127.0.0.1:$port" <<<"$C1_LT_PROC" ||
+       ! grep -Fxq "$ino 127.0.0.1:$port" <<<"$C1_LT_SS" ||
+       [[ "$(LC_ALL=C sort <<<"$C1_LT_PROC")" != "$(LC_ALL=C sort <<<"$C1_LT_SS")" ]]; then
+      rc=1
+    fi
+    endsess "$s" || rc=1
+    return "$rc"
+  )
   t 'real kernel tables and real ss agree inode-for-inode on this runner' real_tables_agree
 
   # ---- attribution: IPv4, IPv6, dual-stack, wildcard ------------------------
@@ -2525,7 +2557,28 @@ TOP=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)
 # This is the separate PR #60 trusted-main *integration* baseline. It is NOT
 # the pinned C1 test-suite head and must never widen C1_AUTH_TO_PW_FILES.
 C1_PR60_WORKFLOW_BASE='f4f1066af0a0def2b595a14c211341c27733064c'
-if [[ -n "$TOP" ]] && git -C "$TOP" cat-file -e "$C1_PR60_WORKFLOW_BASE^{commit}" 2>/dev/null \
+# Historical live-pin checks above are unchanged. This parked reconciliation
+# validates a different proof: the entire new #60 tree is preserved except
+# the explicitly inventoried #74 integration and harness paths.
+C1_PARKED_PR60_BASE='05683e35499e0e33c8ccfe2496e8d3bc87731084'
+C1_PARKED_PR74_SOURCE='9adfd4a417f2d3c2f13163359a0cd4f51476ce6a'
+if [[ -n "$TOP" ]] &&
+   git -C "$TOP" merge-base --is-ancestor "$C1_PARKED_PR60_BASE" HEAD 2>/dev/null &&
+   git -C "$TOP" merge-base --is-ancestor "$C1_PARKED_PR74_SOURCE" HEAD 2>/dev/null; then
+  parked_reconciled_scope() {
+    local expected actual
+    expected=$(printf '%s\n' '.github/workflows/frontend-quality-gates.yml' 'frontend/e2e/c1-webrtc-chromium.sh' 'frontend/e2e/c1-webrtc-policy.mjs' 'frontend/e2e/c1-webrtc-udp-check.mjs' 'frontend/playwright.config.mjs' 'tools/c1-harness/README.md' 'tools/c1-harness/SECURITY-REVIEW.md' 'tools/c1-harness/tests/test_c1_lib.sh' 'tools/c1-harness/tests/run-ci-fixtures-isolated.sh' 'tools/c1-harness/tests/ci-fixture-isolation.test.mjs' | LC_ALL=C sort)
+    actual=$(git -C "$TOP" diff --no-renames --name-only "$C1_PARKED_PR60_BASE" HEAD | LC_ALL=C sort)
+    [[ "$actual" == "$expected" ]]
+  }
+  t 'parked reconciliation changes only the inventoried reconciliation and fixture-isolation paths relative to current PR60' parked_reconciled_scope
+  t 'parked reconciliation preserves the current PR60 launcher byte for byte' \
+    git -C "$TOP" diff --quiet "$C1_PARKED_PR60_BASE" HEAD -- tools/c1-harness/c1-session.sh
+  t 'parked reconciliation preserves incoming PR74 WebRTC files and Playwright config byte for byte' \
+    git -C "$TOP" diff --quiet "$C1_PARKED_PR74_SOURCE" HEAD -- frontend/e2e/c1-webrtc-chromium.sh frontend/e2e/c1-webrtc-policy.mjs frontend/e2e/c1-webrtc-udp-check.mjs frontend/playwright.config.mjs
+  t 'parked reconciliation preserves current PR60 backend, scripts and tests' \
+    git -C "$TOP" diff --quiet "$C1_PARKED_PR60_BASE" HEAD -- backend scripts tests
+elif [[ -n "$TOP" ]] && git -C "$TOP" cat-file -e "$C1_PR60_WORKFLOW_BASE^{commit}" 2>/dev/null \
    && git -C "$TOP" merge-base --is-ancestor "$C1_PR60_WORKFLOW_BASE" HEAD 2>/dev/null; then
   pinned_l2_scope() {
     local actual expected

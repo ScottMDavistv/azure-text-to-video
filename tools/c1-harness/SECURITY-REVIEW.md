@@ -1,4 +1,4 @@
-> Historical review of the stacked #74 harness only. The standalone snapshot is parked; do not run the commands below. This is not a C1 or live-privacy sign-off. See [README](README.md) for current status.
+> Historical review of the stacked #74 harness only. The reconciliation candidate is parked; do not run the commands below. This is not a C1 or live-privacy sign-off. See [README](README.md) for current status.
 
 # Independent security review handoff — C1 validation harness
 

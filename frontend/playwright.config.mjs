@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { defineConfig, devices } from '@playwright/test'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { WEBRTC_UDP_POLICY_ARG, headedWebrtcLaunchOptions } from './e2e/c1-webrtc-policy.mjs'
 
 const live = process.env.C1_LIVE === '1'
 const unconfigured = process.env.C1_UNCONFIGURED === '1'
@@ -29,6 +30,9 @@ export default defineConfig({
   fullyParallel: false, retries: 0, reporter: 'list',
   use: {
     ...devices['Desktop Chrome'],
+    // L-2: browser-enforced policy applies to all pages, popups, frames and contexts.
+    // HTTP/WebSocket routing alone does not intercept WebRTC STUN UDP.
+    launchOptions: live ? headedWebrtcLaunchOptions : { args: [WEBRTC_UDP_POLICY_ARG] },
     baseURL: 'http://localhost:5173',
     trace: 'off', screenshot: 'off', video: 'off',
   },
