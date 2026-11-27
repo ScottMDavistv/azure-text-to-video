@@ -26,7 +26,10 @@ export function validateJob(data) {
   return data
 }
 
-export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch }) {
+export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch, requestTimeoutMs = 30000 }) {
+  if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 120000) {
+    throw new Error('Request deadline must be between 1 and 120000 milliseconds')
+  }
   if (typeof tokenProvider !== 'function') throw new Error('Token provider required')
   // Only same-origin relative paths or an explicitly configured HTTPS API origin.
   let origin = ''
@@ -41,7 +44,7 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch })
     }
     origin = url.origin
   }
-  async function request(path, { method = 'GET', body, signal, video = false } = {}) {
+  async function requestUnbounded(path, { method = 'GET', body, signal, video = false } = {}) {
     const token = await tokenProvider()
     if (typeof token !== 'string' || !token.trim()) {
       throw new VideoApiError(401, 'Microsoft API permission is required.')
@@ -85,6 +88,32 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch })
       return blob
     }
     return response.json()
+  }
+  async function request(path, options = {}) {
+    const controller = new AbortController()
+    const abort = () => controller.abort(options.signal.reason)
+    if (options.signal?.aborted) abort()
+    else options.signal?.addEventListener('abort', abort, { once: true })
+    const timer = setTimeout(() => controller.abort(new VideoApiError(0,
+      'The request timed out. Its outcome may be unknown. Check job status before retrying.')),
+    requestTimeoutMs)
+    let rejectOnAbort
+    const cancelled = new Promise((_, reject) => {
+      rejectOnAbort = () => reject(controller.signal.reason)
+      if (controller.signal.aborted) rejectOnAbort()
+      else controller.signal.addEventListener('abort', rejectOnAbort, { once: true })
+    })
+    try {
+      if (controller.signal.aborted) throw controller.signal.reason
+      // Cover token acquisition and body parsing, not just fetch. No retry:
+      // timing out a mutation does not prove that the server rejected it.
+      return await Promise.race([cancelled,
+        requestUnbounded(path, { ...options, signal: controller.signal })])
+    } finally {
+      clearTimeout(timer)
+      options.signal?.removeEventListener('abort', abort)
+      controller.signal.removeEventListener('abort', rejectOnAbort)
+    }
   }
   const path = (projectId, jobId = '') =>
     '/projects/' + validateProjectId(projectId) + '/jobs' +

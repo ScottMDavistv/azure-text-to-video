@@ -209,5 +209,56 @@ test('cancellation signal is passed into queue and metadata/download requests', 
   await api.queue(PROJECT, JOB, controller.signal)
   await api.download(PROJECT, JOB, controller.signal)
   assert.equal(calls.length, 3)
-  assert.ok(calls.every(call => call.init.signal === controller.signal))
+  assert.ok(calls.every(call => call.init.signal instanceof AbortSignal && !call.init.signal.aborted))
+})
+
+for (const phase of ['token', 'fetch', 'json', 'blob']) {
+  test(`deadline covers stalled ${phase} without retry or leaking errors`, async () => {
+    const never = () => new Promise(() => {})
+    let calls = 0
+    let signal
+    const metadata = { job_id: JOB, status: 'completed', available: true,
+      content_type: 'video/mp4', size_bytes: 3,
+      download_endpoint: `/projects/${PROJECT}/jobs/${JOB}/video` }
+    const api = createVideoApi({ requestTimeoutMs: 10,
+      tokenProvider: phase === 'token' ? never : async () => 'synthetic',
+      fetcher: async (_url, options) => {
+        calls++; signal = options.signal
+        if (phase === 'fetch') return never()
+        return { ok: true,
+          json: phase === 'json' ? never : async () => metadata,
+          headers: { get: name => name === 'content-type' ? 'video/mp4' : '3' },
+          blob: never }
+      } })
+    await assert.rejects(phase === 'blob' ? api.download(PROJECT, JOB) : api.submit(PROJECT, 'Test'),
+      error => error instanceof VideoApiError && /outcome may be unknown/.test(error.message))
+    assert.equal(calls, phase === 'token' ? 0 : phase === 'blob' ? 2 : 1)
+    if (signal) assert.equal(signal.aborted, true)
+  })
+}
+
+test('expired token acquisition cannot later send a mutation', async () => {
+  let finish
+  let calls = 0
+  const api = createVideoApi({ requestTimeoutMs: 10,
+    tokenProvider: () => new Promise(resolve => { finish = resolve }),
+    fetcher: async () => { calls++; throw new Error('unexpected request') } })
+  await assert.rejects(api.submit(PROJECT, 'Test'), VideoApiError)
+  finish('synthetic')
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(calls, 0)
+})
+
+test('explicit cancellation settles a stalled token request', async () => {
+  const controller = new AbortController()
+  const api = createVideoApi({ tokenProvider: () => new Promise(() => {}) })
+  const result = api.status(PROJECT, JOB, controller.signal)
+  controller.abort()
+  await assert.rejects(result, { name: 'AbortError' })
+})
+
+test('request deadline cannot be disabled or made unbounded', () => {
+  for (const requestTimeoutMs of [0, -1, Infinity, NaN, 120001, '100', null]) {
+    assert.throws(() => createVideoApi({ tokenProvider: async () => 'synthetic', requestTimeoutMs }))
+  }
 })

@@ -7,6 +7,7 @@ export function createVideoApi(options: {
   baseUrl?: string
   tokenProvider: () => Promise<string>
   fetcher?: typeof fetch
+  requestTimeoutMs?: number
 }): {
   submit(projectId: string, prompt: string, signal?: AbortSignal): Promise<VideoJob>
   queue(projectId: string, jobId: string, signal?: AbortSignal): Promise<{job_id: string;status: 'queued';dispatched: boolean}>
