@@ -24,7 +24,7 @@ def map_job_error(exc):
     if isinstance(exc, ValueError):
         raise HTTPException(
             status_code=400,
-            detail=str(exc),
+            detail="Invalid job administration request",
         ) from exc
 
     if isinstance(exc, job_management.JobNotFoundError):
@@ -36,7 +36,7 @@ def map_job_error(exc):
     if isinstance(exc, job_management.JobConflictError):
         raise HTTPException(
             status_code=409,
-            detail=str(exc),
+            detail="Job state changed or operation is not permitted",
         ) from exc
 
     if isinstance(exc, AzureError):
