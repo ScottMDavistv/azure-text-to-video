@@ -21,6 +21,16 @@ class JobTransitionConflict(ValueError):
     """A transition was concurrently changed or cannot be safely committed."""
 
 
+def concurrency_etag(entity):
+    """Require a specific storage version before a conditional state write."""
+    metadata = getattr(entity, "metadata", None)
+    value = metadata.get("etag") if isinstance(metadata, dict) else None
+    if (not isinstance(value, str) or not value.strip()
+            or value != value.strip() or value == "*"):
+        raise JobTransitionConflict("Missing or nonspecific concurrency ETag")
+    return value
+
+
 def transition_job(job_id, next_status, **fields):
     # Caller-supplied metadata must never replace row identity or status.
     if {"PartitionKey", "RowKey", "status"}.intersection(fields):
@@ -35,9 +45,7 @@ def transition_job(job_id, next_status, **fields):
             f"Cannot transition from {current_status} to {next_status}"
         )
 
-    etag = (getattr(entity, "metadata", None) or {}).get("etag")
-    if not isinstance(etag, str) or not etag:
-        raise JobTransitionConflict("Missing concurrency ETag")
+    etag = concurrency_etag(entity)
 
     update = {
         "PartitionKey": "video",
@@ -71,7 +79,7 @@ def claim_job(job_id):
     if entity["status"] != "queued":
         return None
 
-    etag = entity.metadata["etag"]
+    etag = concurrency_etag(entity)
     from datetime import datetime, timezone
 
     try:

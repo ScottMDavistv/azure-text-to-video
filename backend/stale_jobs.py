@@ -14,6 +14,8 @@ from azure.core import MatchConditions
 from azure.data.tables import UpdateMode
 
 from storage import get_jobs_table_client
+from project_models import validate_id
+from jobs import concurrency_etag
 
 
 DEFAULT_STALE_MINUTES = 60
@@ -34,8 +36,8 @@ def parse_timestamp(value):
 
 
 def is_stale(entity, now=None, stale_minutes=DEFAULT_STALE_MINUTES):
-    if stale_minutes <= 0:
-        raise ValueError("stale_minutes must be positive")
+    if type(stale_minutes) is not int or not 1 <= stale_minutes <= 10080:
+        raise ValueError("Invalid stale-job threshold")
 
     if entity.get("status") != "processing":
         return False
@@ -105,11 +107,14 @@ def recover_stale_job(
 
     Uses an ETag to reject concurrent table updates.
     """
-    if not confirmed_worker_stopped:
+    if confirmed_worker_stopped is not True:
         raise PermissionError(
             "Worker shutdown must be confirmed before recovery"
         )
 
+    validate_id(job_id)
+    if type(stale_minutes) is not int or not 1 <= stale_minutes <= 10080:
+        raise ValueError("Invalid stale-job threshold")
     table = get_jobs_table_client()
 
     entity = table.get_entity(
@@ -139,7 +144,7 @@ def recover_stale_job(
             "failedAt": recovered_at,
         },
         mode=UpdateMode.MERGE,
-        etag=entity.metadata["etag"],
+        etag=concurrency_etag(entity),
         match_condition=MatchConditions.IfNotModified,
     )
 

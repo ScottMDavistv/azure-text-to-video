@@ -16,6 +16,7 @@ function createFetch(steps, calls) {
       headers: { get: name => name === 'content-type' ? (next.contentType ?? 'video/mp4') : name === 'content-length' ? (next.contentLength ?? (next.blob ? String(next.blob.size) : null)) : null },
       json: async () => next.json,
       blob: async () => next.blob,
+      body: next.blob?.stream(),
     }
   }
 }
@@ -209,5 +210,172 @@ test('cancellation signal is passed into queue and metadata/download requests', 
   await api.queue(PROJECT, JOB, controller.signal)
   await api.download(PROJECT, JOB, controller.signal)
   assert.equal(calls.length, 3)
-  assert.ok(calls.every(call => call.init.signal === controller.signal))
+  assert.ok(calls.every(call => call.init.signal instanceof AbortSignal && !call.init.signal.aborted))
+})
+
+for (const phase of ['token', 'fetch', 'json', 'blob']) {
+  test(`deadline covers stalled ${phase} without retry or leaking errors`, async () => {
+    const never = () => new Promise(() => {})
+    let calls = 0
+    let signal
+    const metadata = { job_id: JOB, status: 'completed', available: true,
+      content_type: 'video/mp4', size_bytes: 3,
+      download_endpoint: `/projects/${PROJECT}/jobs/${JOB}/video` }
+    const api = createVideoApi({ requestTimeoutMs: 10,
+      tokenProvider: phase === 'token' ? never : async () => 'synthetic',
+      fetcher: async (_url, options) => {
+        calls++; signal = options.signal
+        if (phase === 'fetch') return never()
+        return { ok: true,
+          json: phase === 'json' ? never : async () => metadata,
+          headers: { get: name => name === 'content-type' ? 'video/mp4' : '3' },
+          blob: never, body: new ReadableStream({ pull: never }) }
+      } })
+    await assert.rejects(phase === 'blob' ? api.download(PROJECT, JOB) : api.submit(PROJECT, 'Test'),
+      error => error instanceof VideoApiError && /outcome (?:may be )?unknown/i.test(error.message))
+    assert.equal(calls, phase === 'token' ? 0 : phase === 'blob' ? 2 : 1)
+    if (signal) assert.equal(signal.aborted, true)
+  })
+}
+
+test('expired token acquisition cannot later send a mutation', async () => {
+  let finish
+  let calls = 0
+  const api = createVideoApi({ requestTimeoutMs: 10,
+    tokenProvider: () => new Promise(resolve => { finish = resolve }),
+    fetcher: async () => { calls++; throw new Error('unexpected request') } })
+  await assert.rejects(api.submit(PROJECT, 'Test'), VideoApiError)
+  finish('synthetic')
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(calls, 0)
+})
+
+test('explicit cancellation settles a stalled token request', async () => {
+  const controller = new AbortController()
+  const api = createVideoApi({ tokenProvider: () => new Promise(() => {}) })
+  const result = api.status(PROJECT, JOB, controller.signal)
+  controller.abort()
+  await assert.rejects(result, { name: 'AbortError' })
+})
+
+test('request deadline cannot be disabled or made unbounded', () => {
+  for (const requestTimeoutMs of [0, -1, Infinity, NaN, 120001, '100', null]) {
+    assert.throws(() => createVideoApi({ tokenProvider: async () => 'synthetic', requestTimeoutMs }))
+  }
+})
+
+
+test('status cannot switch the session to a different otherwise valid job', async () => {
+  const api = createVideoApi({ tokenProvider: async () => 'synthetic',
+    fetcher: createFetch([{ json: { ...sample, job_id: PROJECT, status: 'completed' } }], []) })
+  await assert.rejects(api.status(PROJECT, JOB), { status: 502 })
+})
+
+test('canonical requested job identity is retained by status', async () => {
+  const api = createVideoApi({ tokenProvider: async () => 'synthetic',
+    fetcher: createFetch([{ json: sample }], []) })
+  assert.equal((await api.status(PROJECT, JOB.toUpperCase())).job_id, JOB)
+})
+
+
+for (const [name, parts] of [['oversized', ['abc', 'secret-overflow']], ['truncated', ['ab']]]) {
+  test(`stream rejects ${name} MP4 before constructing the result`, async () => {
+    let cancelled = false
+    let count = 0
+    const body = new ReadableStream({
+      pull(controller) {
+        if (count < parts.length) controller.enqueue(new TextEncoder().encode(parts[count++]))
+        else controller.close()
+      }, cancel() { cancelled = true },
+    }, { highWaterMark: 0 })
+    const metadata = { job_id: JOB, status: 'completed', available: true,
+      content_type: 'video/mp4', size_bytes: 3,
+      download_endpoint: `/projects/${PROJECT}/jobs/${JOB}/video` }
+    let requests = 0
+    const api = createVideoApi({ tokenProvider: async () => 'synthetic', fetcher: async () => {
+      if (++requests === 1) return { ok: true, json: async () => metadata }
+      return { ok: true, headers: new Headers({ 'Content-Type': 'video/mp4', 'Content-Length': '3' }), body }
+    } })
+    await assert.rejects(api.download(PROJECT, JOB), { status: 502 })
+    assert.equal(requests, 2)
+    if (name === 'oversized') assert.equal(cancelled, true)
+  })
+}
+
+
+test('owner can observe a cancelled job returned by the authenticated status route', async () => {
+  const cancelled = { ...sample, status: 'cancelled' }
+  assert.equal(validateJob(cancelled).status, 'cancelled')
+  const api = createVideoApi({ tokenProvider: async () => 'synthetic',
+    fetcher: createFetch([{json: cancelled}], []) })
+  assert.equal((await api.status(PROJECT, JOB)).status, 'cancelled')
+})
+
+
+test('committed creation with lost response is marked uncertain and never retried', async () => {
+  const durableRows = new Map()
+  const calls = []
+  const api = createVideoApi({ requestTimeoutMs: 10, tokenProvider: async () => 'synthetic',
+    fetcher: async (url, options) => {
+      calls.push(url)
+      // Commit the synthetic row BEFORE withholding the response.
+      durableRows.set(JOB, {project: PROJECT, prompt: JSON.parse(options.body).prompt})
+      return new Promise(() => {})
+    } })
+  await assert.rejects(api.submit(PROJECT, '  Preserved prompt  '), error =>
+    error.outcomeUnknown === true && /authorized operator/.test(error.message))
+  assert.equal(durableRows.size, 1)
+  assert.deepEqual(durableRows.get(JOB), {project:PROJECT, prompt:'Preserved prompt'})
+  assert.deepEqual(calls, [`/projects/${PROJECT}/jobs`])
+})
+
+test('malformed create response and unavailable server preserve uncertainty without private details', async () => {
+  for (const response of [{ok:true,json:async()=>({})}, {ok:false,status:503}]) {
+    const api = createVideoApi({ tokenProvider: async () => 'synthetic', fetcher: async () => response })
+    await assert.rejects(api.submit(PROJECT, 'Test'), error => error.outcomeUnknown === true)
+  }
+  const api = createVideoApi({ tokenProvider: async () => 'synthetic',
+    fetcher: async () => { throw new Error('private diagnostic sentinel') } })
+  await assert.rejects(api.submit(PROJECT, 'Test'), error =>
+    error.outcomeUnknown === true && !error.message.includes('sentinel'))
+})
+
+test('pre-dispatch timeout and explicit refusal do not mark a committed outcome', async () => {
+  const before = createVideoApi({ requestTimeoutMs:10, tokenProvider: () => new Promise(() => {}) })
+  await assert.rejects(before.submit(PROJECT, 'Test'), error => error.outcomeUnknown !== true)
+  for (const status of [400,401,403,404,413,422]) {
+    const api = createVideoApi({ tokenProvider:async ()=>'synthetic', fetcher:async()=>({ok:false,status}) })
+    await assert.rejects(api.submit(PROJECT, 'Test'), error => error.status === status && error.outcomeUnknown !== true)
+  }
+})
+
+test('explicit same-operation replay recovers a committed job with one row and no queue', async () => {
+  const rows = new Map()
+  const calls = []
+  const operation = '44d9a967-223e-4bb9-ac60-8d5a37563b19'
+  const api = createVideoApi({ requestTimeoutMs:10, tokenProvider:async()=> 'synthetic',
+    fetcher:async (url,options)=>{
+      calls.push({url,body:JSON.parse(options.body)})
+      const body=JSON.parse(options.body)
+      if (rows.has(body.operation_id)) return {ok:true,json:async()=>rows.get(body.operation_id)}
+      rows.set(body.operation_id,{...sample,prompt:body.prompt})
+      return new Promise(()=>{}) // durable-equivalent commit precedes response loss
+    } })
+  await assert.rejects(api.submit(PROJECT,'Immutable original',undefined,operation), error=>error.outcomeUnknown===true)
+  assert.equal(calls.length,1)
+  const recovered=await api.submit(PROJECT,'Immutable original',undefined,operation)
+  assert.equal(recovered.job_id,JOB)
+  assert.equal(rows.size,1)
+  assert.deepEqual(calls,[0,1].map(()=>({url:`/projects/${PROJECT}/jobs`,body:{prompt:'Immutable original',operation_id:operation}})))
+})
+
+test('optional operation rejects invalid ID before dispatch and mismatched response prompt', async () => {
+  let calls=0
+  const api=createVideoApi({tokenProvider:async()=>'synthetic',fetcher:async()=>{
+    calls++;return {ok:true,json:async()=>sample}
+  }})
+  await assert.rejects(api.submit(PROJECT,'Test',undefined,'bad'),VideoApiError)
+  assert.equal(calls,0)
+  await assert.rejects(api.submit(PROJECT,'Different',undefined,PROJECT),error=>error.outcomeUnknown===true)
+  assert.equal(calls,1)
 })

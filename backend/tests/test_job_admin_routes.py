@@ -117,3 +117,26 @@ def test_cancel_success(admin_enabled):
         )
 
     assert result["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("exception,status,detail", [
+    (ValueError("private-cursor-or-storage-detail"), 400, "Invalid job administration request"),
+])
+def test_admin_errors_do_not_echo_arbitrary_exception_text(admin_enabled, exception, status, detail):
+    from fastapi.testclient import TestClient
+    from main import app
+    with patch("job_admin_routes.job_management.list_jobs", side_effect=exception), TestClient(app) as client:
+        response = client.get("/admin/jobs", headers={"Authorization": AUTH})
+    assert response.status_code == status
+    assert response.json() == {"detail": detail}
+
+
+def test_admin_conflict_has_fixed_public_message(admin_enabled):
+    from fastapi.testclient import TestClient
+    from main import app
+    from job_management import JobConflictError
+    with patch("job_admin_routes.job_management.cancel_job",
+               side_effect=JobConflictError("private-provider-detail")), TestClient(app) as client:
+        response = client.post(f"/admin/jobs/{uuid4()}/cancel", headers={"Authorization": AUTH})
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Job state changed or operation is not permitted"}

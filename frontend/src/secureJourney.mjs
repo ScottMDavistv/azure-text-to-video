@@ -1,7 +1,7 @@
 // Entra-backed video API client. No token persistence or service credentials.
 // Caller must acquire a fresh delegated token for each request.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const STATES = new Set(['created', 'queued', 'processing', 'completed', 'failed'])
+const STATES = new Set(['created', 'queued', 'processing', 'completed', 'failed', 'cancelled'])
 
 export class VideoApiError extends Error {
   constructor(status, message) {
@@ -26,7 +26,10 @@ export function validateJob(data) {
   return data
 }
 
-export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch }) {
+export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch, requestTimeoutMs = 30000 }) {
+  if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 120000) {
+    throw new Error('Request deadline must be between 1 and 120000 milliseconds')
+  }
   if (typeof tokenProvider !== 'function') throw new Error('Token provider required')
   // Only same-origin relative paths or an explicitly configured HTTPS API origin.
   let origin = ''
@@ -41,12 +44,13 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch })
     }
     origin = url.origin
   }
-  async function request(path, { method = 'GET', body, signal, video = false } = {}) {
+  async function requestUnbounded(path, { method = 'GET', body, signal, video = false, onDispatch } = {}) {
     const token = await tokenProvider()
     if (typeof token !== 'string' || !token.trim()) {
       throw new VideoApiError(401, 'Microsoft API permission is required.')
     }
     if (signal?.aborted) throw new DOMException('Request aborted', 'AbortError')
+    onDispatch?.()
     const response = await fetcher(origin + path, {
       method, signal, credentials: 'omit', redirect: 'error',
       cache: 'no-store',
@@ -78,25 +82,94 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch })
       if (claimed === null || !/^[0-9]+$/.test(claimed) || Number(claimed) !== video) {
         throw new VideoApiError(502, 'Video response size conflicts with authorized metadata.')
       }
-      const blob = await response.blob()
-      if (!blob.size || blob.size > 100 * 1024 * 1024 || blob.size !== video) {
-        throw new VideoApiError(502, 'Video size is invalid.')
+      // Do not trust Content-Length to bound allocation: enforce the authorized
+      // byte limit while reading, before constructing the private Blob URL.
+      if (!response.body?.getReader) throw new VideoApiError(502, 'Video body is unavailable.')
+      const reader = response.body.getReader()
+      const chunks = []
+      let size = 0
+      const cancel = () => { void reader.cancel().catch(() => {}) }
+      signal.addEventListener('abort', cancel, { once: true })
+      try {
+        while (true) {
+          if (signal.aborted) throw signal.reason
+          const { done, value } = await reader.read()
+          if (done) break
+          size += value.byteLength
+          if (size > video) throw new VideoApiError(502, 'Video size is invalid.')
+          chunks.push(value)
+        }
+        if (signal.aborted) throw signal.reason
+        if (size !== video) throw new VideoApiError(502, 'Video size is invalid.')
+        return new Blob(chunks, { type: 'video/mp4' })
+      } catch (error) {
+        cancel()
+        throw error
+      } finally {
+        signal.removeEventListener('abort', cancel)
+        reader.releaseLock()
       }
-      return blob
     }
     return response.json()
+  }
+  async function request(path, options = {}) {
+    const controller = new AbortController()
+    const abort = () => controller.abort(options.signal.reason)
+    if (options.signal?.aborted) abort()
+    else options.signal?.addEventListener('abort', abort, { once: true })
+    const timer = setTimeout(() => controller.abort(new VideoApiError(0,
+      'The request timed out. Its outcome may be unknown. Check job status before retrying.')),
+    requestTimeoutMs)
+    let rejectOnAbort
+    const cancelled = new Promise((_, reject) => {
+      rejectOnAbort = () => reject(controller.signal.reason)
+      if (controller.signal.aborted) rejectOnAbort()
+      else controller.signal.addEventListener('abort', rejectOnAbort, { once: true })
+    })
+    try {
+      if (controller.signal.aborted) throw controller.signal.reason
+      // Cover token acquisition and body parsing, not just fetch. No retry:
+      // timing out a mutation does not prove that the server rejected it.
+      return await Promise.race([cancelled,
+        requestUnbounded(path, { ...options, signal: controller.signal })])
+    } finally {
+      clearTimeout(timer)
+      options.signal?.removeEventListener('abort', abort)
+      controller.signal.removeEventListener('abort', rejectOnAbort)
+    }
   }
   const path = (projectId, jobId = '') =>
     '/projects/' + validateProjectId(projectId) + '/jobs' +
     (jobId ? '/' + validateProjectId(jobId) : '')
 
   return {
-    async submit(projectId, prompt, signal) {
+    async submit(projectId, prompt, signal, operationId) {
       if (typeof prompt !== 'string' || prompt.trim().length < 1 ||
           prompt.trim().length > 2000) throw new VideoApiError(422, 'Enter 1–2,000 characters.')
-      return validateJob(await request(path(projectId), {
-        method: 'POST', body: { prompt: prompt.trim() }, signal,
-      }))
+      const operation = operationId === undefined ? undefined : validateProjectId(operationId)
+      // Reuse an operation only through an explicit caller action, never automatically.
+      let dispatched = false
+      try {
+        const job = validateJob(await request(path(projectId), {
+          method: 'POST', body: { prompt: prompt.trim(),
+            ...(operation === undefined ? {} : { operation_id: operation }) }, signal,
+          onDispatch: () => { dispatched = true },
+        }))
+        if (operation !== undefined && job.prompt !== prompt.trim()) {
+          throw new VideoApiError(502, 'Creation response does not match the submitted prompt.')
+        }
+        return job
+      } catch (error) {
+        const refused = error instanceof VideoApiError &&
+          [400, 401, 403, 404, 413, 422].includes(error.status)
+        if (dispatched && !refused) {
+          const unknown = new VideoApiError(error instanceof VideoApiError ? error.status : 0,
+            'Creation outcome unknown. A job may have been saved, but no confirmed job ID was received. Do not submit again or reload to retry. Ask an authorized operator to reconcile this project before creating a replacement.')
+          unknown.outcomeUnknown = true
+          throw unknown
+        }
+        throw error
+      }
     },
     async queue(projectId, jobId, signal) {
       const result = await request(path(projectId, jobId) + '/queue', { method: 'POST', signal })
@@ -106,7 +179,11 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch })
       return result
     },
     async status(projectId, jobId, signal) {
-      return validateJob(await request(path(projectId, jobId), { signal }))
+      const job = validateJob(await request(path(projectId, jobId), { signal }))
+      if (job.job_id !== validateProjectId(jobId)) {
+        throw new VideoApiError(502, 'Job response does not match the requested job.')
+      }
+      return job
     },
     async metadata(projectId, jobId, signal) {
       const data = await request(path(projectId, jobId) + '/video/metadata', { signal })

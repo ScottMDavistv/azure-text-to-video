@@ -177,7 +177,7 @@ def test_worker_ffmpeg_failure_is_visible_and_not_republished(journey):
     assert row["errorType"] == "SyntheticRenderError"
     status = client.get(job_url).json()
     assert status["status"] == "failed"
-    assert status["error_type"] == "SyntheticRenderError"
+    assert status["error_type"] == "RenderFailed"
 
     assert client.post(f"{job_url}/queue").status_code == 409
     assert table.get_entity("video", job_id)["dispatchAttempts"] == 1
