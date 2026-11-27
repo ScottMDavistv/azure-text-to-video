@@ -313,12 +313,20 @@ test('owner can observe a cancelled job returned by the authenticated status rou
 
 
 test('committed creation with lost response is marked uncertain and never retried', async () => {
-  let committed = 0
+  const durableRows = new Map()
+  const calls = []
   const api = createVideoApi({ requestTimeoutMs: 10, tokenProvider: async () => 'synthetic',
-    fetcher: async () => { committed++; return new Promise(() => {}) } })
-  await assert.rejects(api.submit(PROJECT, 'Test'), error =>
+    fetcher: async (url, options) => {
+      calls.push(url)
+      // Commit the synthetic row BEFORE withholding the response.
+      durableRows.set(JOB, {project: PROJECT, prompt: JSON.parse(options.body).prompt})
+      return new Promise(() => {})
+    } })
+  await assert.rejects(api.submit(PROJECT, '  Preserved prompt  '), error =>
     error.outcomeUnknown === true && /authorized operator/.test(error.message))
-  assert.equal(committed, 1)
+  assert.equal(durableRows.size, 1)
+  assert.deepEqual(durableRows.get(JOB), {project:PROJECT, prompt:'Preserved prompt'})
+  assert.deepEqual(calls, [`/projects/${PROJECT}/jobs`])
 })
 
 test('malformed create response and unavailable server preserve uncertainty without private details', async () => {

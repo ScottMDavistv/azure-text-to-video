@@ -115,18 +115,36 @@ async function run() {
   await sleep(3200)
   assert(window.__raceRequests.length === cancellationRequests, 'Cancelled job continued polling')
   window.__raceMode = 'create-uncertain'
+  changeText('#secure-video-prompt', 'Preserved uncertain prompt')
   click('Submit authenticated job')
-  await until(() => document.body.textContent.includes('Creation is paused for this project'), 'unknown create hold')
+  await until(() => document.body.textContent.includes('Creation is paused for this project'), 'unknown create hold', 35000)
   assert(document.body.textContent.includes('Status: cancelled'), 'Last confirmed job reference was lost')
   assert(document.body.textContent.includes('not the uncertain creation request'), 'Old job misidentified as uncertain request')
+  assert(window.__raceDurableRows.length === 1, 'Missing or duplicate fixture commit')
+  assert(window.__raceDurableRows[0].prompt === 'Preserved uncertain prompt', 'Stored prompt changed')
+  assert(document.querySelector('#secure-video-prompt').value === 'Preserved uncertain prompt', 'Owner prompt lost')
+  assert(!window.__raceRequests.some(r => r.url.includes(window.__raceDurableRows[0].job_id)), 'Unknown job was queued or polled')
   const unknownRequests = window.__raceRequests.length
   document.querySelector('form').dispatchEvent(new Event('submit', { bubbles:true, cancelable:true }))
   await sleep(100)
   assert(window.__raceRequests.length === unknownRequests, 'Unknown create allowed a duplicate submit')
   const originalProject = document.querySelector('#project-id').value
   changeText('#project-id', 'd7c6a845-cb0c-468c-9a18-1e9df0b20545')
+  await until(() => !document.body.textContent.includes('Creation is paused for this project'), 'no pending state in another project')
   changeText('#project-id', originalProject)
   await until(() => document.body.textContent.includes('Creation is paused for this project'), 'project hold survives switching')
+  window.__raceAccount = {homeAccountId:'account-D', name:'Account D', username:'d@example.test'}
+  await until(() => document.body.textContent.includes('Signed in: Account D'), 'new account after uncertain create')
+  assert(!document.body.textContent.includes('Creation is paused for this project'), 'Old pending state carried into another account')
+  assert(!document.body.textContent.includes('Status: cancelled'), 'Old confirmed job carried into another account')
+  // Known-ID queue failure is distinct: retain that confirmed job and its prompt.
+  window.__raceMode = 'queue-failure'
+  changeText('#secure-video-prompt', 'Known job queue failure')
+  click('Submit authenticated job')
+  await until(() => document.body.textContent.includes('The job was saved.'), 'known queue failure')
+  assert(document.body.textContent.includes(window.__raceUuid), 'Known job ID lost on queue failure')
+  assert(!document.body.textContent.includes('Creation is paused for this project'), 'Queue failure misclassified as unknown creation')
+  assert(document.querySelector('#secure-video-prompt').value === 'Known job queue failure', 'Known job prompt lost')
   result('Unknown creation held without resubmit; cancelled terminal state; bounded polling/resume; Account A->B late submit, project switch, B->C MP4 URL revocation, C logout in-flight', true)
 }
 run().catch(error => result(error?.stack || String(error), false))
