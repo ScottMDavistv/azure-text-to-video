@@ -89,3 +89,25 @@ def test_unexpected_storage_error_propagates():
     with patch("jobs.get_jobs_table_client", return_value=table):
         with pytest.raises(HttpResponseError):
             transition_job(str(uuid4()), "completed")
+
+
+@pytest.mark.parametrize("etag", [None, "", " ", "*", " * ", True, 3])
+def test_nonspecific_etag_never_transitions(etag):
+    table = make_table(etag=etag)
+    with patch("jobs.get_jobs_table_client", return_value=table):
+        with pytest.raises(JobTransitionConflict):
+            transition_job(str(uuid4()), "completed")
+    table.update_entity.assert_not_called()
+
+
+@pytest.mark.parametrize("etag", [None, "", " ", "*", " * ", True, 3])
+def test_worker_entry_refuses_claim_without_specific_version(etag):
+    from worker import process_job
+    table = make_table(status="queued", etag=etag)
+    renderer, writer = MagicMock(), MagicMock()
+    with patch("jobs.get_jobs_table_client", return_value=table):
+        with pytest.raises(JobTransitionConflict):
+            process_job(str(uuid4()), renderer, artifact_writer=writer)
+    table.update_entity.assert_not_called()
+    renderer.assert_not_called()
+    writer.assert_not_called()

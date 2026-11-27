@@ -189,3 +189,17 @@ def test_manual_recovery_rejects_noncanonical_identity_before_storage():
         with pytest.raises(ValueError):
             recover_stale_job("not-a-job", confirmed_worker_stopped=True)
     storage.assert_not_called()
+
+
+@pytest.mark.parametrize("etag", [None, "", " ", "*", " * ", True, 3])
+def test_recovery_requires_specific_version(etag):
+    from jobs import JobTransitionConflict
+    class Entity(dict): pass
+    entity = Entity(make_job(120))
+    entity.metadata = {"etag": etag}
+    table = MagicMock()
+    table.get_entity.return_value = entity
+    with patch("stale_jobs.get_jobs_table_client", return_value=table):
+        with pytest.raises(JobTransitionConflict):
+            recover_stale_job(entity["RowKey"], confirmed_worker_stopped=True, now=NOW)
+    table.update_entity.assert_not_called()

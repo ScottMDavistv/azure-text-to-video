@@ -15,6 +15,7 @@ from azure.data.tables import UpdateMode
 
 from storage import get_jobs_table_client
 from project_models import validate_id
+from jobs import concurrency_etag
 
 
 DEFAULT_STALE_MINUTES = 60
@@ -143,7 +144,7 @@ def recover_stale_job(
             "failedAt": recovered_at,
         },
         mode=UpdateMode.MERGE,
-        etag=entity.metadata["etag"],
+        etag=concurrency_etag(entity),
         match_condition=MatchConditions.IfNotModified,
     )
 
