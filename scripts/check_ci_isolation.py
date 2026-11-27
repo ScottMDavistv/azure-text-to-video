@@ -143,6 +143,48 @@ PREVIEW_REF = f"ScottMDavistv/azure-text-to-video/{PREVIEW_CALLEE}@{PREVIEW_CALL
 PREVIEW_ENV = "dev-worker-whatif-preview"
 
 
+# Additional exact offline-reviewed HARD-DISABLED pair. Keep the historical
+# PREVIEW_* identity and acceptance path unchanged; pairs are never interchangeable.
+SOLO_CALLEE_SHA = "5858b0c22c43b423a916b8b6270a9089015598e6"
+SOLO_CALLEE_BYTES = "e168c406e7eb01ed79b33d02d0848fb49b83734637d3c293113896e952cc77d2"
+SOLO_CALLER_BYTES = "0f8f7492e8104b7e096ea701799e88be58798c8edb92a43fddd546b9707a7149"
+SOLO_REF = f"ScottMDavistv/azure-text-to-video/{PREVIEW_CALLEE}@{SOLO_CALLEE_SHA}"
+
+
+def solo_disabled_structure(doc, *, caller):
+    """Defense in depth AFTER strict parsing and exact bytes at reserved paths.
+
+    This is not a generic disabled-workflow exception. No document-only caller
+    can grant this authority, and old/new pairs must never be mixed.
+    """
+    if not isinstance(doc, dict) or set(doc) != {"name", "on", "permissions", "jobs"}:
+        return False
+    if doc.get("permissions") != {"contents": "read"}:
+        return False
+    on, jobs = doc.get("on"), doc.get("jobs")
+    if not isinstance(on, dict) or not isinstance(jobs, dict):
+        return False
+    if set(on) != ({"workflow_dispatch"} if caller else {"workflow_call"}):
+        return False
+    if set(jobs) != ({"owner_whatif"} if caller else {"whatif_admission", "owner_whatif"}):
+        return False
+    for name, job in jobs.items():
+        if not isinstance(job, dict) or job.get("if") != "${{ false }}":
+            return False
+        expected = {"contents": "read", "actions": "read"} if caller or name == "whatif_admission" else {"contents": "read"}
+        if job.get("permissions") != expected or "secrets" in job:
+            return False
+    if caller:
+        return jobs["owner_whatif"] == {
+            "if": "${{ false }}", "permissions": {"contents": "read", "actions": "read"},
+            "uses": SOLO_REF,
+        }
+    return (jobs["owner_whatif"].get("needs") == "whatif_admission"
+            and jobs["owner_whatif"].get("environment") == PREVIEW_ENV
+            and "environment" not in jobs["whatif_admission"]
+            and all("uses" not in job for job in jobs.values()))
+
+
 def reserved_preview_path(path):
     leaf = path.strip().replace("\\", "/").rsplit("/", 1)[-1].casefold()
     return leaf in {PREVIEW_ENV + ".yml", PREVIEW_ENV + ".yaml"}
@@ -464,7 +506,18 @@ def scan(root):
         except Exception as error:  # unanalyzable input is a denial, never a pass
             problems.append(name + ": audit failed closed (" + type(error).__name__ + ")")
     exact_callee = workflows.get(PREVIEW_CALLEE, (None, None))[1] == PREVIEW_CALLEE_BYTES
+    solo_doc, solo_digest = workflows.get(PREVIEW_CALLEE, (None, None))
+    solo_callee = (solo_digest == SOLO_CALLEE_BYTES
+                   and solo_disabled_structure(solo_doc, caller=False))
     for name, (doc, digest) in workflows.items():
+        if name == PREVIEW_CALLEE and solo_callee:
+            # Exact callee-only parking remains permitted; it is workflow_call
+            # only, unconditionally disabled, and grants no OIDC permission.
+            continue
+        if name == GUARDED_AZURE and solo_callee:
+            if digest == SOLO_CALLER_BYTES and solo_disabled_structure(doc, caller=True):
+                continue
+            problems.append(name + ": disabled solo callee requires its exact caller or no caller")
         exact_caller = name == GUARDED_AZURE and exact_callee and digest == PREVIEW_CALLER_BYTES
         if name == GUARDED_AZURE and exact_callee and not exact_caller:
             problems.append(name + ": staged preview callee requires the exact reviewed caller or no caller")
