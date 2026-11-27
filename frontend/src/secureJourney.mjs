@@ -135,7 +135,11 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch, r
       return result
     },
     async status(projectId, jobId, signal) {
-      return validateJob(await request(path(projectId, jobId), { signal }))
+      const job = validateJob(await request(path(projectId, jobId), { signal }))
+      if (job.job_id !== validateProjectId(jobId)) {
+        throw new VideoApiError(502, 'Job response does not match the requested job.')
+      }
+      return job
     },
     async metadata(projectId, jobId, signal) {
       const data = await request(path(projectId, jobId) + '/video/metadata', { signal })

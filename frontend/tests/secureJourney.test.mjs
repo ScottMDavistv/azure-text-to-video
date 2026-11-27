@@ -262,3 +262,16 @@ test('request deadline cannot be disabled or made unbounded', () => {
     assert.throws(() => createVideoApi({ tokenProvider: async () => 'synthetic', requestTimeoutMs }))
   }
 })
+
+
+test('status cannot switch the session to a different otherwise valid job', async () => {
+  const api = createVideoApi({ tokenProvider: async () => 'synthetic',
+    fetcher: createFetch([{ json: { ...sample, job_id: PROJECT, status: 'completed' } }], []) })
+  await assert.rejects(api.status(PROJECT, JOB), { status: 502 })
+})
+
+test('canonical requested job identity is retained by status', async () => {
+  const api = createVideoApi({ tokenProvider: async () => 'synthetic',
+    fetcher: createFetch([{ json: sample }], []) })
+  assert.equal((await api.status(PROJECT, JOB.toUpperCase())).job_id, JOB)
+})
