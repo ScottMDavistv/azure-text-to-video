@@ -87,6 +87,22 @@ async function run() {
   assert(document.body.textContent.includes('No authorized job in this session.'), 'Job remained after logout')
   assert(window.__raceRequests.every(r => r.auth?.startsWith('Bearer offline-mocked-')),
     'Unexpected API credential or missing bearer token')
-  result('Account A->B late submit, project switch, B->C MP4 URL revocation, C logout in-flight', true)
+  // Three failed reads pause automatic work, retaining the job. Resuming only reads.
+  window.__raceMode = 'poll-failure'
+  click('Sign in with Microsoft')
+  await until(() => document.querySelector('#secure-video-prompt') && document.body.textContent.includes('Signed in:'), 'new fixture session')
+  changeText('#secure-video-prompt', 'offline bounded polling test')
+  click('Submit authenticated job')
+  await until(() => document.body.textContent.includes('Automatic status checks paused'), 'bounded poll failure', 10000)
+  const pausedRequests = window.__raceRequests.length
+  const mutations = window.__raceRequests.filter(r => r.method === 'POST').length
+  await sleep(3200)
+  assert(window.__raceRequests.length === pausedRequests, 'Polling continued after pause')
+  assert(document.body.textContent.includes('Status: created'), 'Failed observation invented job failure')
+  window.__raceMode = 'immediate'
+  click('Resume status checks')
+  await until(() => document.body.textContent.includes('Status: completed'), 'explicit status resume')
+  assert(window.__raceRequests.filter(r => r.method === 'POST').length === mutations, 'Status resume retried a mutation')
+  result('Bounded polling/resume; Account A->B late submit, project switch, B->C MP4 URL revocation, C logout in-flight', true)
 }
 run().catch(error => result(error?.stack || String(error), false))

@@ -3,6 +3,8 @@ import { acquireApiToken, getSignedInAccount } from './entraAuth'
 import { SCENES, TOTAL_SECONDS, validatePrompt } from './mockJourney.mjs'
 import { createVideoApi, validateProjectId, type VideoJob } from './secureJourney.mjs'
 
+import { shouldPauseStatusPolling } from './statusPolling.mjs'
+
 const apiOrigin = import.meta.env.VITE_VIDEO_API_ORIGIN?.trim() || ''
 const initialProject = import.meta.env.VITE_VIDEO_PROJECT_ID?.trim() || ''
 const pollInterval = 3000
@@ -23,6 +25,8 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
   const [selectedScene, setSelectedScene] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [pollEpoch, setPollEpoch] = useState(0)
+  const [pollPaused, setPollPaused] = useState(false)
   const [pollError, setPollError] = useState<string | null>(null)
   const [queueError, setQueueError] = useState<string | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
@@ -80,7 +84,16 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
     const abort = new AbortController()
     const current = () => !abort.signal.aborted && generation.current === version
     let timer: number
+    const started = Date.now()
+    let consecutiveErrors = 0
+    setPollPaused(false)
+    const pause = () => {
+      terminalPoll.current = sessionKey
+      setPollPaused(true)
+      setPollError('Automatic status checks paused. The job may still be running. Resume checks when ready; do not submit a replacement job.')
+    }
     const poll = async () => {
+      if (shouldPauseStatusPolling(Date.now() - started, consecutiveErrors)) { pause(); return }
       const deadline = new AbortController()
       const signal = AbortSignal.any([abort.signal, deadline.signal])
       const timeout = window.setTimeout(() => {
@@ -99,11 +112,13 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
           return (await getSignedInAccount())?.homeAccountId === accountIdentity ? result : null
         })()])
         if (!current() || !next) return
+        consecutiveErrors = 0
         setPollError(null)
         setJob(next)
         if (next.status === 'completed' || next.status === 'failed') return
       } catch (cause) {
         if (!current()) return
+        consecutiveErrors += 1
         setPollError(deadline.signal.aborted ?
           'The status check timed out. The studio will try again.' : displayError(cause))
         if (cause instanceof Error && 'status' in cause &&
@@ -115,11 +130,12 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
         window.clearTimeout(timeout)
         signal.removeEventListener('abort', onAbort)
       }
+      if (shouldPauseStatusPolling(Date.now() - started, consecutiveErrors)) { pause(); return }
       timer = window.setTimeout(poll, pollInterval)
     }
     timer = window.setTimeout(poll, 0)
     return () => { abort.abort(); window.clearTimeout(timer) }
-  }, [api, activeJobId, projectId, accountIdentity, busy])
+  }, [api, activeJobId, projectId, accountIdentity, busy, pollEpoch])
 
   async function queueJob(project: string, jobId: string, task: ReturnType<typeof begin>) {
     try {
@@ -214,6 +230,12 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
           <p role="status">Status: <strong>{job.status}</strong></p>
           <p className="muted">Status is polled from the backend. No percentage is inferred.</p>
           {pollError ? <p role="alert" className="field-error">{pollError}</p> : null}
+          {pollPaused && activeJobId ? <button className="secondary" type="button" disabled={busy} onClick={() => {
+            terminalPoll.current = null
+            setPollPaused(false)
+            setPollError(null)
+            setPollEpoch(value => value + 1)
+          }}>Resume status checks</button> : null}
           {canRetryQueue && queueError ? <p role="alert" className="field-error">{queueError}</p> : null}
           {canRetryQueue ? <button className="secondary" type="button" disabled={busy} onClick={queueAgain}>Retry synthetic queue</button> : null}
           {job.status === 'failed' ? <p role="alert">The job failed. Review server-side evidence before retrying.</p> : null}

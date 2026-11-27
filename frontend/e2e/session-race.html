@@ -11,7 +11,7 @@ const revoke = URL.revokeObjectURL.bind(URL);
 URL.revokeObjectURL = url => { window.__raceRevoked.push(url); return revoke(url); };
 window.__raceUuid = '14588b13-6c3b-4dd0-8e8b-0d22d3e26f2c';
 window.fetch = async (url, options) => {
-  window.__raceRequests.push({url: String(url), signal: options?.signal, auth: options?.headers?.Authorization});
+  window.__raceRequests.push({url: String(url), signal: options?.signal, method: options?.method, auth: options?.headers?.Authorization});
   if (options?.signal?.aborted) throw new DOMException('Aborted','AbortError');
   if (window.__raceMode === 'held') {
     return await new Promise((resolve, reject) => {
@@ -21,7 +21,8 @@ window.fetch = async (url, options) => {
     });
   }
   const path = String(url);
-  const job = {job_id: window.__raceUuid, prompt: 'offline browser test', status: 'completed', created_at: '2026-11-17T00:00:00Z'};
+  if (window.__raceMode === 'poll-failure' && options?.method === 'GET') return new Response('', {status:503});
+  const job = {job_id: window.__raceUuid, prompt: 'offline browser test', status: window.__raceMode === 'poll-failure' ? 'created' : 'completed', created_at: '2026-11-17T00:00:00Z'};
   const headers = {'Content-Type':'application/json'};
   if (path.endsWith('/video/metadata')) {
     return new Response(JSON.stringify({
