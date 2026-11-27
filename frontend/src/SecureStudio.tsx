@@ -75,7 +75,7 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl) }, [videoUrl])
   useEffect(() => () => { generation.current += 1; inFlight.current?.abort() }, [])
 
-  const activeJobId = job && job.status !== 'completed' && job.status !== 'failed' ? job.job_id : null
+  const activeJobId = job && job.status !== 'completed' && job.status !== 'failed' && job.status !== 'cancelled' ? job.job_id : null
   useEffect(() => {
     if (!accountIdentity || !activeJobId || busy) return
     const sessionKey = JSON.stringify([accountIdentity, projectId, activeJobId])
@@ -115,7 +115,7 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
         consecutiveErrors = 0
         setPollError(null)
         setJob(next)
-        if (next.status === 'completed' || next.status === 'failed') return
+        if (next.status === 'completed' || next.status === 'failed' || next.status === 'cancelled') return
       } catch (cause) {
         if (!current()) return
         consecutiveErrors += 1
@@ -238,6 +238,7 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
           }}>Resume status checks</button> : null}
           {canRetryQueue && queueError ? <p role="alert" className="field-error">{queueError}</p> : null}
           {canRetryQueue ? <button className="secondary" type="button" disabled={busy} onClick={queueAgain}>Retry synthetic queue</button> : null}
+          {job.status === 'cancelled' ? <p role="status">The job was cancelled. No video is available for this job.</p> : null}
           {job.status === 'failed' ? <p role="alert">The job failed. Review server-side evidence before retrying.</p> : null}
         </> : <div className="empty">No authorized job in this session.</div>}
         <div className="stats"><div className="stat"><span className="muted">Synthetic target</span><strong>05:00</strong></div><div className="stat"><span className="muted">Paid requests</span><strong>Disabled</strong></div></div>

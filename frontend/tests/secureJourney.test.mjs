@@ -301,3 +301,12 @@ for (const [name, parts] of [['oversized', ['abc', 'secret-overflow']], ['trunca
     if (name === 'oversized') assert.equal(cancelled, true)
   })
 }
+
+
+test('owner can observe a cancelled job returned by the authenticated status route', async () => {
+  const cancelled = { ...sample, status: 'cancelled' }
+  assert.equal(validateJob(cancelled).status, 'cancelled')
+  const api = createVideoApi({ tokenProvider: async () => 'synthetic',
+    fetcher: createFetch([{json: cancelled}], []) })
+  assert.equal((await api.status(PROJECT, JOB)).status, 'cancelled')
+})

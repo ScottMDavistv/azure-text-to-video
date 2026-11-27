@@ -1,7 +1,7 @@
 // Entra-backed video API client. No token persistence or service credentials.
 // Caller must acquire a fresh delegated token for each request.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const STATES = new Set(['created', 'queued', 'processing', 'completed', 'failed'])
+const STATES = new Set(['created', 'queued', 'processing', 'completed', 'failed', 'cancelled'])
 
 export class VideoApiError extends Error {
   constructor(status, message) {

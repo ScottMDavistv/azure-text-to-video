@@ -103,6 +103,15 @@ async function run() {
   click('Resume status checks')
   await until(() => document.body.textContent.includes('Status: completed'), 'explicit status resume')
   assert(window.__raceRequests.filter(r => r.method === 'POST').length === mutations, 'Status resume retried a mutation')
-  result('Bounded polling/resume; Account A->B late submit, project switch, B->C MP4 URL revocation, C logout in-flight', true)
+  window.__raceMode = 'cancelled'
+  click('Submit authenticated job')
+  await until(() => document.body.textContent.includes('Status: cancelled'), 'cancelled job visible')
+  assert(document.body.textContent.includes('No video is available for this job.'), 'Cancellation guidance absent')
+  assert(!document.querySelector('video'), 'Cancelled job retained preview')
+  assert(![...document.querySelectorAll('button')].some(b => /Retrieve private MP4|Retry synthetic queue/.test(b.textContent)), 'Cancelled job offered unavailable actions')
+  const cancellationRequests = window.__raceRequests.length
+  await sleep(3200)
+  assert(window.__raceRequests.length === cancellationRequests, 'Cancelled job continued polling')
+  result('Cancelled terminal state; bounded polling/resume; Account A->B late submit, project switch, B->C MP4 URL revocation, C logout in-flight', true)
 }
 run().catch(error => result(error?.stack || String(error), false))

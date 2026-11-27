@@ -22,7 +22,7 @@ window.fetch = async (url, options) => {
   }
   const path = String(url);
   if (window.__raceMode === 'poll-failure' && options?.method === 'GET') return new Response('', {status:503});
-  const job = {job_id: window.__raceUuid, prompt: 'offline browser test', status: window.__raceMode === 'poll-failure' ? 'created' : 'completed', created_at: '2026-11-17T00:00:00Z'};
+  const job = {job_id: window.__raceUuid, prompt: 'offline browser test', status: window.__raceMode === 'poll-failure' ? 'created' : window.__raceMode === 'cancelled' ? (options?.method === 'POST' ? 'created' : 'cancelled') : 'completed', created_at: '2026-11-17T00:00:00Z'};
   const headers = {'Content-Type':'application/json'};
   if (path.endsWith('/video/metadata')) {
     return new Response(JSON.stringify({

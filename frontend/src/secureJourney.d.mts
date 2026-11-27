@@ -1,5 +1,5 @@
 export class VideoApiError extends Error { status: number; constructor(status: number, message: string) }
-export type VideoJob = { job_id: string; prompt: string; status: 'created' | 'queued' | 'processing' | 'completed' | 'failed'; created_at: string }
+export type VideoJob = { job_id: string; prompt: string; status: 'created' | 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled'; created_at: string }
 export type VideoMetadata = { job_id: string; status: string; available: true; content_type: 'video/mp4'; size_bytes: number; download_endpoint: string }
 export function validateProjectId(value: string): string
 export function validateJob(data: unknown): VideoJob
