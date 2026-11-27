@@ -16,6 +16,7 @@ function createFetch(steps, calls) {
       headers: { get: name => name === 'content-type' ? (next.contentType ?? 'video/mp4') : name === 'content-length' ? (next.contentLength ?? (next.blob ? String(next.blob.size) : null)) : null },
       json: async () => next.json,
       blob: async () => next.blob,
+      body: next.blob?.stream(),
     }
   }
 }
@@ -228,7 +229,7 @@ for (const phase of ['token', 'fetch', 'json', 'blob']) {
         return { ok: true,
           json: phase === 'json' ? never : async () => metadata,
           headers: { get: name => name === 'content-type' ? 'video/mp4' : '3' },
-          blob: never }
+          blob: never, body: new ReadableStream({ pull: never }) }
       } })
     await assert.rejects(phase === 'blob' ? api.download(PROJECT, JOB) : api.submit(PROJECT, 'Test'),
       error => error instanceof VideoApiError && /outcome may be unknown/.test(error.message))
@@ -275,3 +276,28 @@ test('canonical requested job identity is retained by status', async () => {
     fetcher: createFetch([{ json: sample }], []) })
   assert.equal((await api.status(PROJECT, JOB.toUpperCase())).job_id, JOB)
 })
+
+
+for (const [name, parts] of [['oversized', ['abc', 'secret-overflow']], ['truncated', ['ab']]]) {
+  test(`stream rejects ${name} MP4 before constructing the result`, async () => {
+    let cancelled = false
+    let count = 0
+    const body = new ReadableStream({
+      pull(controller) {
+        if (count < parts.length) controller.enqueue(new TextEncoder().encode(parts[count++]))
+        else controller.close()
+      }, cancel() { cancelled = true },
+    }, { highWaterMark: 0 })
+    const metadata = { job_id: JOB, status: 'completed', available: true,
+      content_type: 'video/mp4', size_bytes: 3,
+      download_endpoint: `/projects/${PROJECT}/jobs/${JOB}/video` }
+    let requests = 0
+    const api = createVideoApi({ tokenProvider: async () => 'synthetic', fetcher: async () => {
+      if (++requests === 1) return { ok: true, json: async () => metadata }
+      return { ok: true, headers: new Headers({ 'Content-Type': 'video/mp4', 'Content-Length': '3' }), body }
+    } })
+    await assert.rejects(api.download(PROJECT, JOB), { status: 502 })
+    assert.equal(requests, 2)
+    if (name === 'oversized') assert.equal(cancelled, true)
+  })
+}

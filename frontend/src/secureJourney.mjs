@@ -81,11 +81,33 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch, r
       if (claimed === null || !/^[0-9]+$/.test(claimed) || Number(claimed) !== video) {
         throw new VideoApiError(502, 'Video response size conflicts with authorized metadata.')
       }
-      const blob = await response.blob()
-      if (!blob.size || blob.size > 100 * 1024 * 1024 || blob.size !== video) {
-        throw new VideoApiError(502, 'Video size is invalid.')
+      // Do not trust Content-Length to bound allocation: enforce the authorized
+      // byte limit while reading, before constructing the private Blob URL.
+      if (!response.body?.getReader) throw new VideoApiError(502, 'Video body is unavailable.')
+      const reader = response.body.getReader()
+      const chunks = []
+      let size = 0
+      const cancel = () => { void reader.cancel().catch(() => {}) }
+      signal.addEventListener('abort', cancel, { once: true })
+      try {
+        while (true) {
+          if (signal.aborted) throw signal.reason
+          const { done, value } = await reader.read()
+          if (done) break
+          size += value.byteLength
+          if (size > video) throw new VideoApiError(502, 'Video size is invalid.')
+          chunks.push(value)
+        }
+        if (signal.aborted) throw signal.reason
+        if (size !== video) throw new VideoApiError(502, 'Video size is invalid.')
+        return new Blob(chunks, { type: 'video/mp4' })
+      } catch (error) {
+        cancel()
+        throw error
+      } finally {
+        signal.removeEventListener('abort', cancel)
+        reader.releaseLock()
       }
-      return blob
     }
     return response.json()
   }
