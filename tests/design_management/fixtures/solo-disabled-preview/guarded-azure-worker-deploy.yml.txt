@@ -1,0 +1,29 @@
+name: Solo operator worker preview — HARD DISABLED
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        options: [whatif]
+        required: true
+      confirmation:
+        type: string
+        required: true
+      approved_sha:
+        type: string
+        required: true
+      approved_preview_target:
+        type: string
+        required: true
+      approved_preview_digest:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  owner_whatif:
+    if: ${{ false }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ScottMDavistv/azure-text-to-video/.github/workflows/dev-worker-whatif-preview.yml@5858b0c22c43b423a916b8b6270a9089015598e6

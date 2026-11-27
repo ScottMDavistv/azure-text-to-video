@@ -51,11 +51,14 @@ jobs:
       - name: Run isolation regression tests with the real parser (no skips allowed)
         run: |
           set -o pipefail
-          python -m unittest -v tests/design_management/test_ci_isolation.py 2>&1 | tee isolation-tests.log
+          python -m unittest -v tests/design_management/test_ci_isolation.py tests/design_management/test_legacy_whatif_parking.py tests/design_management/test_solo_preview_dispatch.py tests.design_management.test_solo_scanner_prerequisite 2>&1 | tee isolation-tests.log
           if grep -q "skipped" isolation-tests.log; then echo "::error::isolation tests skipped"; exit 1; fi
 
       - name: Check paid rendering invariant and obvious secrets
         run: python scripts/security_invariants.py
+
+      - name: Static Azure deployment governance gate (no cloud calls)
+        run: python scripts/check_azure_deployment_governance.py
 
       - name: Install automated security scanners
         run: |

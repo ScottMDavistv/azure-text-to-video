@@ -178,7 +178,10 @@ class IsolationTests(unittest.TestCase):
             "permissions": {"contents": "read", "id-token": "write"},
             "steps": [],
         }
-        self.assertEqual(checker.examine(checker.GUARDED_AZURE, standalone), [])
+        self.assertIn(
+            checker.GUARDED_AZURE + " job owner_whatif: dedicated preview environment is reserved",
+            checker.examine(checker.GUARDED_AZURE, standalone),
+        )
         self.assertTrue(self.evaluate(standalone), "the Azure exception must remain path-specific")
         for names in (("preview",), ("whatif",), ("preview", "whatif")):
             with self.subTest(legacy_guards=names):
@@ -191,6 +194,127 @@ class IsolationTests(unittest.TestCase):
                         checker.GUARDED_AZURE + " job " + name
                         + ": Azure privilege requires the exact manual job guard", errors
                     )
+
+    def test_preview_environment_reserved_in_any_non_callee_job(self):
+        doc = {
+            "on": {"workflow_dispatch": ""},
+            "permissions": {"contents": "read"},
+            "jobs": {"check": {"if": "github.ref == 'refs/heads/main'",
+                               "environment": "unrelated-dev"}},
+        }
+        self.assertEqual(self.evaluate(doc), [])
+        for environment in ("dev-worker-whatif-preview", "DEV-WORKER-WHATIF-PREVIEW",
+                            {"name": "dev-worker-whatif-preview"},
+                            {"name": "$" + "{{ inputs.env }}"}):
+            with self.subTest(environment=environment):
+                doc["jobs"]["check"]["environment"] = environment
+                self.assertTrue(any("dedicated preview environment is reserved" in x
+                                    for x in self.evaluate(doc)))
+
+    def test_reserved_preview_call_is_path_and_ref_specific(self):
+        doc = {"on": {"workflow_dispatch": ""}, "permissions": {"contents": "read"},
+               "jobs": {"check": {"uses": "./.github/workflows/other.yml"}}}
+        self.assertEqual(self.evaluate(doc), [])
+        for uses in (
+            checker.PREVIEW_REF,
+            checker.PREVIEW_REF.replace("ScottMDavistv", "other-owner"),
+            checker.PREVIEW_REF.replace("azure-text-to-video", "other-repository"),
+            checker.PREVIEW_REF.replace(checker.PREVIEW_CALLEE_SHA, "main"),
+            checker.PREVIEW_REF.replace(checker.PREVIEW_CALLEE_SHA, "0" * 40),
+            checker.PREVIEW_REF.replace(".yml@", ".YAML@"),
+            "./" + checker.PREVIEW_CALLEE,
+            "./.github/workflows/$" + "{{ inputs.workflow }}",
+        ):
+            with self.subTest(uses=uses):
+                doc["jobs"]["check"]["uses"] = uses
+                self.assertTrue(any("exact reviewed preview call" in x for x in self.evaluate(doc)))
+
+    def test_byte_pinned_preview_pair_is_scoped_to_scan(self):
+        import hashlib
+        import json
+        import sys
+        import tempfile
+        from types import SimpleNamespace
+        from unittest import mock
+
+        # Exercise real path and raw-byte checks without requiring PyYAML in
+        # general CI. The offline workflow fixtures cover the real YAML loader.
+        callee = json.dumps({
+            "on": "workflow_call", "permissions": {"contents": "read"},
+            "jobs": {"stub": {"if": "false"}},
+        }).encode()
+        caller = json.dumps({
+            "on": "workflow_dispatch", "permissions": {"contents": "read"},
+            "jobs": {"owner_whatif": {
+                "permissions": {"contents": "read", "id-token": "write"},
+                "uses": checker.PREVIEW_REF,
+            }},
+        }).encode()
+        with (
+            tempfile.TemporaryDirectory() as t,
+            mock.patch.dict(sys.modules, {"yaml": SimpleNamespace(YAMLError=ValueError)}),
+            mock.patch.object(checker, "strict_load", side_effect=lambda _yaml, text: json.loads(text)),
+            mock.patch.multiple(
+                checker, PREVIEW_CALLEE_BYTES=hashlib.sha256(callee).hexdigest(),
+                PREVIEW_CALLER_BYTES=hashlib.sha256(caller).hexdigest(),
+            ),
+        ):
+            root = pathlib.Path(t)
+            staged, dispatch = root / checker.PREVIEW_CALLEE, root / checker.GUARDED_AZURE
+            staged.parent.mkdir(parents=True)
+            staged.write_bytes(callee)
+            self.assertEqual(checker.scan(root), [])
+            dispatch.write_bytes(caller)
+            self.assertEqual(checker.scan(root), [])
+            staged.unlink()
+            self.assertTrue(checker.scan(root), "pinned caller cannot precede the callee")
+            staged.write_bytes(callee + b" \n")
+            self.assertIn(
+                checker.PREVIEW_CALLEE + ": reserved preview callee must match reviewed bytes",
+                checker.scan(root),
+            )
+            staged.write_bytes(callee)
+            dispatch.write_bytes(caller + b" \n")
+            self.assertIn(
+                checker.GUARDED_AZURE + ": staged preview callee requires the exact reviewed caller or no caller",
+                checker.scan(root),
+            )
+            dispatch.unlink()
+            dispatch.with_name("other.yml").write_bytes(caller)
+            self.assertTrue(checker.scan(root), "caller bytes do not authorize a different path")
+
+    def test_reviewed_preview_yaml_pair_uses_production_pins(self):
+        import tempfile
+
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML unavailable")
+
+        fixtures = pathlib.Path(__file__).parent / "fixtures/c1-byte-pinned-preview"
+        callee = (fixtures / "dev-worker-whatif-preview.yml.txt").read_bytes()
+        caller = (fixtures / "guarded-azure-worker-deploy.yml.txt").read_bytes()
+        with tempfile.TemporaryDirectory() as t:
+            root = pathlib.Path(t)
+            staged, dispatch = root / checker.PREVIEW_CALLEE, root / checker.GUARDED_AZURE
+            staged.parent.mkdir(parents=True)
+            staged.write_bytes(callee)
+            self.assertEqual(checker.scan(root), [])
+            dispatch.write_bytes(caller)
+            self.assertEqual(checker.scan(root), [])
+
+            # Leave the YAML semantics unchanged: only the reviewed bytes drift.
+            staged.write_bytes(callee + b" \n")
+            self.assertIn(
+                checker.PREVIEW_CALLEE + ": reserved preview callee must match reviewed bytes",
+                checker.scan(root),
+            )
+            staged.write_bytes(callee)
+            dispatch.write_bytes(caller + b" \n")
+            self.assertIn(
+                checker.GUARDED_AZURE + ": staged preview callee requires the exact reviewed caller or no caller",
+                checker.scan(root),
+            )
 
     def test_guarded_azure_metadata_drift_fails_closed(self):
         changes = (
@@ -209,6 +333,53 @@ class IsolationTests(unittest.TestCase):
                 doc = self.guarded_azure_document()
                 change(doc)
                 self.assertTrue(checker.examine(checker.GUARDED_AZURE, doc))
+
+    def test_compound_operation_guard_not_part_of_generic_grammar(self):
+        guard = ("github.ref == 'refs/heads/main' && "
+                 "github.event_name == 'workflow_dispatch' && "
+                 "(inputs.operation == 'whatif' || inputs.operation == 'deploy')")
+        self.assertFalse(checker.main_only(guard))
+        self.assertFalse(checker.excludes_pr(guard))
+
+    def test_solo_preview_actual_caller_is_exact_and_disabled(self):
+        try:
+            import yaml
+        except ModuleNotFoundError as exc:
+            if exc.name != 'yaml': raise
+            self.skipTest('PyYAML absent; parser-dependent checks require it')
+        doc = checker.strict_load(yaml, (ROOT / checker.GUARDED_AZURE).read_text())
+        self.assertTrue(checker.examine(checker.GUARDED_AZURE, doc))  # no byte authority here
+        self.assertEqual(checker.scan(ROOT), [])
+        self.assertEqual(checker.events(doc), {"workflow_dispatch"})
+        self.assertEqual(set(doc["jobs"]), {"owner_whatif"})
+        self.assertEqual(doc["jobs"]["owner_whatif"]["if"], "${{ false }}")
+        self.assertEqual(doc["jobs"]["owner_whatif"]["uses"], checker.SOLO_REF)
+
+    def test_guarded_azure_permission_and_gate_regressions_denied(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("pinned PyYAML provided by policy gate")
+        path = checker.GUARDED_AZURE
+        original = self.guarded_azure_document()
+        mutations = (
+            ("workflow OIDC inheritance", lambda d: d["permissions"].update({"id-token": "write"})),
+            ("validate OIDC", lambda d: d["jobs"]["validate"].update(
+                permissions={"contents": "read", "id-token": "write"})),
+            ("daily login missing manual guard", lambda d: d["jobs"]["preview"].update(
+                {"if": "github.ref == 'refs/heads/main'"})),
+            ("incorrect environment", lambda d: d["jobs"]["preview"].update(
+                environment="another-preview")),
+            ("unexpected guard operand", lambda d: d["jobs"]["preview"].update(
+                {"if": d["jobs"]["preview"]["if"] + " && inputs.extra_review"})),
+            ("unrelated workflow event", lambda d: d["on"].update({"workflow_call": {}})),
+        )
+        for name, mutate in mutations:
+            with self.subTest(regression=name):
+                doc = copy.deepcopy(original)
+                mutate(doc)
+                self.assertTrue(checker.examine(path, doc))
+        self.assertTrue(checker.examine(".github/workflows/another.yml", original))
 
     def test_untrusted_feature_push_rejects_write_secrets_and_checkout_credentials(self):
         obj = copy.deepcopy(BASE)

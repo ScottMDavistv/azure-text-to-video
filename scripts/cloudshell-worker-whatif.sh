@@ -14,14 +14,21 @@ REPOSITORY="ScottMDavistv/azure-text-to-video"
 REGISTRY="acrtextvideo1794671698.azurecr.io"
 
 IMAGE="${1:-}"
+REVIEWED_TEMPLATE_COMMIT="${2:-}"
+VERIFIED_IMAGE="acrtextvideo1794671698.azurecr.io/textvideo-worker@sha256:219ebbe03d9b1356a4091912b4955c1987ba8a0131a4e084953ab3796b5f0646"
 
 if [[ -z "$IMAGE" ]]; then
     echo "Usage: $0 <immutable-worker-image-reference>"
     exit 2
 fi
 
-if [[ ! "$IMAGE" =~ ^acrtextvideo1794671698\.azurecr\.io/textvideo-worker:[0-9a-f]{40}$ ]]; then
-    echo "ERROR: Expected immutable worker image with full Git SHA"
+if [[ "$IMAGE" != "$VERIFIED_IMAGE" ]]; then
+    echo "ERROR: Worker image does not match the exact audited ACR manifest digest"
+    exit 2
+fi
+
+if [[ ! "$REVIEWED_TEMPLATE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "ERROR: Reviewed immutable Git commit SHA required as second argument"
     exit 2
 fi
 
@@ -49,19 +56,32 @@ TEMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
 gh api \
-    "repos/$REPOSITORY/contents/infra/worker-job.bicep" \
+    "repos/$REPOSITORY/contents/infra/worker-job.bicep?ref=$REVIEWED_TEMPLATE_COMMIT" \
     -H "Accept: application/vnd.github.raw+json" \
     > "$TEMP_DIR/worker-job.bicep"
 
 test -s "$TEMP_DIR/worker-job.bicep"
 
-echo "=== Checking Bicep syntax ==="
+# Fail closed if the supplied Git revision does not contain the reviewed
+# immutable-image allowlist and safe worker configuration. A 40-hex SHA alone
+# is not proof that an earlier template is safe to preview.
+grep -Fq "@allowed([" "$TEMP_DIR/worker-job.bicep"
+grep -Fq "'$VERIFIED_IMAGE'" "$TEMP_DIR/worker-job.bicep"
+grep -Fq "triggerType: 'Manual'" "$TEMP_DIR/worker-job.bicep"
+grep -Fq "workloadProfileName: 'Consumption'" "$TEMP_DIR/worker-job.bicep"
+grep -Fq "'--check'" "$TEMP_DIR/worker-job.bicep"
+grep -Fq "name: 'VIDEO_RENDER_PROVIDER'" "$TEMP_DIR/worker-job.bicep"
+grep -Fq "name: 'ENABLE_WORKER_CONSUMPTION'" "$TEMP_DIR/worker-job.bicep"
+grep -Fq "name: 'ENABLE_LIVE_VIDEO_RENDERING'" "$TEMP_DIR/worker-job.bicep"
+grep -Fq "secrets: []" "$TEMP_DIR/worker-job.bicep"
+
+echo "=== Checking reviewed immutable Bicep template syntax ==="
 
 az bicep build \
     --file "$TEMP_DIR/worker-job.bicep" \
     --outfile "$TEMP_DIR/worker-job.json"
 
-echo "=== Azure read-only deployment what-if ==="
+echo "=== Review-only Azure deployment what-if (digest syntax checked; verify ACR provenance separately) ==="
 
 az deployment group what-if \
     --resource-group "$RESOURCE_GROUP" \

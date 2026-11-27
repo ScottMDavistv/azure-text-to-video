@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fail-closed GitHub Actions privilege isolation audit; PR YAML is data."""
 import argparse
+import hashlib
 import pathlib
 import re
 
@@ -130,6 +131,71 @@ def main_only(expr):
 # compound guard forms. Match the complete expressions for their specific jobs;
 # do not extend the generic PR/callee guard grammar or accept arbitrary tails.
 GUARDED_AZURE = ".github/workflows/guarded-azure-worker-deploy.yml"
+
+# Two byte-pinned exceptions, interpreted only from the audited workflow tree.
+# The callee pin is the independently reviewed commit, not a mutable ref.
+# A new caller or callee body requires a new scanner review.
+PREVIEW_CALLEE = ".github/workflows/dev-worker-whatif-preview.yml"
+PREVIEW_CALLEE_SHA = "6eb006aad90d8797aefed013b64edad17c72a5f3"
+PREVIEW_CALLEE_BYTES = "6ec2ea16912b770e2026e977858b0b082d3e80428e092cabd20dfb3bac44ad09"
+PREVIEW_CALLER_BYTES = "f866d39fa37feb991b9e5e2f311157b07cde2e63de7c9d4f6af6bc7735eff6d8"
+PREVIEW_REF = f"ScottMDavistv/azure-text-to-video/{PREVIEW_CALLEE}@{PREVIEW_CALLEE_SHA}"
+PREVIEW_ENV = "dev-worker-whatif-preview"
+
+
+# Additional exact offline-reviewed HARD-DISABLED pair. Keep the historical
+# PREVIEW_* identity and acceptance path unchanged; pairs are never interchangeable.
+SOLO_CALLEE_SHA = "5858b0c22c43b423a916b8b6270a9089015598e6"
+SOLO_CALLEE_BYTES = "e168c406e7eb01ed79b33d02d0848fb49b83734637d3c293113896e952cc77d2"
+SOLO_CALLER_BYTES = "0f8f7492e8104b7e096ea701799e88be58798c8edb92a43fddd546b9707a7149"
+SOLO_REF = f"ScottMDavistv/azure-text-to-video/{PREVIEW_CALLEE}@{SOLO_CALLEE_SHA}"
+
+
+def solo_disabled_structure(doc, *, caller):
+    """Defense in depth AFTER strict parsing and exact bytes at reserved paths.
+
+    This is not a generic disabled-workflow exception. No document-only caller
+    can grant this authority, and old/new pairs must never be mixed.
+    """
+    if not isinstance(doc, dict) or set(doc) != {"name", "on", "permissions", "jobs"}:
+        return False
+    if doc.get("permissions") != {"contents": "read"}:
+        return False
+    on, jobs = doc.get("on"), doc.get("jobs")
+    if not isinstance(on, dict) or not isinstance(jobs, dict):
+        return False
+    if set(on) != ({"workflow_dispatch"} if caller else {"workflow_call"}):
+        return False
+    if set(jobs) != ({"owner_whatif"} if caller else {"whatif_admission", "owner_whatif"}):
+        return False
+    for name, job in jobs.items():
+        if not isinstance(job, dict) or job.get("if") != "${{ false }}":
+            return False
+        expected = {"contents": "read", "actions": "read"} if caller or name == "whatif_admission" else {"contents": "read"}
+        if job.get("permissions") != expected or "secrets" in job:
+            return False
+    if caller:
+        return jobs["owner_whatif"] == {
+            "if": "${{ false }}", "permissions": {"contents": "read", "actions": "read"},
+            "uses": SOLO_REF,
+        }
+    return (jobs["owner_whatif"].get("needs") == "whatif_admission"
+            and jobs["owner_whatif"].get("environment") == PREVIEW_ENV
+            and "environment" not in jobs["whatif_admission"]
+            and all("uses" not in job for job in jobs.values()))
+
+
+def reserved_preview_path(path):
+    leaf = path.strip().replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    return leaf in {PREVIEW_ENV + ".yml", PREVIEW_ENV + ".yaml"}
+
+
+def environment_name(job):
+    env = job.get("environment")
+    if isinstance(env, dict):
+        env = env.get("name")
+    return str(env or "").strip()
+
 _AZURE_MANUAL_MAIN = (
     "github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && "
 )
@@ -244,6 +310,10 @@ def expected_gate():
     }
 
 def examine(path, doc, raw=""):
+    return _examine(path, doc, raw)
+
+
+def _examine(path, doc, raw="", *, exact_callee=False, exact_caller=False):
     problems = []
     if not isinstance(doc, dict):
         return [path + ": invalid workflow"]
@@ -251,6 +321,12 @@ def examine(path, doc, raw=""):
     jobs = doc.get("jobs")
     if not triggers or not isinstance(jobs, dict) or not jobs:
         return [path + ": missing triggers or jobs"]
+    if reserved_preview_path(path):
+        if path == PREVIEW_CALLEE and exact_callee:
+            # Strict YAML loading and byte identity precede this exception.
+            # No generic reusable-workflow or permission grammar is broadened.
+            return []
+        problems.append(path + ": reserved preview callee must match reviewed bytes")
     has_owner_whatif = "owner_whatif" in jobs
     unsupported = triggers - SUPPORTED
     if unsupported:
@@ -291,7 +367,19 @@ def examine(path, doc, raw=""):
         local = job.get("permissions", perms)
         # Workflow-level env is inherited by every job; count it as effective privilege.
         secrets = privileged_secrets(job) | privileged_secrets(doc.get("env", {}))
+        pinned_preview_call = (
+            path == GUARDED_AZURE and exact_caller and key == "owner_whatif"
+            and job.get("uses") == PREVIEW_REF
+        )
+        env_name = environment_name(job)
+        if "${{" in env_name or env_name.casefold() == PREVIEW_ENV:
+            problems.append(where + ": dedicated preview environment is reserved")
         if "uses" in job:
+            call_ref = str(job["uses"]).strip()
+            if "${{" in call_ref or (
+                    reserved_preview_path(call_ref.split("@", 1)[0])
+                    and not pinned_preview_call):
+                problems.append(where + ": only the exact reviewed preview call is allowed")
             if job.get("secrets") == "inherit":
                 secrets.add("<inherited repository secrets>")
                 problems.append(where + ": secrets: inherit forbidden; pass named secrets only")
@@ -303,8 +391,8 @@ def examine(path, doc, raw=""):
         privileged = elevated(local) or bool(job.get("environment")) or bool(secrets)
         if secrets and not job.get("environment"):
             problems.append(where + ": custom secret requires a restricted environment")
-        azure_manual = path == GUARDED_AZURE and guarded_azure_job(
-            key, job, triggers, feature, has_owner_whatif)
+        azure_manual = pinned_preview_call or (path == GUARDED_AZURE and guarded_azure_job(
+            key, job, triggers, feature, has_owner_whatif))
         if path == GUARDED_AZURE and privileged and not azure_manual:
             problems.append(where + ": Azure privilege requires the exact manual job guard")
         if privileged and (untrusted or "workflow_dispatch" in triggers or
@@ -397,23 +485,49 @@ def scan(root):
     import yaml
     root = pathlib.Path(root)
     directory = root / ".github/workflows"
-    if directory.is_symlink() or not directory.is_dir():
+    if directory.parent.is_symlink() or directory.is_symlink() or not directory.is_dir():
         return ["No workflows found"]
     paths = sorted(p for p in directory.iterdir() if p.suffix.lower() in (".yml", ".yaml"))
     if not paths:
         return ["No workflows found"]
     problems = []
+    workflows = {}
     for path in paths:
         name = path.relative_to(root).as_posix()
         if path.is_symlink() or not path.is_file():
             problems.append(name + ": workflow must be a regular file")
             continue
         try:
-            data = strict_load(yaml, path.read_text(encoding="utf-8"))
-            problems.extend(examine(name, data))
+            data = path.read_bytes()
+            workflows[name] = (strict_load(yaml, data.decode("utf-8")),
+                               hashlib.sha256(data).hexdigest())
         except yaml.YAMLError:
             problems.append(name + ": invalid or unsupported YAML")
         except Exception as error:  # unanalyzable input is a denial, never a pass
+            problems.append(name + ": audit failed closed (" + type(error).__name__ + ")")
+    exact_callee = workflows.get(PREVIEW_CALLEE, (None, None))[1] == PREVIEW_CALLEE_BYTES
+    solo_doc, solo_digest = workflows.get(PREVIEW_CALLEE, (None, None))
+    solo_callee = (solo_digest == SOLO_CALLEE_BYTES
+                   and solo_disabled_structure(solo_doc, caller=False))
+    for name, (doc, digest) in workflows.items():
+        if name == PREVIEW_CALLEE and solo_callee:
+            # Exact callee-only parking remains permitted; it is workflow_call
+            # only, unconditionally disabled, and grants no OIDC permission.
+            continue
+        if name == GUARDED_AZURE and solo_callee:
+            if digest == SOLO_CALLER_BYTES and solo_disabled_structure(doc, caller=True):
+                continue
+            problems.append(name + ": disabled solo callee requires its exact caller or no caller")
+        exact_caller = name == GUARDED_AZURE and exact_callee and digest == PREVIEW_CALLER_BYTES
+        if name == GUARDED_AZURE and exact_callee and not exact_caller:
+            problems.append(name + ": staged preview callee requires the exact reviewed caller or no caller")
+        try:
+            problems.extend(_examine(
+                name, doc,
+                exact_callee=name == PREVIEW_CALLEE and exact_callee,
+                exact_caller=exact_caller,
+            ))
+        except Exception as error:
             problems.append(name + ": audit failed closed (" + type(error).__name__ + ")")
     return problems
 

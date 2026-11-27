@@ -1,5 +1,7 @@
 """No Azure access required: fail-closed manual what-if workflow regressions."""
 import importlib.util
+import contextlib
+import io
 import json
 import pathlib
 import subprocess
@@ -259,6 +261,186 @@ class WorkerWhatIfTests(unittest.TestCase):
                 self.assertEqual(report["diagnostic_stage"], "worker-resource-read")
                 self.assertIn("worker-resource-read", whatif.SUMMARY.read_text())
                 self.assertNotIn("stderr", whatif.SUMMARY.read_text().lower())
+
+    def test_only_structured_azure_arm_codes_are_classified(self):
+        expected = {
+            "ERROR: (AuthorizationFailed) Sensitive details": "rbac-denied",
+            "(LinkedAuthorizationFailed) scope hidden": "rbac-denied",
+            '{"error":{"code":"AuthorizationFailed","message":"secret"}}': "rbac-denied",
+            "ERROR: (InvalidTemplate) details": "template-validation",
+            "(InvalidTemplateDeployment) details": "template-validation",
+            '{"error":{"code":"InvalidDeploymentParameter","message":"secret"}}': "template-validation",
+            "(BicepError) compilation": "template-validation",
+            "ERROR: (SomeOtherError) AuthorizationFailed in details": "unknown",
+            "AuthorizationFailed in body of message": "unknown",
+            '{"message":"(AuthorizationFailed) narrative only"}': "unknown",
+            '{"error":{"message":"AuthorizationFailed"}}': "unknown",
+            '{"error":{"code":"AuthorizationFailedExploit"}}': "unknown",
+            "(AuthorizationFailedExtra) content": "unknown",
+            "": "unknown",
+        }
+        for stderr, category in expected.items():
+            with self.subTest(stderr=stderr[:50]):
+                self.assertEqual(whatif.classify_azure_failure(stderr), category)
+        self.assertEqual(whatif.classify_azure_failure(None), "unknown")
+        self.assertEqual(whatif.classify_azure_failure("X" * 65537), "unknown")
+
+    def test_conflicting_multiline_cli_codes_fail_closed(self):
+        samples = (
+            "ERROR: (AuthorizationFailed) first\nERROR: (InvalidTemplate) second",
+            "ERROR: (InvalidTemplate) first\n(AuthorizationFailed) second",
+            "(AuthorizationFailed) first\n(AuthorizationFailed) duplicate",
+            "ERROR: (AuthorizationFailed) first\n  ERROR: (LinkedAuthorizationFailed) second",
+            "ERROR: (AuthorizationFailed) first\n(UnknownFutureCode) second",
+        )
+        for stderr in samples:
+            with self.subTest(stderr=stderr):
+                self.assertEqual(whatif.classify_azure_failure(stderr), "unknown")
+                def runner(argv, **kwargs):
+                    return SimpleNamespace(returncode=1, stdout="PRIVATE-OUTPUT", stderr=stderr)
+                with self.assertRaises(whatif.Blocked) as failure:
+                    whatif.run_json(["az", "deployment", "group", "what-if"],
+                                    runner=runner, stage="arm-whatif-preview")
+                self.assertEqual(failure.exception.error_category, "unknown")
+                data = whatif.report(blocked=str(failure.exception),
+                                     stage=failure.exception.stage,
+                                     error_category=failure.exception.error_category)
+                self.assertEqual(data["arm_error_category"], "unknown")
+                self.assertNotIn("PRIVATE-OUTPUT", json.dumps(data))
+                self.assertNotIn("AuthorizationFailed", json.dumps(data))
+
+    def test_narrative_codes_and_malformed_envelopes_never_infer_rbac(self):
+        samples = (
+            "AuthorizationFailed mentioned in prose",
+            "ERROR: (InvalidTemplate) detail mentions AuthorizationFailed",
+            '{"error":{"code":"AuthorizationFailed"},"extra":"(InvalidTemplate)"} garbage',
+            '{"error":{"code":["AuthorizationFailed"]}}',
+            '{"outer":{"error":{"code":"AuthorizationFailed"}}}',
+        )
+        for stderr in samples:
+            self.assertNotEqual(whatif.classify_azure_failure(stderr), "rbac-denied")
+
+    def test_arm_preview_denial_reports_only_allowlisted_category(self):
+        secret = "RAW-IDENTITY-SCOPE-SECRET"
+        calls = []
+        def runner(argv, **kwargs):
+            index = len(calls)
+            calls.append(argv)
+            if index == 0:
+                return SimpleNamespace(returncode=0, stdout=json.dumps(
+                    {"id": whatif.SUBSCRIPTION}), stderr="")
+            if index == 1:
+                return SimpleNamespace(returncode=0, stdout=json.dumps(job()), stderr="")
+            return SimpleNamespace(returncode=1, stdout=secret,
+                                   stderr="ERROR: (AuthorizationFailed) " + secret)
+        with tempfile.TemporaryDirectory() as tmp:
+            source = pathlib.Path(tmp) / "worker-job.bicep"
+            source.write_text(SAFE_TEMPLATE)
+            with self.assertRaises(whatif.Blocked) as error:
+                whatif.execute(runner=runner, environment=ENV, template_path=source)
+        self.assertEqual(error.exception.stage, "arm-whatif-preview")
+        self.assertEqual(error.exception.error_category, "rbac-denied")
+        data = whatif.report(blocked=str(error.exception), stage=error.exception.stage,
+                             error_category=error.exception.error_category)
+        self.assertEqual(data["arm_error_category"], "rbac-denied")
+        self.assertEqual(data["state"], "blocked-unverified")
+        self.assertIsNone(data["finding"])
+        self.assertNotIn(secret, json.dumps(data))
+        self.assertFalse(data["deployment_performed"])
+        self.assertEqual(len(calls), 3)
+
+    def test_ambiguous_cli_failure_never_claims_iam_denial(self):
+        for stderr in ("failed with status 1", "AuthorizationFailed mentioned in message",
+                       "ERROR: (UnknownCode) (AuthorizationFailed)"):
+            def runner(argv, **kwargs):
+                return SimpleNamespace(returncode=1, stdout="TOKEN",
+                                       stderr=stderr)
+            with self.assertRaises(whatif.Blocked) as error:
+                whatif.run_json(["az", "deployment", "group", "what-if"],
+                                runner=runner, stage="arm-whatif-preview")
+            self.assertEqual(error.exception.error_category, "unknown")
+            self.assertNotIn(stderr, str(error.exception))
+
+    def test_timeout_or_missing_cli_classified_only_as_unavailable(self):
+        def missing(argv, **kwargs):
+            raise FileNotFoundError("AZURE-SECRET")
+        with self.assertRaises(whatif.Blocked) as error:
+            whatif.run_json(["az", "deployment", "group", "what-if"],
+                            runner=missing, stage="arm-whatif-preview")
+        self.assertEqual(error.exception.error_category, "cli-unavailable")
+        self.assertNotIn("AZURE-SECRET", str(error.exception))
+
+    def test_rbac_conclusion_cannot_be_published_for_non_arm_stage(self):
+        with self.assertRaises(ValueError):
+            whatif.report(blocked="blocked", stage="worker-resource-read",
+                          error_category="rbac-denied")
+        with self.assertRaises(ValueError):
+            whatif.report(blocked="blocked", stage="arm-whatif-preview",
+                          error_category="untrusted-raw-error")
+        self.assertEqual(whatif.report(blocked="blocked", stage="arm-whatif-preview",
+                                       error_category="unknown")["arm_error_category"],
+                         "unknown")
+
+    def test_main_end_to_end_sanitized_artifacts_with_offline_runner(self):
+        secret = "SYNTHETIC-PRIVATE-DIAGNOSTIC"
+        cases = [
+            ("cli-denial", 2, "ERROR: (AuthorizationFailed) " + secret, "rbac-denied"),
+            ("json-denial", 2, '{"error":{"code":"LinkedAuthorizationFailed","message":"' + secret + '"}}', "rbac-denied"),
+            ("template", 2, "(InvalidTemplate) " + secret, "template-validation"),
+            ("prose", 2, secret + " AuthorizationFailed", "unknown"),
+            ("conflicting", 2, "(AuthorizationFailed) first\n(InvalidTemplate) second", "unknown"),
+            ("malformed", 2, '{"error":', "unknown"),
+            ("oversized", 2, "x" * 65537, "unknown"),
+            ("timeout", 2, subprocess.TimeoutExpired("synthetic", 120, stderr=secret), "cli-unavailable"),
+            ("missing", 2, FileNotFoundError(secret), "cli-unavailable"),
+            ("account", 0, "(AuthorizationFailed) " + secret, "not-classified"),
+            ("resource", 1, "(AuthorizationFailed) " + secret, "not-classified"),
+            ("success", None, None, "not-classified"),
+            ("unsafe-diff", None, None, "not-classified"),
+        ]
+        real_execute = whatif.execute
+        for label, fail_index, failure, category in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                source = pathlib.Path(tmp) / "worker-job.bicep"
+                source.write_text(SAFE_TEMPLATE)
+                responses = [{"id": whatif.SUBSCRIPTION}, job(), preview()]
+                if label == "unsafe-diff":
+                    responses[2] = {"changes": [{"resourceId": whatif.JOB_ID, "changeType": "Delete"}]}
+                calls = []
+                def runner(argv, **kwargs):
+                    index = len(calls)
+                    calls.append(argv)
+                    if index == fail_index:
+                        if isinstance(failure, Exception):
+                            raise failure
+                        return SimpleNamespace(returncode=1, stdout=secret, stderr=failure)
+                    return SimpleNamespace(returncode=0, stdout=json.dumps(responses[index]), stderr="")
+                output = io.StringIO()
+                with patch.object(whatif, "execute", side_effect=lambda: real_execute(
+                        runner=runner, environment=ENV, template_path=source)), \
+                     patch.object(whatif, "EVIDENCE", pathlib.Path(tmp) / "data.json"), \
+                     patch.object(whatif, "SUMMARY", pathlib.Path(tmp) / "data.md"), \
+                     contextlib.redirect_stdout(output):
+                    status = whatif.main()
+                    raw = whatif.EVIDENCE.read_text()
+                    summary = whatif.SUMMARY.read_text()
+                data = json.loads(raw)
+                success = label == "success"
+                stage = ("image-only-diff-classification" if fail_index is None else
+                         ["account-inspection", "worker-resource-read", "arm-whatif-preview"][fail_index])
+                self.assertEqual(status, 0 if success else 2)
+                self.assertEqual(data["diagnostic_stage"], stage)
+                self.assertEqual(data["arm_error_category"], category)
+                self.assertEqual(data["state"], "image-only-preview" if success else "blocked-unverified")
+                self.assertEqual(bool(data["finding"]), success)
+                self.assertEqual(data["image_digest"], whatif.DIGEST)
+                for flag in ("deployment_performed", "iam_modified", "worker_started", "paid_provider_called"):
+                    self.assertFalse(data[flag])
+                for sensitive in (secret, "AuthorizationFailed", "LinkedAuthorizationFailed"):
+                    self.assertNotIn(sensitive, raw + summary + output.getvalue())
+                if not success:
+                    self.assertIn(category, summary)
+                self.assertEqual(len(calls), 3 if fail_index is None else fail_index + 1)
 
     def test_workflow_main_only_manual_no_write_actions(self):
         workflow = (ROOT / ".github/workflows/azure-worker-whatif.yml").read_text()
