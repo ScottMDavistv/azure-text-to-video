@@ -6,10 +6,10 @@ project membership, and remain disabled until explicit rollout approval.
 """
 import os
 from datetime import datetime, timezone
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from azure.core import MatchConditions
-from azure.core.exceptions import AzureError, ResourceNotFoundError
+from azure.core.exceptions import AzureError, ResourceNotFoundError, ResourceExistsError
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -24,6 +24,11 @@ router = APIRouter(prefix="/projects", tags=["project-video"])
 
 class PromptRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=2000)
+    operation_id: str | None = Field(default=None, pattern=(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))
+
+# Versioned, public namespace; not a secret or an authorization boundary.
+CREATE_OPERATION_NAMESPACE = UUID("495bc78b-d6ab-4805-a609-53b7cba53572")
 
 def journey_enabled():
     return (os.getenv("ENABLE_AUTHENTICATED_VIDEO_JOBS", "").lower() == "true"
@@ -87,15 +92,43 @@ def create_project_job(project_id: UUID, request: PromptRequest,
     try:
         table, actor = get_context(pid, authorization, Action.CREATE_JOB)
         now = datetime.now(timezone.utc).isoformat()
+        operation_id = request.operation_id
+        job_id = (uuid5(CREATE_OPERATION_NAMESPACE,
+                       f"{pid}:{actor.user_id}:{operation_id}")
+                  if operation_id is not None else uuid4())
         job = {
-            "PartitionKey": "video", "RowKey": str(uuid4()),
+            "PartitionKey": "video", "RowKey": str(job_id),
             "prompt": request.prompt.strip(), "status": "created",
             "createdAt": now, "projectId": pid, "createdBy": actor.user_id,
             "dispatchQueueType": "synthetic",
         }
         if not job["prompt"]:
             raise HTTPException(422, "Prompt cannot be blank")
-        table.create_entity(entity=job)
+        if operation_id is not None:
+            job["createOperationId"] = operation_id
+        try:
+            # Create-only, never upsert: concurrent attempts cannot replace a row.
+            table.create_entity(entity=job)
+        except ResourceExistsError:
+            if operation_id is None:
+                raise
+            # Recheck current membership before reading/returning the prior row.
+            try:
+                require_project_role(table, actor, pid, Action.CREATE_JOB)
+            except (AccessDenied, ValueError):
+                raise HTTPException(403, "Project access denied") from None
+            prior = table.get_entity(partition_key="video", row_key=str(job_id))
+            if any(prior.get(key) != job[key] for key in (
+                    "RowKey", "projectId", "createdBy", "createOperationId",
+                    "prompt", "dispatchQueueType")):
+                raise HTTPException(409, "Creation operation conflicts with stored job")
+            if (not isinstance(prior.get("status"), str)
+                    or prior.get("status") not in {
+                    "created", "queued", "processing", "completed", "failed", "cancelled"}
+                    or not isinstance(prior.get("createdAt"), str)
+                    or not prior["createdAt"]):
+                raise HTTPException(503, "Stored creation result unavailable")
+            return response_job(prior)
         return response_job(job)
     except AzureError:
         raise HTTPException(503, "Project job storage unavailable") from None
