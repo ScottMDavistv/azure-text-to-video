@@ -143,7 +143,7 @@ class IsolationTests(unittest.TestCase):
 
     def test_known_azure_manual_guards_are_path_specific(self):
         doc = self.guarded_azure_document()
-        self.assertEqual(checker.examine(checker.GUARDED_AZURE, doc), [])
+        self.assertTrue(checker.examine(checker.GUARDED_AZURE, doc))
         self.assertTrue(self.evaluate(doc))
         for name in ("preview", "whatif", "deploy"):
             condition = doc["jobs"][name]["if"]
@@ -153,7 +153,7 @@ class IsolationTests(unittest.TestCase):
 
     def test_guarded_azure_standalone_whatif_migration_isolation(self):
         legacy = self.guarded_azure_document()
-        self.assertEqual(checker.examine(checker.GUARDED_AZURE, legacy), [])
+        self.assertTrue(checker.examine(checker.GUARDED_AZURE, legacy))
 
         standalone = copy.deepcopy(legacy)
         jobs = standalone["jobs"]
@@ -341,28 +341,19 @@ class IsolationTests(unittest.TestCase):
         self.assertFalse(checker.main_only(guard))
         self.assertFalse(checker.excludes_pr(guard))
 
-    def test_guarded_azure_automatic_jobs_have_no_oidc_or_login(self):
+    def test_solo_preview_actual_caller_is_exact_and_disabled(self):
         try:
             import yaml
-        except ImportError:
-            self.skipTest("pinned PyYAML provided by policy gate")
-        path = checker.GUARDED_AZURE
-        doc = checker.strict_load(yaml, (ROOT / path).read_text())
-        self.assertEqual(checker.examine(path, doc), [])
-        self.assertEqual(doc["permissions"], {"contents": "read"})
-        self.assertTrue({"push", "schedule", "workflow_dispatch"} <= checker.events(doc))
-        self.assertNotIn("environment", doc["jobs"]["validate"])
-        self.assertNotIn("permissions", doc["jobs"]["validate"])
-        self.assertFalse(any(step.get("uses", "").startswith("azure/login@")
-                             for step in doc["jobs"]["validate"]["steps"]))
-        for name in ("preview", "whatif", "deploy"):
-            with self.subTest(job=name):
-                job = doc["jobs"][name]
-                self.assertEqual(job["permissions"], {"contents": "read", "id-token": "write"})
-                self.assertIn("github.event_name == 'workflow_dispatch'", job["if"])
-                self.assertIn("github.actor == 'ScottMDavistv'", job["if"])
-        self.assertIn("inputs.approved_sha == github.sha", doc["jobs"]["deploy"]["if"])
-        self.assertIn("inputs.confirmation == 'DEPLOY-DEV-WORKER'", doc["jobs"]["deploy"]["if"])
+        except ModuleNotFoundError as exc:
+            if exc.name != 'yaml': raise
+            self.skipTest('PyYAML absent; parser-dependent checks require it')
+        doc = checker.strict_load(yaml, (ROOT / checker.GUARDED_AZURE).read_text())
+        self.assertTrue(checker.examine(checker.GUARDED_AZURE, doc))  # no byte authority here
+        self.assertEqual(checker.scan(ROOT), [])
+        self.assertEqual(checker.events(doc), {"workflow_dispatch"})
+        self.assertEqual(set(doc["jobs"]), {"owner_whatif"})
+        self.assertEqual(doc["jobs"]["owner_whatif"]["if"], "${{ false }}")
+        self.assertEqual(doc["jobs"]["owner_whatif"]["uses"], checker.PREVIEW_REF)
 
     def test_guarded_azure_permission_and_gate_regressions_denied(self):
         try:
@@ -370,7 +361,7 @@ class IsolationTests(unittest.TestCase):
         except ImportError:
             self.skipTest("pinned PyYAML provided by policy gate")
         path = checker.GUARDED_AZURE
-        original = checker.strict_load(yaml, (ROOT / path).read_text())
+        original = self.guarded_azure_document()
         mutations = (
             ("workflow OIDC inheritance", lambda d: d["permissions"].update({"id-token": "write"})),
             ("validate OIDC", lambda d: d["jobs"]["validate"].update(

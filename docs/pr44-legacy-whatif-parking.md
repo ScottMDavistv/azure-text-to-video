@@ -1,3 +1,5 @@
+> Superseded in this offline candidate by [solo-operator-preview-offline.md](solo-operator-preview-offline.md). The guarded route is now preview-only and unconditionally disabled; the historical removal/deploy-chain description below records the prior parked baseline, not current workflow behavior. Broad foundation apply remains denied.
+
 # PR #44 legacy inline What-If parking
 
 The legacy standalone `whatif` dispatch route is parked: `whatif_admission`

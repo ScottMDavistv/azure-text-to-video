@@ -1,193 +1,29 @@
-name: Guarded Azure Dev Worker Deployment
+name: Solo operator worker preview — HARD DISABLED
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'infra/worker-job.bicep'
-      - 'infra/worker-job.intent.json'
-      - 'scripts/validate-worker-infrastructure.py'
-      - 'scripts/validate-fal-keyvault-iac.py'
-      - 'scripts/verify_azure_worker_safe.py'
-      - 'scripts/verify_worker_image_whatif.py'
-      - '.github/workflows/guarded-azure-worker-deploy.yml'
-  schedule:
-    - cron: '23 13 * * *'
   workflow_dispatch:
     inputs:
       operation:
-        description: Read-only preview or supervised worker deployment
         type: choice
-        options: [preview, whatif, deploy]
+        options: [whatif]
         required: true
       confirmation:
-        description: For What-If, type PREVIEW-DEV-WORKER; for deploy, type DEPLOY-DEV-WORKER
-        required: false
         type: string
+        required: true
       approved_sha:
-        description: For What-If or deploy, paste the full reviewed main commit SHA
-        required: false
         type: string
+        required: true
       approved_preview_target:
-        description: For What-If only, enter rg-textvideo-dev/job-textvideo-worker-dev
-        required: false
         type: string
+        required: true
       approved_preview_digest:
-        description: For What-If only, enter the full reviewed sha256 image digest
-        required: false
         type: string
+        required: true
 permissions:
   contents: read
-concurrency:
-  group: azure-dev-worker-deployment
-  cancel-in-progress: false
 jobs:
-  validate:
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Fail closed on unsafe intent
-        run: |
-          python scripts/validate-worker-infrastructure.py
-          python scripts/validate-fal-keyvault-iac.py
-          test "$OPERATION" = preview -o "$OPERATION" = whatif -o "$OPERATION" = deploy
-          if [ "$OPERATION" = whatif ] || [ "$OPERATION" = deploy ]; then
-            test "$TRIGGER_ACTOR" = ScottMDavistv
-          fi
-          if [ "$OPERATION" = deploy ]; then
-            test "$APPROVED_SHA" = "$GITHUB_SHA"
-            test "${#APPROVED_SHA}" -eq 40
-            test "$CONFIRMATION" = DEPLOY-DEV-WORKER
-            test "$DEPLOY_ENABLED" = true
-            test "$MAIN_PROTECTED" = true
-          fi
-        env:
-          TRIGGER_ACTOR: ${{ github.actor }}
-          APPROVED_SHA: ${{ inputs.approved_sha }}
-          OPERATION: ${{ github.event_name == 'workflow_dispatch' && inputs.operation || 'preview' }}
-          CONFIRMATION: ${{ inputs.confirmation }}
-          DEPLOY_ENABLED: ${{ vars.AZURE_DEV_DEPLOY_ENABLED }}
-          MAIN_PROTECTED: ${{ vars.PROTECTED_MAIN_VERIFIED }}
-  preview:
-    needs: validate
-    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && (inputs.operation == 'preview' || inputs.operation == 'deploy') && github.actor == 'ScottMDavistv'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      id-token: write
-    environment: dev-deployment
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: azure/login@v3
-        with:
-          client-id: ${{ vars.AZURE_PREVIEW_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      - name: Verify subscription and deployment safety
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(az account show --query id -o tsv)" = "41fbffdc-1793-44f9-b70f-220ea8a9bc6c"
-          az identity show -g rg-textvideo-dev -n id-textvideo-worker-dev --output none
-          python scripts/verify_azure_worker_safe.py
-      - name: Read-only worker inventory (no ARM deployment permissions)
-        shell: bash
-        run: |
-          set -euo pipefail
-          az containerapp job show -g rg-textvideo-dev -n job-textvideo-worker-dev \
-            --query '{name:name,trigger:properties.configuration.triggerType,profile:properties.workloadProfileName}' -o json
-  whatif:
-    needs: preview
-    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy' && github.actor == 'ScottMDavistv' && vars.PROTECTED_MAIN_VERIFIED == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      id-token: write
-    environment: dev-deployment-apply
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: azure/login@v3
-        with:
-          client-id: ${{ vars.AZURE_DEPLOY_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      - name: Supervised Bicep what-if
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(az account show --query id -o tsv)" = "41fbffdc-1793-44f9-b70f-220ea8a9bc6c"
-          python scripts/verify_azure_worker_safe.py
-          umask 077
-          preview_file="$(mktemp)"
-          trap 'rm -f "$preview_file"' EXIT
-          az deployment group what-if -g rg-textvideo-dev \
-            --template-file infra/worker-job.bicep \
-            --parameters workerImage="$WORKER_IMAGE" \
-            --result-format FullResourcePayloads --output json > "$preview_file"
-          python scripts/verify_worker_image_whatif.py "$preview_file"
-        env:
-          WORKER_IMAGE: acrtextvideo1794671698.azurecr.io/textvideo-worker@sha256:219ebbe03d9b1356a4091912b4955c1987ba8a0131a4e084953ab3796b5f0646
   owner_whatif:
-    needs: validate
-    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.operation == 'whatif' && github.actor == 'ScottMDavistv' && github.triggering_actor == 'ScottMDavistv' && github.run_attempt == '1' && vars.PROTECTED_MAIN_VERIFIED == 'true' && vars.AZURE_DEV_WHATIF_ENABLED == 'true'
+    if: ${{ false }}
     permissions:
       contents: read
       actions: read
-      id-token: write
-    uses: ScottMDavistv/azure-text-to-video/.github/workflows/dev-worker-whatif-preview.yml@6eb006aad90d8797aefed013b64edad17c72a5f3
-  deploy:
-    needs: whatif
-    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy' && github.actor == 'ScottMDavistv' && inputs.approved_sha == github.sha && inputs.confirmation == 'DEPLOY-DEV-WORKER' && vars.AZURE_DEV_DEPLOY_ENABLED == 'true' && vars.PROTECTED_MAIN_VERIFIED == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    permissions:
-      contents: read
-      id-token: write
-    environment: dev-deployment-apply
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: azure/login@v3
-        with:
-          client-id: ${{ vars.AZURE_DEPLOY_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      - name: Deploy allowlisted worker template
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(az account show --query id -o tsv)" = "41fbffdc-1793-44f9-b70f-220ea8a9bc6c"
-          python scripts/validate-worker-infrastructure.py
-          python scripts/validate-fal-keyvault-iac.py
-          python scripts/verify_azure_worker_safe.py
-          # Recheck the exact change immediately before apply; a prior job's
-          # exit code or manually approved summary is not proof of scope.
-          umask 077
-          preview_file="$(mktemp)"
-          trap 'rm -f "$preview_file"' EXIT
-          az deployment group what-if -g rg-textvideo-dev \
-            --template-file infra/worker-job.bicep \
-            --parameters workerImage="$WORKER_IMAGE" \
-            --result-format FullResourcePayloads --output json > "$preview_file"
-          python scripts/verify_worker_image_whatif.py "$preview_file"
-          az deployment group create -g rg-textvideo-dev \
-            --name "dev-worker-${{ github.run_id }}" \
-            --template-file infra/worker-job.bicep \
-            --parameters workerImage="$WORKER_IMAGE" \
-            --output none
-          python scripts/verify_azure_worker_safe.py
-        env:
-          WORKER_IMAGE: acrtextvideo1794671698.azurecr.io/textvideo-worker@sha256:219ebbe03d9b1356a4091912b4955c1987ba8a0131a4e084953ab3796b5f0646
+    uses: ScottMDavistv/azure-text-to-video/.github/workflows/dev-worker-whatif-preview.yml@5858b0c22c43b423a916b8b6270a9089015598e6

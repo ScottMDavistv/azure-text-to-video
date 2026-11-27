@@ -1,75 +1,57 @@
-"""Static regression checks for parking the legacy inline What-If route."""
+"""Parking remains unconditional; no deployment route in the new caller."""
 import importlib.util
 from pathlib import Path
 import unittest
-
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('parking_isolation', ROOT / 'scripts/check_ci_isolation.py')
 checker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checker)
 
-
 class LegacyWhatifParkingTests(unittest.TestCase):
-    def setUp(self):
-        self.path = ROOT / checker.GUARDED_AZURE
-        self.raw = self.path.read_text()
-
-    def load_document(self, raw):
+    def load(self, path):
         try:
             import yaml
         except ModuleNotFoundError as exc:
-            if exc.name != 'yaml':
-                raise
+            if exc.name != 'yaml': raise
             self.skipTest('PyYAML absent; parser-dependent parking checks require it')
-        return checker.strict_load(yaml, raw)
+        return checker.strict_load(yaml, (ROOT / path).read_text())
 
-    def test_legacy_route_text_and_reserved_files_are_absent(self):
-        for token in ('owner_whatif', 'whatif_admission', 'AZURE_WHATIF_CLIENT_ID',
-                      'AZURE_DEV_WHATIF_ENABLED', 'ProviderNoRbac', 'PREVIEW-DEV-WORKER'):
-            self.assertNotIn(token, self.raw)
-        for suffix in ('yml', 'yaml'):
-            self.assertFalse((ROOT / ('.github/workflows/dev-worker-whatif-preview.' + suffix)).exists())
+    def test_text_parking_and_no_apply(self):
+        for path in (checker.GUARDED_AZURE, checker.PREVIEW_CALLEE):
+            raw = (ROOT / path).read_text()
+            self.assertIn('if: ${{ false }}', raw)
+            for forbidden in ('az deployment group create', 'DEPLOY-DEV-WORKER', 'id-token: write'):
+                self.assertNotIn(forbidden, raw)
+        broad = (ROOT / '.github/workflows/deploy-infrastructure.yml').read_text()
+        self.assertIn('exit 1', broad)
+        self.assertNotIn('az deployment', broad)
 
-    def test_legacy_route_and_unused_dispatch_inputs_are_absent(self):
-        self.doc = self.load_document(self.raw)
-        self.assertEqual(set(self.doc['jobs']), {'validate', 'preview', 'whatif', 'deploy'})
-        inputs = self.doc['on']['workflow_dispatch']['inputs']
-        self.assertEqual(inputs['operation']['options'], ['preview', 'deploy'])
-        self.assertEqual(set(inputs), {'operation', 'confirmation', 'approved_sha'})
+    def test_all_preview_jobs_unconditionally_disabled(self):
+        for path in (checker.GUARDED_AZURE, checker.PREVIEW_CALLEE):
+            doc = self.load(path)
+            self.assertEqual(doc['permissions'], {'contents': 'read'})
+            for job in doc['jobs'].values():
+                self.assertEqual(job['if'], '${{ false }}')
+                self.assertNotIn('id-token', job.get('permissions', {}))
         self.assertEqual(checker.scan(ROOT), [])
 
-    def test_deployment_still_requires_complete_validation_chain(self):
-        self.doc = self.load_document(self.raw)
-        jobs = self.doc['jobs']
-        for name, predecessor in (('preview', 'validate'), ('whatif', 'preview'), ('deploy', 'whatif')):
-            self.assertEqual(jobs[name]['needs'], predecessor)
-            self.assertNotIn('always()', jobs[name]['if'])
-            self.assertIn("github.event_name == 'workflow_dispatch'", jobs[name]['if'])
-            self.assertIn("github.ref == 'refs/heads/main'", jobs[name]['if'])
-            self.assertIn("github.actor == 'ScottMDavistv'", jobs[name]['if'])
-        for name in ('whatif', 'deploy'):
-            self.assertIn("inputs.operation == 'deploy'", jobs[name]['if'])
-            self.assertEqual(jobs[name]['environment'], 'dev-deployment-apply')
-        for guard in ("inputs.approved_sha == github.sha", "inputs.confirmation == 'DEPLOY-DEV-WORKER'",
-                      "vars.AZURE_DEV_DEPLOY_ENABLED == 'true'", "vars.PROTECTED_MAIN_VERIFIED == 'true'"):
-            self.assertIn(guard, jobs['deploy']['if'])
-        run = jobs['validate']['steps'][-1]['run']
-        self.assertIn('test "$OPERATION" = preview -o "$OPERATION" = deploy', run)
-        self.assertNotIn('= whatif', run)
-        for check in ('test "$APPROVED_SHA" = "$GITHUB_SHA"', 'test "$CONFIRMATION" = DEPLOY-DEV-WORKER',
-                      'test "$DEPLOY_ENABLED" = true', 'test "$MAIN_PROTECTED" = true'):
-            self.assertIn(check, run)
+    def test_preview_only_inputs_and_same_run_environment(self):
+        caller = self.load(checker.GUARDED_AZURE)
+        self.assertEqual(set(caller['jobs']), {'owner_whatif'})
+        self.assertEqual(set(caller['on']), {'workflow_dispatch'})
+        inputs = caller['on']['workflow_dispatch']['inputs']
+        self.assertEqual(inputs['operation']['options'], ['whatif'])
+        self.assertEqual(set(inputs), {'operation','confirmation','approved_sha','approved_preview_target','approved_preview_digest'})
+        job = caller['jobs']['owner_whatif']
+        self.assertNotIn('with', job)
+        self.assertNotIn('secrets', job)
+        callee = self.load(checker.PREVIEW_CALLEE)
+        self.assertEqual(set(callee['on']), {'workflow_call'})
+        self.assertEqual(callee['jobs']['owner_whatif']['environment'], 'dev-worker-whatif-preview')
+        self.assertEqual(callee['jobs']['owner_whatif']['needs'], 'whatif_admission')
 
-    def test_removed_route_cannot_survive_in_another_workflow(self):
-        self.doc = self.load_document(self.raw)
-        for path in (ROOT / '.github/workflows').iterdir():
-            if path.suffix.lower() not in ('.yml', '.yaml'):
-                continue
-            doc = self.load_document(path.read_text())
-            for name, job in doc.get('jobs', {}).items():
-                with self.subTest(path=path.name, job=name):
-                    self.assertNotIn(name, ('owner_whatif', 'whatif_admission'))
-                    self.assertNotIn('dev-worker-whatif-preview', str(job))
-        self.assertEqual(self.doc['permissions'], {'contents': 'read'})
-        self.assertNotIn('permissions', self.doc['jobs']['validate'])
-        self.assertNotIn('environment', self.doc['jobs']['validate'])
+    def test_broad_apply_stays_denied(self):
+        broad = self.load('.github/workflows/deploy-infrastructure.yml')
+        self.assertEqual(set(broad['jobs']), {'disabled'})
+        self.assertNotIn('environment', broad['jobs']['disabled'])
+        self.assertTrue(any('exit 1' in step.get('run','') for step in broad['jobs']['disabled']['steps']))

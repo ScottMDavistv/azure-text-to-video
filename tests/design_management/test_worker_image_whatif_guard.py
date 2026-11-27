@@ -78,20 +78,20 @@ class ImageOnlyWhatifTests(unittest.TestCase):
             path.write_text("NOT JSON")
             self.assertEqual(guard.main([str(path)]), 2)
 
-    def test_deploy_workflow_requires_private_preview_in_both_jobs(self):
-        workflow = (ROOT / ".github/workflows/guarded-azure-worker-deploy.yml").read_text()
-        whatif = workflow.split("\n  whatif:", 1)[1].split("\n  deploy:", 1)[0]
-        deploy = workflow.split("\n  deploy:", 1)[1]
-        for block in (whatif, deploy):
-            self.assertIn("--result-format FullResourcePayloads --output json", block)
-            self.assertIn("python scripts/verify_worker_image_whatif.py", block)
-            self.assertIn("umask 077", block)
-            self.assertIn("trap 'rm -f \"$preview_file\"' EXIT", block)
-        self.assertLess(deploy.index("python scripts/verify_worker_image_whatif.py"),
-                        deploy.index("az deployment group create"))
-        self.assertIn("inputs.approved_sha == github.sha", deploy)
-        self.assertIn("vars.AZURE_DEV_DEPLOY_ENABLED == 'true'", deploy)
-        self.assertIn("environment: dev-deployment-apply", deploy)
+    def test_preview_only_route_keeps_private_image_guard_without_apply(self):
+        caller = (ROOT / ".github/workflows/guarded-azure-worker-deploy.yml").read_text()
+        callee = (ROOT / ".github/workflows/dev-worker-whatif-preview.yml").read_text()
+        for block in (caller, callee):
+            self.assertNotIn("az deployment group create", block)
+            self.assertNotIn("\n  deploy:", block)
+            self.assertIn("if: ${{ false }}", block)
+            self.assertNotIn("id-token: write", block)
+        self.assertIn("--result-format FullResourcePayloads --output json", callee)
+        self.assertIn("python scripts/verify_worker_image_whatif.py", callee)
+        self.assertIn("umask 077", callee)
+        self.assertIn("trap 'rm -f \"$preview_file\"' EXIT", callee)
+        self.assertIn("environment: dev-worker-whatif-preview", callee)
+        self.assertIn("--validation-level ProviderNoRbac", callee)
 
 
 if __name__ == "__main__":

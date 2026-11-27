@@ -136,9 +136,9 @@ GUARDED_AZURE = ".github/workflows/guarded-azure-worker-deploy.yml"
 # The callee pin is the independently reviewed commit, not a mutable ref.
 # A new caller or callee body requires a new scanner review.
 PREVIEW_CALLEE = ".github/workflows/dev-worker-whatif-preview.yml"
-PREVIEW_CALLEE_SHA = "6eb006aad90d8797aefed013b64edad17c72a5f3"
-PREVIEW_CALLEE_BYTES = "6ec2ea16912b770e2026e977858b0b082d3e80428e092cabd20dfb3bac44ad09"
-PREVIEW_CALLER_BYTES = "f866d39fa37feb991b9e5e2f311157b07cde2e63de7c9d4f6af6bc7735eff6d8"
+PREVIEW_CALLEE_SHA = "5858b0c22c43b423a916b8b6270a9089015598e6"
+PREVIEW_CALLEE_BYTES = "e168c406e7eb01ed79b33d02d0848fb49b83734637d3c293113896e952cc77d2"
+PREVIEW_CALLER_BYTES = "0f8f7492e8104b7e096ea701799e88be58798c8edb92a43fddd546b9707a7149"
 PREVIEW_REF = f"ScottMDavistv/azure-text-to-video/{PREVIEW_CALLEE}@{PREVIEW_CALLEE_SHA}"
 PREVIEW_ENV = "dev-worker-whatif-preview"
 
@@ -285,6 +285,8 @@ def _examine(path, doc, raw="", *, exact_callee=False, exact_caller=False):
             # No generic reusable-workflow or permission grammar is broadened.
             return []
         problems.append(path + ": reserved preview callee must match reviewed bytes")
+    if path == GUARDED_AZURE and not exact_caller:
+        problems.append(path + ": solo preview caller must match reviewed bytes")
     has_owner_whatif = "owner_whatif" in jobs
     unsupported = triggers - SUPPORTED
     if unsupported:
