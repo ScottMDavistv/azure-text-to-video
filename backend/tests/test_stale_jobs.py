@@ -166,3 +166,26 @@ def test_recent_job_cannot_be_recovered():
             )
 
     table.update_entity.assert_not_called()
+
+
+@pytest.mark.parametrize("confirmation", ["false", "true", 1, [], {}, None])
+def test_manual_recovery_requires_literal_confirmation_before_storage(confirmation):
+    with patch("stale_jobs.get_jobs_table_client") as storage:
+        with pytest.raises(PermissionError):
+            recover_stale_job(str(uuid4()), confirmed_worker_stopped=confirmation)
+    storage.assert_not_called()
+
+
+@pytest.mark.parametrize("threshold", [True, False, 1.5, float("nan"), float("inf"), 10081, "60"])
+def test_manual_recovery_rejects_unknown_threshold_before_storage(threshold):
+    with patch("stale_jobs.get_jobs_table_client") as storage:
+        with pytest.raises(ValueError):
+            recover_stale_job(str(uuid4()), confirmed_worker_stopped=True, stale_minutes=threshold)
+    storage.assert_not_called()
+
+
+def test_manual_recovery_rejects_noncanonical_identity_before_storage():
+    with patch("stale_jobs.get_jobs_table_client") as storage:
+        with pytest.raises(ValueError):
+            recover_stale_job("not-a-job", confirmed_worker_stopped=True)
+    storage.assert_not_called()
