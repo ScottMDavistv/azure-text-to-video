@@ -32,6 +32,7 @@ class Blocked(Exception):
     def __init__(self, message, *, stage='preflight'):
         super().__init__(message)
         self.stage = stage
+        self.error_category = 'not-classified'
 
 SAFE_STAGES = frozenset({
     'preflight', 'template-validation', 'account-inspection',
@@ -39,6 +40,60 @@ SAFE_STAGES = frozenset({
     'arm-whatif-preview', 'image-only-diff-classification',
 })
 
+
+
+# Classify Azure's *structured error code*, not arbitrary message text.
+# No part of stderr/stdout is included in reports. Unrecognized or conflicting
+# codes are always 'unknown'; in particular do not infer IAM from a generic
+# nonzero exit code or from a code merely mentioned in prose.
+AZURE_ERROR_CODES = {
+    'AuthorizationFailed': 'rbac-denied',
+    'LinkedAuthorizationFailed': 'rbac-denied',
+    'InvalidTemplate': 'template-validation',
+    'InvalidTemplateDeployment': 'template-validation',
+    'InvalidDeploymentParameter': 'template-validation',
+    'BicepError': 'template-validation',
+}
+SAFE_ERROR_CATEGORIES = frozenset({
+    'not-classified', 'rbac-denied', 'template-validation',
+    'cli-unavailable', 'unknown',
+})
+# Recognize the Azure CLI's leading error token, or a JSON top-level error.code
+# envelope only. Never search narrative message strings or nested arbitrary JSON.
+AZURE_CLI_CODE = re.compile(r'^\s*(?:ERROR:\s*)?\(([A-Za-z][A-Za-z0-9]*)\)', re.ASCII)
+
+
+def classify_azure_failure(stderr):
+    if not isinstance(stderr, str) or len(stderr) > 65536:
+        return 'unknown'
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return 'unknown'
+    match = AZURE_CLI_CODE.match(lines[0])
+    if match:
+        # A second leading CLI error token is ambiguous even if it repeats the
+        # first code. Only inspect line prefixes, never narrative substrings.
+        if any(AZURE_CLI_CODE.match(line) for line in lines[1:]):
+            return 'unknown'
+        return AZURE_ERROR_CODES.get(match.group(1), 'unknown')
+    try:
+        payload = json.loads(stderr)
+    except (TypeError, ValueError):
+        return 'unknown'
+    if not isinstance(payload, dict) or not isinstance(payload.get('error'), dict):
+        return 'unknown'
+    code = payload['error'].get('code')
+    if not isinstance(code, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9]*', code):
+        return 'unknown'
+    return AZURE_ERROR_CODES.get(code, 'unknown')
+
+
+def blocked_at(message, *, stage, category='not-classified'):
+    if category not in SAFE_ERROR_CATEGORIES:
+        category = 'unknown'
+    error = Blocked(message, stage=stage)
+    error.error_category = category
+    return error
 
 def preflight_env(env):
     if (env.get("GITHUB_REF") != "refs/heads/main"
@@ -75,14 +130,17 @@ def validate_template(source):
 def run_json(argv, *, runner=subprocess.run, timeout=90, stage='preflight'):
     if stage not in SAFE_STAGES:
         raise Blocked('Unknown diagnostic stage')
-    """No shell and no raw Azure output on failure."""
+    # No shell and no raw Azure output on failure.
     try:
         result = runner(argv, capture_output=True, text=True,
                         check=False, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
-        raise Blocked("Azure CLI read or preview unavailable", stage=stage) from None
+        raise blocked_at("Azure CLI read or preview unavailable", stage=stage,
+                         category="cli-unavailable") from None
     if result.returncode != 0:
-        raise Blocked("Azure operation unavailable or not permitted by current identity", stage=stage)
+        category = classify_azure_failure(getattr(result, "stderr", None))
+        raise blocked_at("Azure operation unavailable or not permitted by current identity",
+                         stage=stage, category=category) from None
     try:
         value = json.loads(result.stdout)
     except (ValueError, TypeError):
@@ -187,9 +245,13 @@ def execute(*, runner=subprocess.run, environment=os.environ, template_path=BICE
         raise Blocked(str(exc), stage='image-only-diff-classification') from None
 
 
-def report(result=None, blocked=None, stage=None):
+def report(result=None, blocked=None, stage=None, error_category="not-classified"):
     if stage is not None and stage not in SAFE_STAGES:
         raise ValueError('Unexpected diagnostic stage')
+    if error_category not in SAFE_ERROR_CATEGORIES:
+        raise ValueError('Unexpected error category')
+    if error_category == "rbac-denied" and stage != "arm-whatif-preview":
+        raise ValueError("RBAC category is allowed only for the exact ARM preview")
     return {
         "schema_version": 1, "operation": "Azure ARM group what-if only",
         "subscription_scope": "approved development subscription",
@@ -202,6 +264,7 @@ def report(result=None, blocked=None, stage=None):
         "finding": result if result else None,
         "blocker": blocked if not result else None,
         "diagnostic_stage": "image-only-diff-classification" if result else (stage or "preflight"),
+        "arm_error_category": (error_category if not result else "not-classified"),
         "authorization": "what-if only; separate merge and deploy approvals required",
     }
 
@@ -218,6 +281,7 @@ def write_report(data):
         lines += ["**Permitted image-only delta was verified.**"]
     else:
         lines += ["**Blocked stage:** `" + data["diagnostic_stage"] + "`",
+                  "**Allowlisted ARM error category:** `" + data["arm_error_category"] + "`",
                   "**Blocked:** " + (data["blocker"] or "unverified")]
     lines += ["", "This report is NOT deployment or merge authorization."]
     SUMMARY.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -232,7 +296,10 @@ def main():
         # CLI stderr, ARM preview JSON, environment values or tokens.
         reason = str(exc) if isinstance(exc, Blocked) else "preflight or Azure operation failed"
         stage = exc.stage if isinstance(exc, Blocked) else 'preflight'
-        data = report(blocked=reason, stage=stage)
+        category = exc.error_category if isinstance(exc, Blocked) else "unknown"
+        if stage != "arm-whatif-preview":
+            category = "not-classified"
+        data = report(blocked=reason, stage=stage, error_category=category)
     write_report(data)
     print("Azure isolated what-if:", data["state"])
     return 0 if data["finding"] else 2

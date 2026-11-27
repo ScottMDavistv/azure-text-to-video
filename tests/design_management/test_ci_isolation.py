@@ -334,6 +334,53 @@ class IsolationTests(unittest.TestCase):
                 change(doc)
                 self.assertTrue(checker.examine(checker.GUARDED_AZURE, doc))
 
+    def test_compound_operation_guard_not_part_of_generic_grammar(self):
+        guard = ("github.ref == 'refs/heads/main' && "
+                 "github.event_name == 'workflow_dispatch' && "
+                 "(inputs.operation == 'whatif' || inputs.operation == 'deploy')")
+        self.assertFalse(checker.main_only(guard))
+        self.assertFalse(checker.excludes_pr(guard))
+
+    def test_solo_preview_actual_caller_is_exact_and_disabled(self):
+        try:
+            import yaml
+        except ModuleNotFoundError as exc:
+            if exc.name != 'yaml': raise
+            self.skipTest('PyYAML absent; parser-dependent checks require it')
+        doc = checker.strict_load(yaml, (ROOT / checker.GUARDED_AZURE).read_text())
+        self.assertTrue(checker.examine(checker.GUARDED_AZURE, doc))  # no byte authority here
+        self.assertEqual(checker.scan(ROOT), [])
+        self.assertEqual(checker.events(doc), {"workflow_dispatch"})
+        self.assertEqual(set(doc["jobs"]), {"owner_whatif"})
+        self.assertEqual(doc["jobs"]["owner_whatif"]["if"], "${{ false }}")
+        self.assertEqual(doc["jobs"]["owner_whatif"]["uses"], checker.SOLO_REF)
+
+    def test_guarded_azure_permission_and_gate_regressions_denied(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("pinned PyYAML provided by policy gate")
+        path = checker.GUARDED_AZURE
+        original = self.guarded_azure_document()
+        mutations = (
+            ("workflow OIDC inheritance", lambda d: d["permissions"].update({"id-token": "write"})),
+            ("validate OIDC", lambda d: d["jobs"]["validate"].update(
+                permissions={"contents": "read", "id-token": "write"})),
+            ("daily login missing manual guard", lambda d: d["jobs"]["preview"].update(
+                {"if": "github.ref == 'refs/heads/main'"})),
+            ("incorrect environment", lambda d: d["jobs"]["preview"].update(
+                environment="another-preview")),
+            ("unexpected guard operand", lambda d: d["jobs"]["preview"].update(
+                {"if": d["jobs"]["preview"]["if"] + " && inputs.extra_review"})),
+            ("unrelated workflow event", lambda d: d["on"].update({"workflow_call": {}})),
+        )
+        for name, mutate in mutations:
+            with self.subTest(regression=name):
+                doc = copy.deepcopy(original)
+                mutate(doc)
+                self.assertTrue(checker.examine(path, doc))
+        self.assertTrue(checker.examine(".github/workflows/another.yml", original))
+
     def test_untrusted_feature_push_rejects_write_secrets_and_checkout_credentials(self):
         obj = copy.deepcopy(BASE)
         obj["on"] = {"push": {"branches": ["feature/**"]}}
