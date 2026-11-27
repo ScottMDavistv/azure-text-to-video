@@ -232,7 +232,7 @@ for (const phase of ['token', 'fetch', 'json', 'blob']) {
           blob: never, body: new ReadableStream({ pull: never }) }
       } })
     await assert.rejects(phase === 'blob' ? api.download(PROJECT, JOB) : api.submit(PROJECT, 'Test'),
-      error => error instanceof VideoApiError && /outcome may be unknown/.test(error.message))
+      error => error instanceof VideoApiError && /outcome (?:may be )?unknown/i.test(error.message))
     assert.equal(calls, phase === 'token' ? 0 : phase === 'blob' ? 2 : 1)
     if (signal) assert.equal(signal.aborted, true)
   })
@@ -309,4 +309,34 @@ test('owner can observe a cancelled job returned by the authenticated status rou
   const api = createVideoApi({ tokenProvider: async () => 'synthetic',
     fetcher: createFetch([{json: cancelled}], []) })
   assert.equal((await api.status(PROJECT, JOB)).status, 'cancelled')
+})
+
+
+test('committed creation with lost response is marked uncertain and never retried', async () => {
+  let committed = 0
+  const api = createVideoApi({ requestTimeoutMs: 10, tokenProvider: async () => 'synthetic',
+    fetcher: async () => { committed++; return new Promise(() => {}) } })
+  await assert.rejects(api.submit(PROJECT, 'Test'), error =>
+    error.outcomeUnknown === true && /authorized operator/.test(error.message))
+  assert.equal(committed, 1)
+})
+
+test('malformed create response and unavailable server preserve uncertainty without private details', async () => {
+  for (const response of [{ok:true,json:async()=>({})}, {ok:false,status:503}]) {
+    const api = createVideoApi({ tokenProvider: async () => 'synthetic', fetcher: async () => response })
+    await assert.rejects(api.submit(PROJECT, 'Test'), error => error.outcomeUnknown === true)
+  }
+  const api = createVideoApi({ tokenProvider: async () => 'synthetic',
+    fetcher: async () => { throw new Error('private diagnostic sentinel') } })
+  await assert.rejects(api.submit(PROJECT, 'Test'), error =>
+    error.outcomeUnknown === true && !error.message.includes('sentinel'))
+})
+
+test('pre-dispatch timeout and explicit refusal do not mark a committed outcome', async () => {
+  const before = createVideoApi({ requestTimeoutMs:10, tokenProvider: () => new Promise(() => {}) })
+  await assert.rejects(before.submit(PROJECT, 'Test'), error => error.outcomeUnknown !== true)
+  for (const status of [400,401,403,404,413,422]) {
+    const api = createVideoApi({ tokenProvider:async ()=>'synthetic', fetcher:async()=>({ok:false,status}) })
+    await assert.rejects(api.submit(PROJECT, 'Test'), error => error.status === status && error.outcomeUnknown !== true)
+  }
 })

@@ -62,6 +62,8 @@ async function run() {
   await until(() => document.querySelector('#project-id')?.value.startsWith('b7c6'), 'project changed')
   assert(document.body.textContent.includes('No authorized job in this session.'), 'Previous project job leaked')
   changeText('#project-id', 'c7e6a845-cb0c-468c-9a18-1e9df0b20545')
+  await until(() => document.body.textContent.includes('Creation is paused for this project'), 'aborted dispatched create remains uncertain')
+  changeText('#project-id', 'b7c6a845-cb0c-468c-9a18-1e9df0b20545')
 
   window.__raceMode = 'immediate'
   changeText('#secure-video-prompt', 'offline browser test')
@@ -112,6 +114,19 @@ async function run() {
   const cancellationRequests = window.__raceRequests.length
   await sleep(3200)
   assert(window.__raceRequests.length === cancellationRequests, 'Cancelled job continued polling')
-  result('Cancelled terminal state; bounded polling/resume; Account A->B late submit, project switch, B->C MP4 URL revocation, C logout in-flight', true)
+  window.__raceMode = 'create-uncertain'
+  click('Submit authenticated job')
+  await until(() => document.body.textContent.includes('Creation is paused for this project'), 'unknown create hold')
+  assert(document.body.textContent.includes('Status: cancelled'), 'Last confirmed job reference was lost')
+  assert(document.body.textContent.includes('not the uncertain creation request'), 'Old job misidentified as uncertain request')
+  const unknownRequests = window.__raceRequests.length
+  document.querySelector('form').dispatchEvent(new Event('submit', { bubbles:true, cancelable:true }))
+  await sleep(100)
+  assert(window.__raceRequests.length === unknownRequests, 'Unknown create allowed a duplicate submit')
+  const originalProject = document.querySelector('#project-id').value
+  changeText('#project-id', 'd7c6a845-cb0c-468c-9a18-1e9df0b20545')
+  changeText('#project-id', originalProject)
+  await until(() => document.body.textContent.includes('Creation is paused for this project'), 'project hold survives switching')
+  result('Unknown creation held without resubmit; cancelled terminal state; bounded polling/resume; Account A->B late submit, project switch, B->C MP4 URL revocation, C logout in-flight', true)
 }
 run().catch(error => result(error?.stack || String(error), false))

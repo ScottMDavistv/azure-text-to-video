@@ -13,3 +13,11 @@ Revocation regressions use the HTTP entry point and real membership lookup with 
 Manual stale recovery now requires literal `True`, a canonical job UUID and an integer threshold of 1–10,080 minutes before storage access. The existing ETag update remains. A boolean confirmation is an operator attestation, not independent evidence that the worker stopped.
 
 The private review package contains the full requirements matrix, exact Git bundle and patch, test commands, results and limitations. Hosted acceptance, production admin/MFA policy, Entra invitations, private storage routing and permissions, registry delivery, spend approval and cleanup remain separate gates. No mocked identity or browser fixture establishes real tenant, Azure or hosted behavior.
+
+## Second offline pass
+
+Worker claims, state transitions and manual stale recovery now refuse missing, blank, padded or wildcard concurrency ETags before writing. A specific observed storage version remains mandatory; this does not introduce automatic recovery or establish live distributed correctness.
+
+The studio recognizes the existing administrative `cancelled` status as terminal, stops polling it, and offers no queue/video actions for that job. No new cancellation authority or endpoint is introduced.
+
+Creation has no existing server idempotency key or member lookup route for a lost server-generated job ID. After a dispatched create has an unknown outcome (including timeout, transport failure, malformed response or server unavailability), the client marks that project uncertain and blocks another creation in the current mounted session. An explicit refusal before creation is treated separately. The last confirmed job is retained and clearly distinguished from the uncertain request. The hold survives project switching within that session, including aborting a dispatched request during a switch. The owner is directed to authorized operator reconciliation, not to blindly retry or label the job failed. This safeguard is in memory only: reload, logout, another tab or another device are not protected by server-side deduplication. Durable recovery/idempotency requires a separately reviewed server contract and concurrent/ambiguous-commit tests; no broad persistence was added here.

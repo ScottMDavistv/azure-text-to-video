@@ -20,6 +20,8 @@ function displayError(error: unknown): string {
 
 export default function SecureStudio({ accountIdentity }: { accountIdentity: string | null }) {
   const [projectId, setProjectId] = useState(initialProject)
+  const [uncertainProjects, setUncertainProjects] = useState<ReadonlySet<string>>(() => new Set())
+  const creationUncertain = uncertainProjects.has(projectId.toLowerCase())
   const [prompt, setPrompt] = useState('')
   const [job, setJob] = useState<VideoJob | null>(null)
   const [selectedScene, setSelectedScene] = useState(0)
@@ -150,7 +152,7 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
 
   async function create(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (inFlight.current) return
+    if (inFlight.current || creationUncertain) return
     const promptError = validatePrompt(prompt)
     if (promptError) { setError(promptError); return }
     try {
@@ -163,7 +165,6 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
     setError(null)
     setPollError(null)
     setQueueError(null)
-    setJob(null)
     setVideoUrl(null)
     try {
       const created = await api.submit(project, prompt, task.controller.signal)
@@ -171,12 +172,17 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
       setJob(created)
       await queueJob(project, created.job_id, task)
     } catch (cause) {
+      if (cause instanceof Error && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) {
+        // Keep the original project's hold even if the owner changed projects
+        // while the dispatched request was being aborted.
+        setUncertainProjects(previous => new Set([...previous, project.toLowerCase()]))
+      }
       if (task.current()) setError(displayError(cause))
     } finally {
       if (task.current()) { setBusy(false); inFlight.current = null }
     }
   }
-  const canRetryQueue = job?.status === 'created' || (job?.status === 'queued' && queueError !== null)
+  const canRetryQueue = !creationUncertain && (job?.status === 'created' || (job?.status === 'queued' && queueError !== null))
   async function queueAgain() {
     if (inFlight.current || !job || !canRetryQueue) return
     const project = projectId
@@ -219,12 +225,14 @@ export default function SecureStudio({ accountIdentity }: { accountIdentity: str
           <input className="project-input" id="project-id" value={projectId} onChange={e => { invalidate(); setProjectId(e.target.value); setJob(null); setVideoUrl(null); setBusy(false); setError(null); setPollError(null); setQueueError(null) }} placeholder="Project UUID" />
           <label htmlFor="secure-video-prompt" className="eyebrow">Video prompt</label>
           <textarea id="secure-video-prompt" aria-describedby="secure-prompt-limit" maxLength={2000} value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="Describe your video..." />
-          <div className="actions"><span id="secure-prompt-limit" className="muted">{prompt.length}/2,000 characters</span><button className="primary" type="submit" disabled={!accountIdentity || busy}>{busy ? 'Working…' : 'Submit authenticated job'}</button></div>
+          <div className="actions"><span id="secure-prompt-limit" className="muted">{prompt.length}/2,000 characters</span><button className="primary" type="submit" disabled={!accountIdentity || busy || creationUncertain}>{busy ? 'Working…' : creationUncertain ? 'Creation outcome unknown' : 'Submit authenticated job'}</button></div>
         </form>
+        {creationUncertain ? <p role="alert">Creation is paused for this project in this session. No confirmed ID was returned for the uncertain request. An authorized operator must reconcile it before a replacement is submitted. Changing projects or reloading does not resolve the server outcome.</p> : null}
         {error ? <p id="secure-request-error" ref={errorSummary} tabIndex={-1} role="alert" className="field-error">{error}</p> : null}
       </section>
       <section className="panel" aria-labelledby="secure-job-heading">
-        <h2 id="secure-job-heading">Live job status</h2>
+        <h2 id="secure-job-heading">Last confirmed job status</h2>
+        {creationUncertain ? <p className="muted">Any job shown below is the last confirmed job, not the uncertain creation request.</p> : null}
         {job ? <>
           <p><strong>{job.job_id}</strong></p>
           <p role="status">Status: <strong>{job.status}</strong></p>

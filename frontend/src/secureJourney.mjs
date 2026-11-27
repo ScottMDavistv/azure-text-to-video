@@ -44,12 +44,13 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch, r
     }
     origin = url.origin
   }
-  async function requestUnbounded(path, { method = 'GET', body, signal, video = false } = {}) {
+  async function requestUnbounded(path, { method = 'GET', body, signal, video = false, onDispatch } = {}) {
     const token = await tokenProvider()
     if (typeof token !== 'string' || !token.trim()) {
       throw new VideoApiError(401, 'Microsoft API permission is required.')
     }
     if (signal?.aborted) throw new DOMException('Request aborted', 'AbortError')
+    onDispatch?.()
     const response = await fetcher(origin + path, {
       method, signal, credentials: 'omit', redirect: 'error',
       cache: 'no-store',
@@ -145,9 +146,25 @@ export function createVideoApi({ baseUrl = '', tokenProvider, fetcher = fetch, r
     async submit(projectId, prompt, signal) {
       if (typeof prompt !== 'string' || prompt.trim().length < 1 ||
           prompt.trim().length > 2000) throw new VideoApiError(422, 'Enter 1–2,000 characters.')
-      return validateJob(await request(path(projectId), {
-        method: 'POST', body: { prompt: prompt.trim() }, signal,
-      }))
+      // A lost/malformed successful response can hide a committed server-generated
+      // ID. There is no idempotent create/recovery endpoint to safely resubmit.
+      let dispatched = false
+      try {
+        return validateJob(await request(path(projectId), {
+          method: 'POST', body: { prompt: prompt.trim() }, signal,
+          onDispatch: () => { dispatched = true },
+        }))
+      } catch (error) {
+        const refused = error instanceof VideoApiError &&
+          [400, 401, 403, 404, 413, 422].includes(error.status)
+        if (dispatched && !refused) {
+          const unknown = new VideoApiError(error instanceof VideoApiError ? error.status : 0,
+            'Creation outcome unknown. A job may have been saved, but no confirmed job ID was received. Do not submit again or reload to retry. Ask an authorized operator to reconcile this project before creating a replacement.')
+          unknown.outcomeUnknown = true
+          throw unknown
+        }
+        throw error
+      }
     },
     async queue(projectId, jobId, signal) {
       const result = await request(path(projectId, jobId) + '/queue', { method: 'POST', signal })
