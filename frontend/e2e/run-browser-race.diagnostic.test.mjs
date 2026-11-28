@@ -10,13 +10,29 @@ const harness=readFileSync(root+'/frontend/e2e/sessionRaceHarness.mjs','utf8')
 const runner=readFileSync(root+'/frontend/e2e/run-browser-race.mjs','utf8').replace(/^import .*\n/gm,'')
 const codes=[...harness.matchAll(/checkpoint = '(C42_[A-Z_]+)'/g)].map(x=>x[1])
 const marker=(code,result='FAIL',text=result+': SECRET_SENTINEL')=>({tagName:'PRE',dataset:{result,...(code===undefined?{}:{checkpoint:code})},textContent:text})
-async function execute(markers,mode='normal',cleanupFailures=[]) {
+async function execute(markers,mode='normal',cleanupFailures=[],rmOutcomes=[]) {
  const boom=()=>{throw new Error('SECRET_SENTINEL')}
  const breakCleanup=name=>{if(cleanupFailures.includes(name))boom()}
  const browser=new EventEmitter(); browser.exitCode=null;browser.signalCode=null
  const output=new EventEmitter();output.setEncoding=()=>{};output.destroy=()=>{breakCleanup('pipes-output')}
  const input=new EventEmitter();input.destroy=()=>{breakCleanup('pipes')}
  const logs=[],errors=[];let cleaned=0,closed=0,evals=0
+ // Models Node's documented retry contract only; no real filesystem retries.
+ const rmAttempts=[];const retryWaits=[]
+ const fakeRm=async(path,options)=>{
+  cleaned++
+  assert.equal(path,'/synthetic/profile')
+  assert.equal(JSON.stringify(options),JSON.stringify({recursive:true,force:true,maxRetries:3,retryDelay:100}))
+  breakCleanup('profile')
+  for(let attempt=0;;attempt++){
+   rmAttempts.push(attempt)
+   const error=rmOutcomes[attempt]
+   if(!error)return
+   const code=Object.getOwnPropertyDescriptor(error,'code')?.value
+   if(['EBUSY','EMFILE','ENFILE','ENOTEMPTY','EPERM'].includes(code)&&attempt<options.maxRetries){retryWaits.push((attempt+1)*options.retryDelay);continue}
+   throw error
+  }
+ }
  const document={querySelectorAll:()=>markers}
  input.write=frame=>{
   if(mode==='timeout')return
@@ -50,13 +66,13 @@ async function execute(markers,mode='normal',cleanupFailures=[]) {
  }
  browser.stdio=[null,null,null,input,output]
  browser.kill=()=>{breakCleanup('terminate');browser.signalCode='SIGKILL';browser.emit('exit');if(!cleanupFailures.includes('close'))browser.emit('close')}
- const context={process:{env:{},exitCode:undefined,cwd:()=>root+'/frontend'},createServer:async()=>({listen:async()=>{if(mode==='listen')boom()},httpServer:{address:()=>({address:mode==='loopback'?'0.0.0.0':'127.0.0.1',port:34567})},close:async()=>{closed++;breakCleanup('server')}}),react:()=>{},resolve,join:(...x)=>x.join('/'),tmpdir:()=>'/synthetic',mkdtemp:async()=>{if(mode==='setup')boom();return '/synthetic/profile'},rm:async()=>{cleaned++;breakCleanup('profile')},spawn:()=>{if(mode==='spawn')boom();return browser},sleep:(ms,value,options)=>sleep(ms===5000&&cleanupFailures.includes('close')?1:ms,value,options),setTimeout:(fn,ms)=>setTimeout(fn,mode==='timeout'?1:ms),clearTimeout,AbortController,URL,console:{log:x=>logs.push(x),error:x=>errors.push(x)}}
+ const context={process:{env:{},exitCode:undefined,cwd:()=>root+'/frontend'},createServer:async()=>({listen:async()=>{if(mode==='listen')boom()},httpServer:{address:()=>({address:mode==='loopback'?'0.0.0.0':'127.0.0.1',port:34567})},close:async()=>{closed++;breakCleanup('server')}}),react:()=>{},resolve,join:(...x)=>x.join('/'),tmpdir:()=>'/synthetic',mkdtemp:async()=>{if(mode==='setup')boom();return '/synthetic/profile'},rm:fakeRm,spawn:()=>{if(mode==='spawn')boom();return browser},sleep:(ms,value,options)=>sleep(ms===5000&&cleanupFailures.includes('close')?1:ms,value,options),setTimeout:(fn,ms)=>setTimeout(fn,mode==='timeout'?1:ms),clearTimeout,AbortController,URL,console:{log:x=>logs.push(x),error:x=>errors.push(x)}}
  await vm.runInNewContext('(async()=>{'+runner+'})()',context)
  assert.equal(cleaned,mode==='setup'?0:1);assert.equal(closed,mode==='setup'?0:1)
  assert.ok(![...logs,...errors].join('').includes('SECRET_SENTINEL'))
  const diagnostics=errors.slice(1)
- for(const code of diagnostics)assert.match(code,/^C42_(STAGE_(SETUP|LISTEN|LOOPBACK|SPAWN|EARLY_EXIT|PIPE|FRAME_LIMIT|FRAME_PARSE|CDP_COMMAND|INTERCEPTION|EGRESS|NAVIGATION|EVALUATION|MARKER|TIMEOUT|FIXTURE_FAIL|CLEANUP|UNKNOWN)|FIXTURE_(NOT_OBSERVED|PENDING|PASS|FAIL|INVALID)|CLEANUP_(TERMINATE|PIPES|CLOSE|SERVER|PROFILE)_(NOT_REQUIRED|OK|FAILED|NOT_COMPLETED))$/)
- return {logs,errors:errors.slice(0,1),diagnostics,exit:context.process.exitCode}
+ for(const code of diagnostics)assert.match(code,/^C42_(STAGE_(SETUP|LISTEN|LOOPBACK|SPAWN|EARLY_EXIT|PIPE|FRAME_LIMIT|FRAME_PARSE|CDP_COMMAND|INTERCEPTION|EGRESS|NAVIGATION|EVALUATION|MARKER|TIMEOUT|FIXTURE_FAIL|CLEANUP|UNKNOWN)|PROFILE_ERROR_(EBUSY|EMFILE|ENFILE|ENOTEMPTY|EPERM|EACCES|EROFS|EIO|UNKNOWN)|FIXTURE_(NOT_OBSERVED|PENDING|PASS|FAIL|INVALID)|CLEANUP_(TERMINATE|PIPES|CLOSE|SERVER|PROFILE)_(NOT_REQUIRED|OK|FAILED|NOT_COMPLETED))$/)
+ return {logs,errors:errors.slice(0,1),diagnostics,exit:context.process.exitCode,rmAttempts,retryWaits}
 }
 for(const code of codes) test('known '+code,async()=>{
  const r=await execute([marker(code)]);assert.deepEqual(r.errors,[code]);assert.equal(r.logs.length,0);assert.equal(r.exit,1)
@@ -120,4 +136,33 @@ test('unclassified unexpected shape uses fixed unknown without invented observat
  const r=await execute([],'malformed-result')
  assert.equal(r.exit,1);assert.equal(r.logs.length,0)
  assert.equal(r.diagnostics[0],'C42_STAGE_UNKNOWN');assert.equal(r.diagnostics[1],'C42_FIXTURE_NOT_OBSERVED')
+})
+
+const removalError=code=>Object.assign(new Error('SECRET_SENTINEL'),{code,path:'SECRET_SENTINEL',syscall:'SECRET_SENTINEL'})
+for(const code of ['EBUSY','EMFILE','ENFILE','ENOTEMPTY','EPERM'])for(const verdict of ['PASS','FAIL']){
+ test('stubbed transient removal '+code+' fixture '+verdict,async()=>{
+  const r=await execute([marker('C42_FOCUS',verdict)],'normal',[],[removalError(code),removalError(code),removalError(code)])
+  assert.equal(r.rmAttempts.length,4);assert.deepEqual(r.retryWaits,[100,200,300])
+  assert.equal(r.exit,verdict==='PASS'?undefined:1)
+  if(verdict==='PASS')assert.equal(r.logs.length,1)
+  else {assert.equal(r.logs.length,0);assert.equal(r.errors[0],'C42_FOCUS');assert.equal(r.diagnostics[0],'C42_STAGE_FIXTURE_FAIL')}
+  assert.ok(!r.diagnostics.some(x=>x.startsWith('C42_PROFILE_ERROR_')))
+ })
+ test('stubbed exhausted removal '+code+' fixture '+verdict,async()=>{
+  const r=await execute([marker('C42_FOCUS',verdict)],'normal',[],Array(4).fill(removalError(code)))
+  assert.equal(r.rmAttempts.length,4);assert.deepEqual(r.retryWaits,[100,200,300]);assert.equal(r.exit,1);assert.equal(r.logs.length,0)
+  assert.equal(r.diagnostics[0],'C42_STAGE_'+(verdict==='PASS'?'CLEANUP':'FIXTURE_FAIL'))
+  assert.ok(r.diagnostics.includes('C42_PROFILE_ERROR_'+code))
+ })
+}
+for(const code of ['EACCES','EROFS','EIO',undefined,'SECRET_SENTINEL','EPERM\nSECRET_SENTINEL',17,{}])for(const verdict of ['PASS','FAIL'])test('stubbed nonretryable removal '+String(code)+' fixture '+verdict,async()=>{
+ const r=await execute([marker('C42_FOCUS',verdict)],'normal',[],[removalError(code)])
+ assert.equal(r.rmAttempts.length,1);assert.deepEqual(r.retryWaits,[]);assert.equal(r.exit,1);assert.equal(r.logs.length,0)
+ assert.equal(r.diagnostics[0],'C42_STAGE_'+(verdict==='PASS'?'CLEANUP':'FIXTURE_FAIL'))
+ assert.ok(r.diagnostics.includes('C42_PROFILE_ERROR_'+(['EACCES','EROFS','EIO'].includes(code)?code:'UNKNOWN')))
+})
+test('error accessor is not read or printed',async()=>{
+ const error=Object.defineProperty(new Error('SECRET_SENTINEL'),'code',{get(){throw new Error('SECRET_SENTINEL')}})
+ const r=await execute([marker(undefined,'PASS')],'normal',[],[error])
+ assert.equal(r.exit,1);assert.equal(r.logs.length,0);assert.ok(r.diagnostics.includes('C42_PROFILE_ERROR_UNKNOWN'))
 })

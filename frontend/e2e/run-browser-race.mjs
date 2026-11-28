@@ -23,6 +23,13 @@ const server = await createServer({
 // Diagnostics begin only after Vite initialization. Never serialize caught values.
 let primaryStage = null
 let fixtureState = 'NOT_OBSERVED'
+let profileErrorCode = 'UNKNOWN'
+function classifyProfileError(error) {
+  try {
+    const code = Object.getOwnPropertyDescriptor(error, 'code')?.value
+    return ['EBUSY', 'EMFILE', 'ENFILE', 'ENOTEMPTY', 'EPERM', 'EACCES', 'EROFS', 'EIO'].includes(code) ? code : 'UNKNOWN'
+  } catch { return 'UNKNOWN' }
+}
 const cleanup = { terminate: 'NOT_COMPLETED', pipes: 'NOT_COMPLETED', close: 'NOT_COMPLETED', server: 'NOT_COMPLETED', profile: 'NOT_COMPLETED' }
 const stages = new Set(['SETUP', 'LISTEN', 'LOOPBACK', 'SPAWN', 'EARLY_EXIT', 'PIPE', 'FRAME_LIMIT', 'FRAME_PARSE', 'CDP_COMMAND', 'INTERCEPTION', 'EGRESS', 'NAVIGATION', 'EVALUATION', 'MARKER', 'TIMEOUT', 'FIXTURE_FAIL', 'CLEANUP', 'UNKNOWN'])
 function recordFailure(stage) {
@@ -41,6 +48,7 @@ function cleanupSync(name, action) {
 }
 async function cleanupAsync(name, action) {
   try { await action(); cleanup[name] = 'OK' } catch (error) {
+    if (name === 'profile') profileErrorCode = classifyProfileError(error)
     cleanup[name] = 'FAILED'; recordFailure('CLEANUP'); throw error
   }
 }
@@ -203,7 +211,7 @@ try {
       }
     } else { cleanup.pipes = cleanup.close = 'NOT_REQUIRED' }
   } finally {
-    try { await cleanupAsync('server', () => server.close()) } finally { await cleanupAsync('profile', () => rm(profile, {recursive:true,force:true})) }
+    try { await cleanupAsync('server', () => server.close()) } finally { await cleanupAsync('profile', () => rm(profile, {recursive:true,force:true,maxRetries:3,retryDelay:100})) }
   }
 }
 }
@@ -219,5 +227,6 @@ try {
   for (const name of ['terminate', 'pipes', 'close', 'server', 'profile']) {
     console.error('C42_CLEANUP_' + name.toUpperCase() + '_' + cleanup[name])
   }
+  if (cleanup.profile === 'FAILED') console.error('C42_PROFILE_ERROR_' + profileErrorCode)
   process.exitCode = 1
 }
