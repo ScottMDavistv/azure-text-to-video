@@ -1,5 +1,8 @@
 // Executes inside a real headless Chromium page against the React UI.
 // All authentication and API responses are in-memory mocks; no Azure or Entra.
+// Fixed phase codes only: never serialize the caught error or page content.
+const checkpointCodes = new Set(['C42_MOUNT', 'C42_FOCUS', 'C42_ACCOUNT_SWITCH', 'C42_PROJECT_SWITCH', 'C42_PRIVATE_MEDIA', 'C42_LOGOUT', 'C42_POLL_PAUSE', 'C42_POLL_RESUME', 'C42_CANCELLED', 'C42_CREATE_HOLD', 'C42_CREATE_RECOVERY', 'C42_QUEUE_RECOVERY', 'C42_QUEUE_FAILURE', 'C42_DENIED_RECOVERY', 'C42_FINAL_ACCOUNT'])
+let checkpoint = 'C42_UNKNOWN'
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const assert = (condition, message) => { if (!condition) throw new Error(message) }
 async function until(test, label, timeout = 6000) {
@@ -24,23 +27,28 @@ function changeText(selector, value) {
   Object.getOwnPropertyDescriptor(proto, 'value').set.call(input, value)
   input.dispatchEvent(new Event('input', {bubbles:true}))
 }
-function result(text, ok) {
+function result(ok) {
   const pre = document.createElement('pre')
   pre.id = 'race-result'
   pre.dataset.result = ok ? 'PASS' : 'FAIL'
-  pre.textContent = (ok ? 'PASS: ' : 'FAIL: ') + text
+  const code = checkpointCodes.has(checkpoint) ? checkpoint : 'C42_UNKNOWN'
+  if (!ok) pre.dataset.checkpoint = code
+  pre.textContent = ok ? 'PASS: ' + 'Explicit immutable same-ID recovery and one known-ID queue; denied retry held; unknown creation held without resubmit; cancelled terminal state; bounded polling/resume; Account A->B late submit, project switch, B->C MP4 URL revocation, C logout in-flight' : 'FAIL: ' + code
   document.body.append(pre)
 }
 async function run() {
+  checkpoint = 'C42_MOUNT'
   await until(() => document.querySelector('.auth-tools'), 'App mounted')
   click('Sign in with Microsoft')
   await until(() => document.body.textContent.includes('Signed in: Account A'), 'Account A signed in')
   await until(() => document.querySelector('#secure-video-prompt'), 'SecureStudio mounted')
+  checkpoint = 'C42_FOCUS'
   // Keyboard users receive a focusable error summary and associated prompt limit.
   document.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
   await until(() => document.activeElement?.id === 'secure-request-error', 'validation error focus')
   assert(document.querySelector('#secure-video-prompt').getAttribute('aria-describedby') === 'secure-prompt-limit', 'Prompt limit association absent')
   changeText('#secure-video-prompt', 'offline browser test')
+  checkpoint = 'C42_ACCOUNT_SWITCH'
   // Two submit events before React updates disabled state must yield one mutation.
   const form = document.querySelector('form')
   form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
@@ -54,6 +62,7 @@ async function run() {
   assert(document.body.textContent.includes('No authorized job in this session.'), 'A job leaked into B session')
   assert(!document.querySelector('video'), 'A video remained after switching to B')
 
+  checkpoint = 'C42_PROJECT_SWITCH'
   // An in-flight project-A submission must not survive a project-ID edit.
   changeText('#secure-video-prompt', 'offline browser test')
   click('Submit authenticated job')
@@ -65,6 +74,7 @@ async function run() {
   await until(() => document.body.textContent.includes('Creation is paused for this project'), 'aborted dispatched create remains uncertain')
   changeText('#project-id', 'b7c6a845-cb0c-468c-9a18-1e9df0b20545')
 
+  checkpoint = 'C42_PRIVATE_MEDIA'
   window.__raceMode = 'immediate'
   changeText('#secure-video-prompt', 'offline browser test')
   click('Submit authenticated job')
@@ -79,6 +89,7 @@ async function run() {
   assert(window.__raceRevoked.includes(oldUrl), 'Old Blob URL not revoked on account change')
   assert(document.body.textContent.includes('No authorized job in this session.'), 'B job leaked into C session')
 
+  checkpoint = 'C42_LOGOUT'
   window.__raceMode = 'held'
   changeText('#secure-video-prompt', 'offline browser test')
   click('Submit authenticated job')
@@ -89,6 +100,7 @@ async function run() {
   assert(document.body.textContent.includes('No authorized job in this session.'), 'Job remained after logout')
   assert(window.__raceRequests.every(r => r.auth?.startsWith('Bearer offline-mocked-')),
     'Unexpected API credential or missing bearer token')
+  checkpoint = 'C42_POLL_PAUSE'
   // Three failed reads pause automatic work, retaining the job. Resuming only reads.
   window.__raceMode = 'poll-failure'
   click('Sign in with Microsoft')
@@ -102,9 +114,11 @@ async function run() {
   assert(window.__raceRequests.length === pausedRequests, 'Polling continued after pause')
   assert(document.body.textContent.includes('Status: queued'), 'Failed observation invented job failure')
   window.__raceMode = 'immediate'
+  checkpoint = 'C42_POLL_RESUME'
   click('Resume status checks')
   await until(() => document.body.textContent.includes('Status: completed'), 'explicit status resume')
   assert(window.__raceRequests.filter(r => r.method === 'POST').length === mutations, 'Status resume retried a mutation')
+  checkpoint = 'C42_CANCELLED'
   window.__raceMode = 'cancelled'
   click('Submit authenticated job')
   await until(() => document.body.textContent.includes('Status: cancelled'), 'cancelled job visible')
@@ -114,6 +128,7 @@ async function run() {
   const cancellationRequests = window.__raceRequests.length
   await sleep(3200)
   assert(window.__raceRequests.length === cancellationRequests, 'Cancelled job continued polling')
+  checkpoint = 'C42_CREATE_HOLD'
   window.__raceMode = 'create-uncertain'
   changeText('#secure-video-prompt', 'Preserved uncertain prompt')
   click('Submit authenticated job')
@@ -133,6 +148,7 @@ async function run() {
   await until(() => !document.body.textContent.includes('Creation is paused for this project'), 'no pending state in another project')
   changeText('#project-id', originalProject)
   await until(() => document.body.textContent.includes('Creation is paused for this project'), 'project hold survives switching')
+  checkpoint = 'C42_CREATE_RECOVERY'
   changeText('#secure-video-prompt', 'Edited draft must not replace original')
   window.__raceMode = 'create-recover'
   const queueCount = window.__raceQueueTargets.length
@@ -145,6 +161,7 @@ async function run() {
   assert(attempts.length === 2 && attempts.every(r => JSON.parse(r.body).prompt === stored.prompt && r.url === stored.project_path && r.auth === attempts[0].auth), 'Retry changed operation, project or submitted prompt')
   assert(document.body.textContent.includes(stored.job_id), 'Recovered ID not shown')
   assert(window.__raceQueueTargets.length === queueCount, 'Recovery auto-queued')
+  checkpoint = 'C42_QUEUE_RECOVERY'
   const queueButton = [...document.querySelectorAll('button')].find(b => b.textContent === 'Retry synthetic queue')
   queueButton.click(); queueButton.click()
   await until(() => document.body.textContent.includes('Status: queued'), 'explicit recovered-ID queue')
@@ -155,6 +172,7 @@ async function run() {
   assert(!document.body.textContent.includes('Creation is paused for this project'), 'Old pending state carried into another account')
   assert(!document.body.textContent.includes('Status: cancelled'), 'Old confirmed job carried into another account')
   // Known-ID queue failure is distinct: retain that confirmed job and its prompt.
+  checkpoint = 'C42_QUEUE_FAILURE'
   window.__raceMode = 'queue-failure'
   changeText('#secure-video-prompt', 'Known job queue failure')
   click('Submit authenticated job')
@@ -162,6 +180,7 @@ async function run() {
   assert(document.body.textContent.includes(window.__raceUuid), 'Known job ID lost on queue failure')
   assert(!document.body.textContent.includes('Creation is paused for this project'), 'Queue failure misclassified as unknown creation')
   assert(document.querySelector('#secure-video-prompt').value === 'Known job queue failure', 'Known job prompt lost')
+  checkpoint = 'C42_DENIED_RECOVERY'
   window.__raceMode = 'create-uncertain-fast'
   click('Submit authenticated job')
   await until(() => document.body.textContent.includes('Creation is paused for this project'), 'negative recovery fixture')
@@ -175,10 +194,11 @@ async function run() {
   deniedRetry.click()
   await sleep(100)
   assert(window.__raceRequests.length === deniedCalls, 'Denial auto-reposted')
+  checkpoint = 'C42_FINAL_ACCOUNT'
   window.__raceAccount = {homeAccountId:'account-E', name:'Account E', username:'e@example.test'}
   await until(() => document.body.textContent.includes('Signed in: Account E'), 'account switch after denied recovery')
   assert(!document.body.textContent.includes('Creation is paused for this project'), 'Pending recovery crossed accounts')
   assert(![...document.querySelectorAll('button')].some(b => b.textContent === 'Retry original creation once'), 'Prior account recovery action remained')
-  result('Explicit immutable same-ID recovery and one known-ID queue; denied retry held; unknown creation held without resubmit; cancelled terminal state; bounded polling/resume; Account A->B late submit, project switch, B->C MP4 URL revocation, C logout in-flight', true)
+  result(true)
 }
-run().catch(error => result(error?.stack || String(error), false))
+run().catch(() => result(false))

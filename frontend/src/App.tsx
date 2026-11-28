@@ -94,8 +94,10 @@ export default function App() {
     setAccountIdentity(null)
     setAccountName(null)
     setBusy(true)
-    try { await signOut() }
-    catch { setAuthMessage('Microsoft sign-out failed. Session content cleared.') }
+    try {
+      await signOut()
+      setAuthMessage('Signed out locally. Microsoft SSO session may remain active.')
+    } catch { setAuthMessage('Microsoft sign-out failed. Session content cleared.') }
     finally { authTransition.current = false; setBusy(false) }
   }
   function submitDemo(event: React.FormEvent<HTMLFormElement>) {

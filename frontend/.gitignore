@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Playwright may contain sensitive authentication evidence
+/test-results/
+/playwright-report/
+/blob-report/

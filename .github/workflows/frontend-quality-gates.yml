@@ -49,6 +49,28 @@ jobs:
             echo 'No frontend test script found; add npm test before merging frontend feature work.'
             exit 1
           fi
+      - name: Run exact-head offline C1 browser regressions and security mutations
+        working-directory: frontend
+        timeout-minutes: 15
+        env:
+          C1_LIVE: '0'
+          C1_UNCONFIGURED: '0'
+          C1_MUTATION_MODE: '0'
+          C1_PR_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # The PR head is tested directly; avoid validating only a synthetic merge commit.
+          # Read-only checkout, zero secrets, zero Entra/Azure/FAL requests.
+          git checkout --detach "$C1_PR_HEAD"
+          npm install --no-save --ignore-scripts --no-audit --no-fund @playwright/test@1.65.1
+          # Fail if the extra install drifted any locked dependency (PR #71 review F-1).
+          node e2e/c1-lockfile-check.mjs
+          npx playwright install chromium
+          npx playwright test --config=playwright.config.mjs --workers=1
+          C1_UNCONFIGURED=1 npx playwright test --config=playwright.config.mjs --workers=1
+          node e2e/c1-mutation-check.mjs
+          node e2e/run-browser-mutations.mjs
+          node e2e/c1-lockfile-check.mjs
+          git checkout --detach "$GITHUB_SHA"
       - name: Lint frontend
         working-directory: frontend
         run: npm run lint
